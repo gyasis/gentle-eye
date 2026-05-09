@@ -1,0 +1,26 @@
+pub struct CaptureStreamFrameOutput {
+    /// Absolute path to the saved PNG file.
+    /// Pass this to `analyze_media` for AI analysis.
+    pub file_path: String,
+    /// Width of the captured frame in pixels.
+    pub width: u32,
+    /// Height of the captured frame in pixels.
+    pub height: u32,
+    /// Size of the PNG file in bytes.
+    pub file_size_bytes: u64,
+    /// The stream URL that was used for capture.
+    pub stream_url: String,
+    /// ISO 8601 timestamp of when the frame was captured.
+    pub captured_at: String,
+    /// Human-readable confirmation message.
+    pub message: String,
+// ============================================================================
+// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_start_recording_input_defaults() {
+        let json = r#"{}"#;
+        let input: StartRecordingInput = serde_json::from_str(json).unwrap();
+        assert!(input.fps.is_none());

@@ -1,0 +1,49 @@
+impl ScreenCapturer {
+    /// Create a new screen capturer for a specific display.
+    /// # Arguments
+    /// * `output_dir` - Directory to save captured frames
+    /// * `display` - The display to capture from
+    /// * `region` - Optional region within the display (None = full display)
+    /// # Returns
+    /// * `Result<Self, CaptureError>` - New capturer or error
+    pub fn new(
+        output_dir: PathBuf,
+        display: Display,
+        region: Option<CaptureRegion>,
+    ) -> Result<Self, CaptureError> {
+        let width = display.width();
+        let height = display.height();
+        // Create capturer for the provided display
+        let capturer = Capturer::new(display).map_err(|e| {
+            CaptureError::InitializationFailed(format!("Failed to create capturer: {}", e))
+        })?;
+        // Ensure output directory exists
+        std::fs::create_dir_all(&output_dir).map_err(|e| {
+            CaptureError::InitializationFailed(format!(
+                "Failed to create output directory: {}",
+                e
+            ))
+        })?;
+        Ok(Self {
+            capturer,
+            output_dir,
+            frame_count: 0,
+            width,
+            height,
+            region,
+        })
+    /// Create a new screen capturer for the primary display.
+    /// This is a convenience method that captures from the primary display
+    /// without needing to use DisplayManager.
+    /// # Arguments
+    /// * `output_dir` - Directory to save captured frames
+    /// # Returns
+    /// * `Result<Self, CaptureError>` - New capturer or error
+    pub fn new_primary(output_dir: PathBuf) -> Result<Self, CaptureError> {
+        let display = Display::primary().map_err(|e| {
+            CaptureError::InitializationFailed(format!("Failed to get primary display: {}", e))
+        })?;
+        Self::new(output_dir, display, None)
+    /// Capture a single frame from the display
+    /// # Returns
+    /// * `Result<PathBuf, CaptureError>` - Path to saved PNG file
