@@ -1,5 +1,5 @@
 {
-  "_comment": "gentle-eye project-local tier ordering. Tuned 2026-05-26 per user: (a) handoff is SENIOR (tier 12, not 5) since we code well ourselves; (b) maximise LOCAL horsepower before paid — added local-coder-heavy + local-reasoning-heavy using the 50GB qwen3-coder-next and 70b deepseek-r1 you have pulled. Memory: Mac is 64GB unified; the heavy tiers exceed budget if all 3 roles loaded — atelier eviction is mandatory between role calls. claude-code-handoff marker dropped so it actually fires when reached.",
+  "_comment": "gentle-eye project-local tier ordering — CURATED 5-TIER LADDER (2026-05-28, user pick for the dayflow dogfood). Climb order: all-local → openai-artisan-local-critic → mixed-budget → mixed-mid → claude-code-handoff. Drops the redundant local-heavy variants (2,3), the gemini-lib tier (4, blocked anyway), the free groq/cerebras (5,6), the reasoning tier (10), and BOTH marker-gated frontier paid tiers (openai-heavy 11, openai-max 13). Net effect: local-first, then a short cheap-mixed escalation, then senior in-house handoff as the last mile — no frontier-paid spend reachable. Full 13-tier ladder preserved at ralph-tiers.full-13.bak.json. NOTE: this is the ma-loop FALLBACK ladder; in lite mode the in-session agent runs the [S] cargo-check checkpoints and only hands a stuck file to ma-loop.",
   "tiers": [
     {
       "_note": "TIER 1 — all-warm-local. ~56GB fits unified mem with TTS sidecars evicted. Default.",
@@ -13,61 +13,7 @@
       }
     },
     {
-      "_note": "TIER 2 NEW — biggest local coder. Artisan=50GB; atelier MUST evict before loading. Run artisan-turn alone, then unload before librarian/critic. Slow but $0.",
-      "name": "local-coder-heavy",
-      "mode": "full",
-      "maxIterations": 4,
-      "requires_atelier_evict": true,
-      "models": {
-        "artisan": "ollama/nishtahir/qwen3-coder-next:latest",
-        "librarian": "ollama/gemma3:27b",
-        "critic": "ollama/deepseek-r1:32b"
-      }
-    },
-    {
-      "_note": "TIER 3 NEW — strongest local reasoner as critic. Critic=70b; pair with the 30b artisan to fit in mem when librarian is unloaded.",
-      "name": "local-reasoning-heavy",
-      "mode": "full",
-      "maxIterations": 4,
-      "requires_atelier_evict": true,
-      "models": {
-        "artisan": "ollama/qwen3-coder:30b",
-        "librarian": "ollama/gemma3:27b",
-        "critic": "ollama/deepseek-r1:70b"
-      }
-    },
-    {
-      "_note": "PENDING — Ollama Cloud tiers (mid: qwen3-next:80b/gemma4:31b/devstral-2:123b · heavy: minimax-m2.7/kimi-k2.6/qwen3-vl:235b) blocked by dev-kid limitation: sentinel-health uses GLOBAL OLLAMA_HOST and ignores per-tier `env`, so cloud-prefixed `ollama/` models fail the Mac-LAN presence check. Wiring blocked until dev-kid supports per-tier endpoint override OR until we hack via openai/ prefix with OPENAI_API_BASE override. Key/availability documented at ~/.claude/rules/domains/ollama-cloud.md (R-OC5 template); finding logged to devkid_lightweight_mode PRD 2026-05-26.",
-      "name": "local-plus-gemini-lib",
-      "mode": "full",
-      "maxIterations": 5,
-      "models": {
-        "artisan": "ollama/qwen3-coder:30b",
-        "librarian": "google/gemini-2.5-flash",
-        "critic": "ollama/deepseek-r1:32b"
-      }
-    },
-    {
-      "name": "groq-fast-free",
-      "mode": "full",
-      "maxIterations": 5,
-      "models": {
-        "artisan": "groq/llama-3.3-70b-versatile",
-        "librarian": "groq/llama-3.1-8b-instant",
-        "critic": "groq/llama-3.3-70b-versatile"
-      }
-    },
-    {
-      "name": "cerebras-fast-free",
-      "mode": "full",
-      "maxIterations": 5,
-      "models": {
-        "artisan": "cerebras/llama-3.3-70b",
-        "librarian": "cerebras/llama-3.1-8b",
-        "critic": "cerebras/llama-3.3-70b"
-      }
-    },
-    {
+      "_note": "TIER 2 (was 7) — first paid escalation, cheap. OpenAI mini artisan, LOCAL critic keeps cost down.",
       "name": "openai-artisan-local-critic",
       "mode": "full",
       "maxIterations": 5,
@@ -78,6 +24,7 @@
       }
     },
     {
+      "_note": "TIER 3 (was 8) — budget mixed. gemini-2.5-pro critic for stronger review.",
       "name": "mixed-budget",
       "mode": "full",
       "maxIterations": 5,
@@ -88,6 +35,7 @@
       }
     },
     {
+      "_note": "TIER 4 (was 9) — mid mixed. gpt-4.1-mini artisan, more iters.",
       "name": "mixed-mid",
       "mode": "full",
       "maxIterations": 6,
@@ -98,28 +46,7 @@
       }
     },
     {
-      "name": "mixed-reasoning",
-      "mode": "full",
-      "maxIterations": 6,
-      "models": {
-        "artisan": "openai/o4-mini",
-        "librarian": "google/gemini-2.5-flash",
-        "critic": "openai/o4-mini"
-      }
-    },
-    {
-      "name": "openai-heavy",
-      "mode": "full",
-      "maxIterations": 5,
-      "requires_marker": "allow-heavy",
-      "models": {
-        "artisan": "openai/gpt-5-codex",
-        "librarian": "google/gemini-2.5-flash",
-        "critic": "openai/o4-mini"
-      }
-    },
-    {
-      "_note": "TIER 12 — senior in-house escalation. Marker dropped (was 'allow-handoff') so this fires automatically when reached. We code well; handoff is the right last-mile escalation.",
+      "_note": "TIER 5 (was 12) — senior in-house escalation, LAST MILE. Marker dropped so it fires automatically when reached. We code well; handoff is the right final escalation.",
       "name": "claude-code-handoff",
       "type": "handoff",
       "mode": "full",
@@ -129,18 +56,6 @@
         "artisan": "claude-code-session",
         "librarian": "claude-code-session",
         "critic": "claude-code-session"
-      }
-    },
-    {
-      "_note": "TIER 13 — cosmic last-resort. Still gated by `allow-max`.",
-      "name": "openai-max",
-      "mode": "full",
-      "maxIterations": 3,
-      "requires_marker": "allow-max",
-      "models": {
-        "artisan": "openai/gpt-5.2",
-        "librarian": "openai/gpt-5-chat",
-        "critic": "openai/o4-mini"
       }
     }
   ],
