@@ -1,0 +1,15 @@
+**Members:**
+- `video-capture` - Core library
+- `region-selector` - CLI binary
+- `region-selector-ui` - GUI binary
+**Shared Dependencies:**
+tokio (v1, full features)
+thiserror (v2.0)
+anyhow (v1.0)
+serde/serde_json (v1.0)
+chrono (v0.4, with serde support)
+tracing/tracing-subscriber (v0.1/0.3)
+toml (v0.8) - Configuration
+uuid (v1.0, v4 + serde)
+dirs (v5.0) - Cross-platform paths
+hostname (v0.4)

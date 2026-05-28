@@ -1,0 +1,1 @@
+/home/gyasis/.dev-kid/templates/.claude/hooks/user-prompt-submit.sh

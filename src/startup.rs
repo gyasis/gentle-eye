@@ -1,67 +1,99 @@
+//! Startup validation — environment/permission checks run before serving.
+//!
+//! Reconstructed 2026-05-28 (integration-aware, from the `bin` contract). The
+//! recovered file held only the `validate_startup` skeleton + the check names; the
+//! helper bodies and the result/error types were lost in session-log junk. The
+//! types + dispatch are reconstructed; the per-check helpers are STUBS that pass
+//! (real probes — FFmpeg presence, storage writability, env vars, capture perms —
+//! are a follow-up).
+use crate::config::AppConfig;
+use std::path::PathBuf;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum StartupError {
+    #[error("FFmpeg not found. Install with: {install_command}")]
+    FfmpegNotFound { install_command: String },
+    #[error("Storage directory not accessible: {path:?} ({reason})")]
+    StorageDirectoryNotAccessible { path: PathBuf, reason: String },
+    #[error("Storage directory not writable: {path:?}")]
+    StorageDirectoryNotWritable { path: PathBuf },
+    #[error("{0}")]
+    ScreenCapturePermissionDenied(String),
+    #[error("Environment variable {var_name} not set ({hint})")]
+    EnvVarMissing { var_name: String, hint: String },
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+}
+
+/// Result of a single startup check.
+pub struct CheckResult {
+    pub check_name: String,
+    pub passed: bool,
+    pub warning: Option<String>,
+    pub error: Option<StartupError>,
+}
+
+/// Aggregate of all startup checks.
+pub struct StartupValidation {
+    pub all_passed: bool,
+    pub warning_count: usize,
+    checks: Vec<CheckResult>,
+}
+
+impl StartupValidation {
+    pub fn from_checks(checks: Vec<CheckResult>) -> Self {
+        let all_passed = checks.iter().all(|c| c.passed);
+        let warning_count = checks.iter().filter(|c| c.warning.is_some()).count();
+        Self {
+            all_passed,
+            warning_count,
+            checks,
+        }
+    }
+
+    pub fn warnings(&self) -> Vec<&String> {
+        self.checks.iter().filter_map(|c| c.warning.as_ref()).collect()
+    }
+
+    pub fn errors(&self) -> Vec<&StartupError> {
+        self.checks.iter().filter_map(|c| c.error.as_ref()).collect()
+    }
+}
+
 pub fn validate_startup(config: &AppConfig) -> StartupValidation {
     let checks = vec![
-        // Check FFmpeg
         check_ffmpeg(),
-        // Check storage directory
         check_storage_directory(&config.storage.base_dir),
-        // Check environment variables
         check_environment_variables(&config.vision.provider),
-        // Check screen capture permissions (best-effort, platform-specific)
         check_screen_capture_permission(),
-    // Log results
-    for check in &checks {
-        if check.passed {
-            if let Some(ref warning) = check.warning {
-                warn!("{}: PASSED with warning: {}", check.check_name, warning);
-            } else {
-                info!("{}: PASSED", check.check_name);
-            }
-        } else if let Some(ref error) = check.error {
-            warn!("{}: FAILED - {}", check.check_name, error);
+    ];
     StartupValidation::from_checks(checks)
-</details></tool-use>
-_**Agent (claude-sonnet-4-6 2026-03-11 18:20:00Z)**_
-Now make both edits to `startup.rs`:
-_**Agent (claude-sonnet-4-6 2026-03-11 18:20:09Z)**_
-<tool-use data-tool-type="write" data-tool-name="Edit"><details>
-<summary>Tool use: **Edit**</summary>
-The file /home/gyasis/Documents/code/gentle-eye/src/startup.rs has been updated successfully.
-</details></tool-use>
-_**Agent (claude-sonnet-4-6 2026-03-11 18:23:25Z)**_
-<tool-use data-tool-type="write" data-tool-name="Edit"><details>
-<summary>Tool use: **Edit**</summary>
-The file /home/gyasis/Documents/code/gentle-eye/src/startup.rs has been updated successfully.
-</details></tool-use>
-_**Agent (claude-sonnet-4-6 2026-03-11 18:23:30Z)**_
-Now find where to insert the new function 
- just before the helper functions section:
-_**Agent (claude-sonnet-4-6 2026-03-11 18:23:32Z)**_
-<tool-use data-tool-type="search" data-tool-name="Grep"><details>
-<summary>Tool use: **Grep**</summary>
- path `/home/gyasis/Documents/code/gentle-eye/src/startup.rs` pattern `// ============================================================================\n// Helper Functions`
-579:// ============================================================================
-580:// Helper Functions
-</details></tool-use>
-_**Agent (claude-sonnet-4-6 2026-03-11 18:23:36Z)**_
-<tool-use data-tool-type="read" data-tool-name="Read"><details>
-<summary>Tool use: **Read**</summary>
- `/home/gyasis/Documents/code/gentle-eye/src/startup.rs`
-    info!("Screen capture test passed - permissions verified");
-    Ok(())
-// ============================================================================
-// Helper Functions
-// ============================================================================
-/// Parse FFmpeg version from output
-fn parse_ffmpeg_version(output: &str) -> String {
-</details></tool-use>
-_**Agent (claude-sonnet-4-6 2026-03-11 18:25:05Z)**_
-<tool-use data-tool-type="write" data-tool-name="Edit"><details>
-<summary>Tool use: **Edit**</summary>
-The file /home/gyasis/Documents/code/gentle-eye/src/startup.rs has been updated successfully.
-</details></tool-use>
-_**Agent (claude-sonnet-4-6 2026-03-11 18:25:09Z)**_
-Now update `gentle-eye.toml.example` to document the new fields:
-_**Agent (claude-sonnet-4-6 2026-03-11 18:25:09Z)**_
-<tool-use data-tool-type="read" data-tool-name="Read"><details>
-<summary>Tool use: **Read**</summary>
- `/home/gyasis/Documents/code/gentle-eye/gentle-eye.toml.example`
+}
+
+// --- per-check helpers (STUBS — pass; real probes are a follow-up) ---
+
+fn passing(name: &str) -> CheckResult {
+    CheckResult {
+        check_name: name.to_string(),
+        passed: true,
+        warning: None,
+        error: None,
+    }
+}
+
+fn check_ffmpeg() -> CheckResult {
+    passing("ffmpeg")
+}
+
+fn check_storage_directory(_base_dir: &std::path::Path) -> CheckResult {
+    passing("storage_directory")
+}
+
+fn check_environment_variables(_provider: &str) -> CheckResult {
+    passing("environment_variables")
+}
+
+fn check_screen_capture_permission() -> CheckResult {
+    passing("screen_capture_permission")
+}

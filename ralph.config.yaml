@@ -1,0 +1,4 @@
+models:
+  artisan:   { provider: ollama, model: codegemma:latest, baseUrl: http://192.168.0.159:11434 }
+  librarian: { provider: ollama, model: codegemma:latest, baseUrl: http://192.168.0.159:11434 }
+  critic:    { provider: ollama, model: codegemma:latest, baseUrl: http://192.168.0.159:11434 }

@@ -1,0 +1,1580 @@
+{
+  "execution_plan": {
+    "phase_id": "gentle-eye Hybrid Cascade rebuild",
+    "waves": [
+      {
+        "wave_id": 1,
+        "strategy": "PARALLEL_SWARM",
+        "rationale": "Wave 1: 3 independent task(s) with no file conflicts",
+        "tasks": [
+          {
+            "task_id": "T012",
+            "agent_role": "Developer",
+            "instruction": "T023: Author error enum (thiserror) from data-model affecting `src/contracts/errors.rs`",
+            "file_locks": [
+              "src/contracts/errors.rs"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": true,
+              "has_upstream_deps": false,
+              "upstream_dep_ids": [],
+              "wave_position": 1,
+              "can_test_now": true,
+              "test_hint": "isolated-unit"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T023: Author error enum (thiserror) from data-model affecting `src/contracts/errors.rs`' to [x]",
+            "dependencies": []
+          },
+          {
+            "task_id": "T013",
+            "agent_role": "Developer",
+            "instruction": "T062: Declare submodules + re-exports, clear E0765 junk affecting `src/analysis/mod.rs`",
+            "file_locks": [
+              "src/analysis/mod.rs"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": true,
+              "has_upstream_deps": false,
+              "upstream_dep_ids": [],
+              "wave_position": 1,
+              "can_test_now": true,
+              "test_hint": "isolated-unit"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T062: Declare submodules + re-exports, clear E0765 junk affecting `src/analysis/mod.rs`' to [x]",
+            "dependencies": []
+          },
+          {
+            "task_id": "T014",
+            "agent_role": "Developer",
+            "instruction": "T050: Declare submodules affecting `src/security/mod.rs`",
+            "file_locks": [
+              "src/security/mod.rs"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": true,
+              "has_upstream_deps": false,
+              "upstream_dep_ids": [],
+              "wave_position": 1,
+              "can_test_now": true,
+              "test_hint": "isolated-unit"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T050: Declare submodules affecting `src/security/mod.rs`' to [x]",
+            "dependencies": []
+          }
+        ],
+        "checkpoint_after": {
+          "enabled": true,
+          "verification_criteria": "Verify all Wave 1 tasks are marked [x] in tasks.md",
+          "git_agent": "git-version-manager",
+          "memory_bank_agent": "project-bank-keeper"
+        }
+      },
+      {
+        "wave_id": 2,
+        "strategy": "PARALLEL_SWARM",
+        "rationale": "Wave 2: 3 independent task(s) with no file conflicts",
+        "tasks": [
+          {
+            "task_id": "T015",
+            "agent_role": "Developer",
+            "instruction": "T024: Author storage trait affecting `src/contracts/storage.rs`",
+            "file_locks": [
+              "src/contracts/storage.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T012"
+              ],
+              "wave_position": 2,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T024: Author storage trait affecting `src/contracts/storage.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T012"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T015",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T015: verify implementations pass tests",
+            "file_locks": [
+              "src/contracts/storage.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T015: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T015"
+            ],
+            "parent_task_id": "T015"
+          },
+          {
+            "task_id": "T016",
+            "agent_role": "Developer",
+            "instruction": "T061: Author VisionProvider trait affecting `src/analysis/traits.rs`",
+            "file_locks": [
+              "src/analysis/traits.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T012"
+              ],
+              "wave_position": 2,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T061: Author VisionProvider trait affecting `src/analysis/traits.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T012"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T016",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T016: verify implementations pass tests",
+            "file_locks": [
+              "src/analysis/traits.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T016: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T016"
+            ],
+            "parent_task_id": "T016"
+          },
+          {
+            "task_id": "T017",
+            "agent_role": "Developer",
+            "instruction": "T060: Author analysis config (VisionConfig) affecting `src/analysis/config.rs`",
+            "file_locks": [
+              "src/analysis/config.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T012"
+              ],
+              "wave_position": 2,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T060: Author analysis config (VisionConfig) affecting `src/analysis/config.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T012"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T017",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T017: verify implementations pass tests",
+            "file_locks": [
+              "src/analysis/config.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T017: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T017"
+            ],
+            "parent_task_id": "T017"
+          }
+        ],
+        "checkpoint_after": {
+          "enabled": true,
+          "verification_criteria": "Verify all Wave 2 tasks are marked [x] in tasks.md",
+          "git_agent": "git-version-manager",
+          "memory_bank_agent": "project-bank-keeper"
+        }
+      },
+      {
+        "wave_id": 3,
+        "strategy": "PARALLEL_SWARM",
+        "rationale": "Wave 3: 3 independent task(s) with no file conflicts",
+        "tasks": [
+          {
+            "task_id": "T018",
+            "agent_role": "Developer",
+            "instruction": "T051: Author path validator affecting `src/security/path_validator.rs`",
+            "file_locks": [
+              "src/security/path_validator.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T017",
+                "T012",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 3,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T051: Author path validator affecting `src/security/path_validator.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T017",
+              "T012",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T018",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T018: verify implementations pass tests",
+            "file_locks": [
+              "src/security/path_validator.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T018: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T018"
+            ],
+            "parent_task_id": "T018"
+          },
+          {
+            "task_id": "T019",
+            "agent_role": "Developer",
+            "instruction": "T052: Author rate limiter affecting `src/security/rate_limiter.rs`",
+            "file_locks": [
+              "src/security/rate_limiter.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T017",
+                "T012",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 3,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T052: Author rate limiter affecting `src/security/rate_limiter.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T017",
+              "T012",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T019",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T019: verify implementations pass tests",
+            "file_locks": [
+              "src/security/rate_limiter.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T019: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T019"
+            ],
+            "parent_task_id": "T019"
+          },
+          {
+            "task_id": "T020",
+            "agent_role": "Developer",
+            "instruction": "T073: Author memory-pressure monitor affecting `src/capture/memory.rs`",
+            "file_locks": [
+              "src/capture/memory.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T017",
+                "T012",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 3,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T073: Author memory-pressure monitor affecting `src/capture/memory.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T017",
+              "T012",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T020",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T020: verify implementations pass tests",
+            "file_locks": [
+              "src/capture/memory.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T020: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T020"
+            ],
+            "parent_task_id": "T020"
+          }
+        ],
+        "checkpoint_after": {
+          "enabled": true,
+          "verification_criteria": "Verify all Wave 3 tasks are marked [x] in tasks.md",
+          "git_agent": "git-version-manager",
+          "memory_bank_agent": "project-bank-keeper"
+        }
+      },
+      {
+        "wave_id": 4,
+        "strategy": "PARALLEL_SWARM",
+        "rationale": "Wave 4: 5 independent task(s) with no file conflicts",
+        "tasks": [
+          {
+            "task_id": "T022",
+            "agent_role": "Developer",
+            "instruction": "T030: Author SQLite migration runner affecting `src/storage/database.rs`",
+            "file_locks": [
+              "src/storage/database.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T017",
+                "T012",
+                "T018",
+                "T019",
+                "T021",
+                "T020",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 4,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T030: Author SQLite migration runner affecting `src/storage/database.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T017",
+              "T012",
+              "T018",
+              "T019",
+              "T021",
+              "T020",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T022",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T022: verify implementations pass tests",
+            "file_locks": [
+              "src/storage/database.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T022: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T022"
+            ],
+            "parent_task_id": "T022"
+          },
+          {
+            "task_id": "T023",
+            "agent_role": "Developer",
+            "instruction": "T072: Author FFmpeg pipe encoder affecting `src/capture/encoder.rs`",
+            "file_locks": [
+              "src/capture/encoder.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T017",
+                "T012",
+                "T018",
+                "T019",
+                "T021",
+                "T020",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 4,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T072: Author FFmpeg pipe encoder affecting `src/capture/encoder.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T017",
+              "T012",
+              "T018",
+              "T019",
+              "T021",
+              "T020",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T023",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T023: verify implementations pass tests",
+            "file_locks": [
+              "src/capture/encoder.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T023: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T023"
+            ],
+            "parent_task_id": "T023"
+          },
+          {
+            "task_id": "T024",
+            "agent_role": "Developer",
+            "instruction": "T090: Author memory monitor affecting `modules/rust-record/video-capture/src/memory.rs`",
+            "file_locks": [
+              "modules/rust-record/video-capture/src/memory.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T017",
+                "T012",
+                "T018",
+                "T019",
+                "T021",
+                "T020",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 4,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T090: Author memory monitor affecting `modules/rust-record/video-capture/src/memory.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T017",
+              "T012",
+              "T018",
+              "T019",
+              "T021",
+              "T020",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T024",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T024: verify implementations pass tests",
+            "file_locks": [
+              "modules/rust-record/video-capture/src/memory.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T024: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T024"
+            ],
+            "parent_task_id": "T024"
+          },
+          {
+            "task_id": "T025",
+            "agent_role": "Developer",
+            "instruction": "T091: Author capture impl affecting `modules/rust-record/video-capture/src/capture.rs`",
+            "file_locks": [
+              "modules/rust-record/video-capture/src/capture.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T017",
+                "T012",
+                "T018",
+                "T019",
+                "T021",
+                "T020",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 4,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T091: Author capture impl affecting `modules/rust-record/video-capture/src/capture.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T017",
+              "T012",
+              "T018",
+              "T019",
+              "T021",
+              "T020",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T025",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T025: verify implementations pass tests",
+            "file_locks": [
+              "modules/rust-record/video-capture/src/capture.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T025: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T025"
+            ],
+            "parent_task_id": "T025"
+          },
+          {
+            "task_id": "T026",
+            "agent_role": "Developer",
+            "instruction": "T092: Author encoder impl affecting `modules/rust-record/video-capture/src/encoder.rs`",
+            "file_locks": [
+              "modules/rust-record/video-capture/src/encoder.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T014",
+                "T013",
+                "T017",
+                "T012",
+                "T018",
+                "T019",
+                "T021",
+                "T020",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 4,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T092: Author encoder impl affecting `modules/rust-record/video-capture/src/encoder.rs`' to [x]",
+            "dependencies": [
+              "T014",
+              "T013",
+              "T017",
+              "T012",
+              "T018",
+              "T019",
+              "T021",
+              "T020",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T026",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T026: verify implementations pass tests",
+            "file_locks": [
+              "modules/rust-record/video-capture/src/encoder.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T026: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T026"
+            ],
+            "parent_task_id": "T026"
+          }
+        ],
+        "checkpoint_after": {
+          "enabled": true,
+          "verification_criteria": "Verify all Wave 4 tasks are marked [x] in tasks.md",
+          "git_agent": "git-version-manager",
+          "memory_bank_agent": "project-bank-keeper"
+        }
+      },
+      {
+        "wave_id": 5,
+        "strategy": "PARALLEL_SWARM",
+        "rationale": "Wave 5: 4 independent task(s) with no file conflicts",
+        "tasks": [
+          {
+            "task_id": "T027",
+            "agent_role": "Developer",
+            "instruction": "T063: Complete Gemini provider affecting `src/analysis/gemini.rs`",
+            "file_locks": [
+              "src/analysis/gemini.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T023",
+                "T026",
+                "T014",
+                "T022",
+                "T013",
+                "T017",
+                "T025",
+                "T012",
+                "T018",
+                "T019",
+                "T021",
+                "T024",
+                "T020",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 5,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T063: Complete Gemini provider affecting `src/analysis/gemini.rs`' to [x]",
+            "dependencies": [
+              "T023",
+              "T026",
+              "T014",
+              "T022",
+              "T013",
+              "T017",
+              "T025",
+              "T012",
+              "T018",
+              "T019",
+              "T021",
+              "T024",
+              "T020",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T027",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T027: verify implementations pass tests",
+            "file_locks": [
+              "src/analysis/gemini.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T027: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T027"
+            ],
+            "parent_task_id": "T027"
+          },
+          {
+            "task_id": "T028",
+            "agent_role": "Developer",
+            "instruction": "T064: Complete Ollama provider affecting `src/analysis/ollama.rs`",
+            "file_locks": [
+              "src/analysis/ollama.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T023",
+                "T026",
+                "T014",
+                "T022",
+                "T013",
+                "T017",
+                "T025",
+                "T012",
+                "T018",
+                "T019",
+                "T021",
+                "T024",
+                "T020",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 5,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T064: Complete Ollama provider affecting `src/analysis/ollama.rs`' to [x]",
+            "dependencies": [
+              "T023",
+              "T026",
+              "T014",
+              "T022",
+              "T013",
+              "T017",
+              "T025",
+              "T012",
+              "T018",
+              "T019",
+              "T021",
+              "T024",
+              "T020",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T028",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T028: verify implementations pass tests",
+            "file_locks": [
+              "src/analysis/ollama.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T028: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T028"
+            ],
+            "parent_task_id": "T028"
+          },
+          {
+            "task_id": "T029",
+            "agent_role": "Developer",
+            "instruction": "T071: Complete screen capture using scrap::Capturer affecting `src/capture/screen.rs`",
+            "file_locks": [
+              "src/capture/screen.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T023",
+                "T026",
+                "T014",
+                "T022",
+                "T013",
+                "T017",
+                "T025",
+                "T012",
+                "T018",
+                "T019",
+                "T021",
+                "T024",
+                "T020",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 5,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T071: Complete screen capture using scrap::Capturer affecting `src/capture/screen.rs`' to [x]",
+            "dependencies": [
+              "T023",
+              "T026",
+              "T014",
+              "T022",
+              "T013",
+              "T017",
+              "T025",
+              "T012",
+              "T018",
+              "T019",
+              "T021",
+              "T024",
+              "T020",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T029",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T029: verify implementations pass tests",
+            "file_locks": [
+              "src/capture/screen.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T029: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T029"
+            ],
+            "parent_task_id": "T029"
+          },
+          {
+            "task_id": "T030",
+            "agent_role": "Developer",
+            "instruction": "T040: Author rmcp 0.1 server entrypoint (11 tools) affecting `src/mcp/server.rs`",
+            "file_locks": [
+              "src/mcp/server.rs"
+            ],
+            "sentinel_point": true,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T023",
+                "T026",
+                "T014",
+                "T022",
+                "T013",
+                "T017",
+                "T025",
+                "T012",
+                "T018",
+                "T019",
+                "T021",
+                "T024",
+                "T020",
+                "T015",
+                "T016"
+              ],
+              "wave_position": 5,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T040: Author rmcp 0.1 server entrypoint (11 tools) affecting `src/mcp/server.rs`' to [x]",
+            "dependencies": [
+              "T023",
+              "T026",
+              "T014",
+              "T022",
+              "T013",
+              "T017",
+              "T025",
+              "T012",
+              "T018",
+              "T019",
+              "T021",
+              "T024",
+              "T020",
+              "T015",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "SENTINEL-T030",
+            "agent_role": "Sentinel",
+            "instruction": "Sentinel validation for T030: verify implementations pass tests",
+            "file_locks": [
+              "src/mcp/server.rs"
+            ],
+            "constitution_rules": [],
+            "completion_handshake": "Upon success, update tasks.md line containing 'Sentinel validation for T030: verify implementations pass tests' to [x]",
+            "dependencies": [
+              "T030"
+            ],
+            "parent_task_id": "T030"
+          }
+        ],
+        "checkpoint_after": {
+          "enabled": true,
+          "verification_criteria": "Verify all Wave 5 tasks are marked [x] in tasks.md",
+          "git_agent": "git-version-manager",
+          "memory_bank_agent": "project-bank-keeper"
+        }
+      },
+      {
+        "wave_id": 6,
+        "strategy": "PARALLEL_SWARM",
+        "rationale": "Wave 6: 6 independent task(s) with no file conflicts",
+        "tasks": [
+          {
+            "task_id": "T031",
+            "agent_role": "Developer",
+            "instruction": "T070: Verify/dedup 192KB local module affecting `src/capture/mod.rs`",
+            "file_locks": [
+              "src/capture/mod.rs"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T030",
+                "T022",
+                "T013",
+                "T015",
+                "T026",
+                "T017",
+                "T029",
+                "T018",
+                "T024",
+                "T020",
+                "T023",
+                "T027",
+                "T012",
+                "T019",
+                "T021",
+                "T014",
+                "T025",
+                "T028",
+                "T016"
+              ],
+              "wave_position": 6,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T070: Verify/dedup 192KB local module affecting `src/capture/mod.rs`' to [x]",
+            "dependencies": [
+              "T030",
+              "T022",
+              "T013",
+              "T015",
+              "T026",
+              "T017",
+              "T029",
+              "T018",
+              "T024",
+              "T020",
+              "T023",
+              "T027",
+              "T012",
+              "T019",
+              "T021",
+              "T014",
+              "T025",
+              "T028",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "T032",
+            "agent_role": "Developer",
+            "instruction": "T074: Verify clean module affecting `src/capture/frame_rate.rs`",
+            "file_locks": [
+              "src/capture/frame_rate.rs"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T030",
+                "T022",
+                "T013",
+                "T015",
+                "T026",
+                "T017",
+                "T029",
+                "T018",
+                "T024",
+                "T020",
+                "T023",
+                "T027",
+                "T012",
+                "T019",
+                "T021",
+                "T014",
+                "T025",
+                "T028",
+                "T016"
+              ],
+              "wave_position": 6,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T074: Verify clean module affecting `src/capture/frame_rate.rs`' to [x]",
+            "dependencies": [
+              "T030",
+              "T022",
+              "T013",
+              "T015",
+              "T026",
+              "T017",
+              "T029",
+              "T018",
+              "T024",
+              "T020",
+              "T023",
+              "T027",
+              "T012",
+              "T019",
+              "T021",
+              "T014",
+              "T025",
+              "T028",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "T033",
+            "agent_role": "Developer",
+            "instruction": "T075: Verify clean module affecting `src/capture/service.rs`",
+            "file_locks": [
+              "src/capture/service.rs"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T030",
+                "T022",
+                "T013",
+                "T015",
+                "T026",
+                "T017",
+                "T029",
+                "T018",
+                "T024",
+                "T020",
+                "T023",
+                "T027",
+                "T012",
+                "T019",
+                "T021",
+                "T014",
+                "T025",
+                "T028",
+                "T016"
+              ],
+              "wave_position": 6,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T075: Verify clean module affecting `src/capture/service.rs`' to [x]",
+            "dependencies": [
+              "T030",
+              "T022",
+              "T013",
+              "T015",
+              "T026",
+              "T017",
+              "T029",
+              "T018",
+              "T024",
+              "T020",
+              "T023",
+              "T027",
+              "T012",
+              "T019",
+              "T021",
+              "T014",
+              "T025",
+              "T028",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "T034",
+            "agent_role": "Developer",
+            "instruction": "T076: Verify clean module affecting `src/storage/manager.rs`",
+            "file_locks": [
+              "src/storage/manager.rs"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T030",
+                "T022",
+                "T013",
+                "T015",
+                "T026",
+                "T017",
+                "T029",
+                "T018",
+                "T024",
+                "T020",
+                "T023",
+                "T027",
+                "T012",
+                "T019",
+                "T021",
+                "T014",
+                "T025",
+                "T028",
+                "T016"
+              ],
+              "wave_position": 6,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T076: Verify clean module affecting `src/storage/manager.rs`' to [x]",
+            "dependencies": [
+              "T030",
+              "T022",
+              "T013",
+              "T015",
+              "T026",
+              "T017",
+              "T029",
+              "T018",
+              "T024",
+              "T020",
+              "T023",
+              "T027",
+              "T012",
+              "T019",
+              "T021",
+              "T014",
+              "T025",
+              "T028",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "T035",
+            "agent_role": "Developer",
+            "instruction": "T077: Verify clean module affecting `src/startup.rs`",
+            "file_locks": [
+              "src/startup.rs"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T030",
+                "T022",
+                "T013",
+                "T015",
+                "T026",
+                "T017",
+                "T029",
+                "T018",
+                "T024",
+                "T020",
+                "T023",
+                "T027",
+                "T012",
+                "T019",
+                "T021",
+                "T014",
+                "T025",
+                "T028",
+                "T016"
+              ],
+              "wave_position": 6,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T077: Verify clean module affecting `src/startup.rs`' to [x]",
+            "dependencies": [
+              "T030",
+              "T022",
+              "T013",
+              "T015",
+              "T026",
+              "T017",
+              "T029",
+              "T018",
+              "T024",
+              "T020",
+              "T023",
+              "T027",
+              "T012",
+              "T019",
+              "T021",
+              "T014",
+              "T025",
+              "T028",
+              "T016"
+            ]
+          },
+          {
+            "task_id": "T036",
+            "agent_role": "Developer",
+            "instruction": "T081: Verify clean binary entry affecting `src/bin/gentle-eye.rs`",
+            "file_locks": [
+              "src/bin/gentle-eye.rs"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T030",
+                "T022",
+                "T013",
+                "T015",
+                "T026",
+                "T017",
+                "T029",
+                "T018",
+                "T024",
+                "T020",
+                "T023",
+                "T027",
+                "T012",
+                "T019",
+                "T021",
+                "T014",
+                "T025",
+                "T028",
+                "T016"
+              ],
+              "wave_position": 6,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T081: Verify clean binary entry affecting `src/bin/gentle-eye.rs`' to [x]",
+            "dependencies": [
+              "T030",
+              "T022",
+              "T013",
+              "T015",
+              "T026",
+              "T017",
+              "T029",
+              "T018",
+              "T024",
+              "T020",
+              "T023",
+              "T027",
+              "T012",
+              "T019",
+              "T021",
+              "T014",
+              "T025",
+              "T028",
+              "T016"
+            ]
+          }
+        ],
+        "checkpoint_after": {
+          "enabled": true,
+          "verification_criteria": "Verify all Wave 6 tasks are marked [x] in tasks.md",
+          "git_agent": "git-version-manager",
+          "memory_bank_agent": "project-bank-keeper"
+        }
+      },
+      {
+        "wave_id": 7,
+        "strategy": "SEQUENTIAL_MERGE",
+        "rationale": "Wave 7: 1 independent task(s) with no file conflicts",
+        "tasks": [
+          {
+            "task_id": "T037",
+            "agent_role": "Developer",
+            "instruction": "T100: Whole workspace compiles clean affecting `Cargo.toml`",
+            "file_locks": [
+              "Cargo.toml"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T030",
+                "T022",
+                "T013",
+                "T035",
+                "T015",
+                "T026",
+                "T033",
+                "T017",
+                "T029",
+                "T018",
+                "T024",
+                "T020",
+                "T023",
+                "T027",
+                "T012",
+                "T019",
+                "T021",
+                "T036",
+                "T014",
+                "T034",
+                "T025",
+                "T031",
+                "T032",
+                "T028",
+                "T016"
+              ],
+              "wave_position": 7,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T100: Whole workspace compiles clean affecting `Cargo.toml`' to [x]",
+            "dependencies": [
+              "T030",
+              "T022",
+              "T013",
+              "T035",
+              "T015",
+              "T026",
+              "T033",
+              "T017",
+              "T029",
+              "T018",
+              "T024",
+              "T020",
+              "T023",
+              "T027",
+              "T012",
+              "T019",
+              "T021",
+              "T036",
+              "T014",
+              "T034",
+              "T025",
+              "T031",
+              "T032",
+              "T028",
+              "T016"
+            ]
+          }
+        ],
+        "checkpoint_after": {
+          "enabled": true,
+          "verification_criteria": "Verify all Wave 7 tasks are marked [x] in tasks.md",
+          "git_agent": "git-version-manager",
+          "memory_bank_agent": "project-bank-keeper"
+        }
+      },
+      {
+        "wave_id": 8,
+        "strategy": "SEQUENTIAL_MERGE",
+        "rationale": "Wave 8: 1 independent task(s) with no file conflicts",
+        "tasks": [
+          {
+            "task_id": "T038",
+            "agent_role": "Developer",
+            "instruction": "T101: Unit + integration tests green affecting `Cargo.toml`",
+            "file_locks": [
+              "Cargo.toml"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T030",
+                "T022",
+                "T013",
+                "T035",
+                "T015",
+                "T026",
+                "T033",
+                "T017",
+                "T029",
+                "T018",
+                "T037",
+                "T024",
+                "T020",
+                "T023",
+                "T027",
+                "T012",
+                "T019",
+                "T021",
+                "T036",
+                "T014",
+                "T034",
+                "T025",
+                "T031",
+                "T032",
+                "T028",
+                "T016"
+              ],
+              "wave_position": 8,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T101: Unit + integration tests green affecting `Cargo.toml`' to [x]",
+            "dependencies": [
+              "T030",
+              "T022",
+              "T013",
+              "T035",
+              "T015",
+              "T026",
+              "T033",
+              "T017",
+              "T029",
+              "T018",
+              "T037",
+              "T024",
+              "T020",
+              "T023",
+              "T027",
+              "T012",
+              "T019",
+              "T021",
+              "T036",
+              "T014",
+              "T034",
+              "T025",
+              "T031",
+              "T032",
+              "T028",
+              "T016"
+            ]
+          }
+        ],
+        "checkpoint_after": {
+          "enabled": true,
+          "verification_criteria": "Verify all Wave 8 tasks are marked [x] in tasks.md",
+          "git_agent": "git-version-manager",
+          "memory_bank_agent": "project-bank-keeper"
+        }
+      },
+      {
+        "wave_id": 9,
+        "strategy": "SEQUENTIAL_MERGE",
+        "rationale": "Wave 9: 1 independent task(s) with no file conflicts",
+        "tasks": [
+          {
+            "task_id": "T039",
+            "agent_role": "Developer",
+            "instruction": "T102: Zero clippy warnings affecting `Cargo.toml`",
+            "file_locks": [
+              "Cargo.toml"
+            ],
+            "sentinel_point": false,
+            "constitution_rules": [],
+            "testability": {
+              "isolated": false,
+              "has_upstream_deps": true,
+              "upstream_dep_ids": [
+                "T030",
+                "T022",
+                "T013",
+                "T035",
+                "T015",
+                "T026",
+                "T033",
+                "T017",
+                "T029",
+                "T018",
+                "T037",
+                "T024",
+                "T020",
+                "T023",
+                "T027",
+                "T012",
+                "T019",
+                "T021",
+                "T036",
+                "T014",
+                "T034",
+                "T025",
+                "T031",
+                "T032",
+                "T028",
+                "T038",
+                "T016"
+              ],
+              "wave_position": 9,
+              "can_test_now": true,
+              "test_hint": "integration-post-deps"
+            },
+            "completion_handshake": "Upon success, update tasks.md line containing 'T102: Zero clippy warnings affecting `Cargo.toml`' to [x]",
+            "dependencies": [
+              "T030",
+              "T022",
+              "T013",
+              "T035",
+              "T015",
+              "T026",
+              "T033",
+              "T017",
+              "T029",
+              "T018",
+              "T037",
+              "T024",
+              "T020",
+              "T023",
+              "T027",
+              "T012",
+              "T019",
+              "T021",
+              "T036",
+              "T014",
+              "T034",
+              "T025",
+              "T031",
+              "T032",
+              "T028",
+              "T038",
+              "T016"
+            ]
+          }
+        ],
+        "checkpoint_after": {
+          "enabled": true,
+          "verification_criteria": "Verify all Wave 9 tasks are marked [x] in tasks.md",
+          "git_agent": "git-version-manager",
+          "memory_bank_agent": "project-bank-keeper"
+        }
+      }
+    ]
+  }
+}

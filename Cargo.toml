@@ -1,62 +1,55 @@
 [package]
 name = "gentle-eye"
 version = "0.1.0"
-edition = "2024"
-description = "Rust + MCP server for LLM-agent screen and video understanding"
-license = "MIT"
-authors = ["gyasis"]
-repository = "https://github.com/gyasis/gentle-eye"
+edition = "2021"
+description = "MCP server for screen recording and AI video analysis"
 
-# Reconstructed from RECOVERY/rebuild/REBUILD_DEPENDENCIES.md (mined from 3,078
-# session files) + use-statement analysis of recovered src/. Original Cargo.toml
-# was never captured by Claude Code Read/Write — this is a best-effort rebuild.
+[dependencies]
+# MCP Server. `transport-io` adds the stdio transport (JSON-RPC over stdio) the
+# binary serves on — required for an MCP server; the recovered spec's
+# ["server","macros"] list omitted it.
+rmcp = { version = "0.1", features = ["server", "macros", "transport-io"] }
+
+# Async Runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Screen Capture
+scrap = "0.5"
+
+# Storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Vision Providers
+reqwest = { version = "0.12", features = ["json"] }
+schemars = { version = "0.8", features = ["chrono"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Configuration
+toml = "0.8"
+config = "0.14"
+directories = "5"
+
+# Error Handling
+thiserror = "1"
+anyhow = "1"
+
+# Utilities
+base64 = "0.22"
+mime_guess = "2"
+tempfile = "3"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+mockall = "0.12"
+tempfile = "3"
 
 [[bin]]
 name = "gentle-eye"
 path = "src/bin/gentle-eye.rs"
-
-[dependencies]
-# async + runtime
-tokio = { version = "1", features = ["full"] }
-futures = "0.3"
-async-trait = "0.1"
-
-# error / logging
-anyhow = "1"
-thiserror = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-log = "0.4"
-
-# serde
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# data
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
-
-# misc
-regex = "1"
-base64 = "0.22"
-bytes = "1"
-url = "2"
-tempfile = "3"
-
-# TUI (referenced in ontology · ratatui 14x in use-statements)
-ratatui = "0.26"
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-mockall = "0.12"
-serial_test = "3"
-tokio-test = "0.4"
-
-[features]
-default = []
-
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1

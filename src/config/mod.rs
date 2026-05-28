@@ -168,7 +168,8 @@ fn default_provider() -> String {
 }
 
 fn default_gemini_model() -> String {
-    "gemini-2.0-flash".to_string()
+    // Current alias (the recovered "gemini-2.0-flash" is stale); validated live.
+    "gemini-flash-latest".to_string()
 }
 
 fn default_ollama_host() -> String {
@@ -180,11 +181,14 @@ fn default_ollama_port() -> u16 {
 }
 
 fn default_ollama_model() -> String {
-    "llava".to_string()
+    // Vision model present on the LAN box (192.168.0.159); validated live.
+    "qwen2.5vl:7b".to_string()
 }
 
 fn default_timeout() -> u64 {
-    60
+    // Local vision models (Ollama) process multi-image requests slowly; give them
+    // headroom. Gemini returns well within this.
+    300
 }
 
 fn default_base_dir() -> PathBuf {
@@ -465,7 +469,7 @@ mod tests {
         assert_eq!(config.recording.fps, 1);
         assert_eq!(config.recording.max_duration_seconds, 1800);
         assert_eq!(config.vision.provider, "gemini");
-        assert_eq!(config.vision.timeout_seconds, 60);
+        assert_eq!(config.vision.timeout_seconds, 300);
     }
 
     #[test]
