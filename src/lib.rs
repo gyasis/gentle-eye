@@ -47,4 +47,5 @@ pub mod storage;
 // is all most callers need.
 pub use analysis::ocr::{ocr_image as read_text_image, ocr_video as read_text_video};
 pub use api::{analyze, analyze_video_range, record};
+pub use capture::stream::{capture_stream_frame, StreamFrame};
 pub use contracts::traits::{AnalysisResult, Recording, RecordingConfig, TimeRange, VisionConfig};

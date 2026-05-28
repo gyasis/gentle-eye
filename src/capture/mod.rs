@@ -13,9 +13,11 @@ pub mod frame_rate;
 pub mod memory;
 pub mod screen;
 pub mod service;
+pub mod stream;
 
 pub use encoder::PipeEncoder;
 pub use frame_rate::FrameRateController;
 pub use memory::{MemoryConfig, MemoryMonitor, MemoryPressure, MemoryStats};
 pub use screen::ScreenCapturer;
 pub use service::CaptureService;
+pub use stream::{capture_stream_frame, StreamFrame};

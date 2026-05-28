@@ -311,6 +311,50 @@ pub struct ReadScreenTextOutput {
 }
 
 // ============================================================================
+// capture_stream_frame Tool
+// ============================================================================
+
+/// Input parameters for the `capture_stream_frame` tool.
+///
+/// Grabs a single frame from a live stream URL (RTSP/HTTP/SRT — e.g. a
+/// Blackmagic ATEM output) and saves it as a PNG for later analysis.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CaptureStreamFrameInput {
+    /// The stream URL to grab a frame from (rtsp://, http(s)://, srt://, …).
+    pub stream_url: String,
+
+    /// Optional directory to save the PNG into (default: temp dir).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_dir: Option<String>,
+}
+
+/// Output for the `capture_stream_frame` tool.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CaptureStreamFrameOutput {
+    /// Absolute path to the saved PNG file. Pass this to `analyze_video`
+    /// (image mode) for AI analysis.
+    pub file_path: String,
+
+    /// Width of the captured frame in pixels.
+    pub width: u32,
+
+    /// Height of the captured frame in pixels.
+    pub height: u32,
+
+    /// Size of the PNG file in bytes.
+    pub file_size_bytes: u64,
+
+    /// The stream URL that was used for capture.
+    pub stream_url: String,
+
+    /// ISO 8601 timestamp of when the frame was captured.
+    pub captured_at: String,
+
+    /// Human-readable confirmation message.
+    pub message: String,
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

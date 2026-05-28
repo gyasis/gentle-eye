@@ -19,6 +19,7 @@ use crate::contracts::traits::{
 };
 use crate::mcp::tools::{
     AnalyzeVideoInput, AnalyzeVideoOutput, CancelRecordingInput, CancelRecordingOutput,
+    CaptureStreamFrameInput, CaptureStreamFrameOutput,
     GetRecordingStatusInput, GetRecordingStatusOutput, GetVisionProviderInfoOutput,
     ListRecordingsInput, ListRecordingsOutput, ReadScreenTextInput, ReadScreenTextOutput,
     RecordingSummary, StartRecordingInput, StartRecordingOutput, StopRecordingInput,
@@ -108,6 +109,7 @@ impl GentleEyeServer {
             "cancel_recording" => self.tool_cancel(parse_args(args)?).await,
             "get_vision_provider_info" => self.tool_provider_info().await,
             "read_screen_text" => self.tool_read_screen_text(parse_args(args)?).await,
+            "capture_stream_frame" => self.tool_capture_stream_frame(parse_args(args)?).await,
             other => {
                 return Err(ErrorData::invalid_params(
                     format!("unknown tool: {other}"),
@@ -241,6 +243,28 @@ impl GentleEyeServer {
                 recording_id: rec.id.to_string(),
                 status: status_str(rec.status).to_string(),
                 message: "Recording cancelled".to_string(),
+            }),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    async fn tool_capture_stream_frame(&self, input: CaptureStreamFrameInput) -> CallToolResult {
+        let output_dir = input
+            .output_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("gentle-eye/frames"));
+        match crate::capture::stream::capture_stream_frame(&input.stream_url, &output_dir) {
+            Ok(frame) => ok_json(CaptureStreamFrameOutput {
+                file_path: frame.file_path.to_string_lossy().into_owned(),
+                width: frame.width,
+                height: frame.height,
+                file_size_bytes: frame.file_size_bytes,
+                stream_url: frame.stream_url,
+                captured_at: frame.captured_at,
+                message: format!(
+                    "Captured a {}x{} frame from the stream",
+                    frame.width, frame.height
+                ),
             }),
             Err(e) => err_text(e.to_string()),
         }
@@ -386,6 +410,11 @@ fn tool_catalog() -> Vec<Tool> {
             "Extract on-screen text (OCR) from an image or video.",
             schema_for::<ReadScreenTextInput>(),
         ),
+        Tool::new(
+            "capture_stream_frame",
+            "Grab a single frame from a live stream URL (RTSP/HTTP/SRT, e.g. an ATEM output) as a PNG.",
+            schema_for::<CaptureStreamFrameInput>(),
+        ),
     ]
 }
 
@@ -449,12 +478,13 @@ mod tests {
     #[test]
     fn catalog_exposes_all_tools() {
         let tools = tool_catalog();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(names.contains(&"start_recording"));
         assert!(names.contains(&"analyze_video"));
         assert!(names.contains(&"get_vision_provider_info"));
         assert!(names.contains(&"read_screen_text"));
+        assert!(names.contains(&"capture_stream_frame"));
     }
 
     #[test]

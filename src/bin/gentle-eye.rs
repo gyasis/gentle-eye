@@ -30,6 +30,7 @@ USAGE:
   gentle-eye analyze --image PATH  --prompt TEXT [--provider gemini|ollama]
   gentle-eye analyze --video PATH  --prompt TEXT [--start S --end E] [--provider …]
   gentle-eye record  [--duration SECS] [--fps N] [--out FILE.mp4] [--display IDX|LABEL]
+  gentle-eye capture-stream --url URL [--out DIR]     Grab one frame from a stream (ATEM/RTSP/HTTP)
   gentle-eye list    [--status all|recording|completed|cancelled|failed] [--limit N]
   gentle-eye read-text --image PATH | --video PATH    Extract on-screen text (OCR) as JSON
   gentle-eye displays                                 List available displays (the catalogue)
@@ -55,6 +56,7 @@ async fn main() -> ExitCode {
         "serve" => run_serve().await,
         "analyze" => run_analyze(rest).await,
         "record" => run_record(rest).await,
+        "capture-stream" => run_capture_stream(rest).await,
         "list" => run_list(rest).await,
         "provider-info" => run_provider_info(rest).await,
         "read-text" => run_read_text(rest).await,
@@ -172,6 +174,24 @@ async fn run_record(args: &[String]) -> Result<()> {
         }
     }
     println!("{}", serde_json::to_string_pretty(&record)?);
+    Ok(())
+}
+
+async fn run_capture_stream(args: &[String]) -> Result<()> {
+    let url = flag(args, "--url").ok_or_else(|| anyhow!("--url <stream-url> is required"))?;
+    let out = flag(args, "--out").unwrap_or("/tmp/gentle-eye/frames");
+    let frame = gentle_eye::capture::stream::capture_stream_frame(url, Path::new(out))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "file_path": frame.file_path.to_string_lossy(),
+            "width": frame.width,
+            "height": frame.height,
+            "file_size_bytes": frame.file_size_bytes,
+            "stream_url": frame.stream_url,
+            "captured_at": frame.captured_at,
+        }))?
+    );
     Ok(())
 }
 
