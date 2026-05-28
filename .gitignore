@@ -21,6 +21,12 @@ _v2_recovery/
 # recovered launch dump (455KB, contained a hardcoded API key)
 scripts/launch.sh
 
+# session / agent state — local only (churn from the checkpoint hook; private notes)
+.claude/activity_stream.md
+.claude/system_bus.json
+.claude/session_snapshots/
+memory-bank/private/
+
 # editor / OS
 .DS_Store
 *.swp
