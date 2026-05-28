@@ -1,5 +1,6 @@
-//! Capture a single frame from a live stream URL (RTSP / HTTP / SRT — e.g. a
-//! Blackmagic ATEM output) via FFmpeg. Saves a PNG and reports its dimensions.
+//! Capture a single frame from a live stream URL (RTMP / RTSP / HTTP / SRT —
+//! e.g. an OBS or Blackmagic ATEM output) via FFmpeg. Saves a PNG and reports
+//! its dimensions.
 //!
 //! Reconstructed 2026-05-28: the original `capture_stream_frame` tool was lost in
 //! the disaster; only its output type survived in `mcp/server.rs.partial`. The
@@ -64,21 +65,32 @@ pub fn capture_stream_frame(
 }
 
 /// Build the ffmpeg args to grab a single frame from a stream into `out`.
+///
+/// Works with `rtmp://`, `rtsp://`, `http(s)://`, `srt://`, etc. `-rtsp_transport
+/// tcp` is added only for RTSP (it's an RTSP-only option); a best-effort I/O
+/// timeout means a dead stream fails fast instead of hanging.
 fn build_ffmpeg_args(stream_url: &str, out: &Path) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "-y".to_string(),
         "-loglevel".to_string(),
         "error".to_string(),
-        // Prefer TCP for RTSP (more reliable than the default UDP); ignored by
-        // other protocols.
-        "-rtsp_transport".to_string(),
-        "tcp".to_string(),
+        // ~15s I/O timeout (microseconds) so a dead stream errors, not hangs.
+        "-rw_timeout".to_string(),
+        "15000000".to_string(),
+    ];
+    // Force TCP for RTSP (more reliable than default UDP). Irrelevant to
+    // rtmp/http/srt, so only add it for rtsp:// to avoid an unused option.
+    if stream_url.starts_with("rtsp://") {
+        args.extend(["-rtsp_transport".to_string(), "tcp".to_string()]);
+    }
+    args.extend([
         "-i".to_string(),
         stream_url.to_string(),
         "-frames:v".to_string(),
         "1".to_string(),
         out.to_string_lossy().to_string(),
-    ]
+    ]);
+    args
 }
 
 /// Probe a PNG's pixel dimensions via ffprobe.
@@ -114,12 +126,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ffmpeg_args_grab_one_frame() {
+    fn rtsp_args_grab_one_frame_over_tcp() {
         let args = build_ffmpeg_args("rtsp://cam/live", Path::new("/tmp/f.png"));
         assert!(args.windows(2).any(|w| w == ["-i", "rtsp://cam/live"]));
         assert!(args.windows(2).any(|w| w == ["-frames:v", "1"]));
         assert!(args.windows(2).any(|w| w == ["-rtsp_transport", "tcp"]));
+        assert!(args.windows(2).any(|w| w == ["-rw_timeout", "15000000"]));
         assert_eq!(args.last().unwrap(), "/tmp/f.png");
+    }
+
+    #[test]
+    fn rtmp_args_omit_rtsp_transport() {
+        let args = build_ffmpeg_args("rtmp://server/app/streamkey", Path::new("/tmp/f.png"));
+        assert!(args.windows(2).any(|w| w == ["-i", "rtmp://server/app/streamkey"]));
+        assert!(args.windows(2).any(|w| w == ["-frames:v", "1"]));
+        // RTSP-only option must NOT be present for RTMP.
+        assert!(!args.iter().any(|a| a == "-rtsp_transport"));
     }
 
     #[test]
