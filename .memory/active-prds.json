@@ -1,0 +1,13 @@
+{
+  "active": [
+    {
+      "id": "atem_wiring_rebuild_2026-05-27",
+      "path": "/home/gyasis/dev/prd/scratch/atem_wiring_rebuild_2026-05-27.md",
+      "status": "open",
+      "created": "2026-05-27",
+      "descriptor": "atem_wiring_rebuild",
+      "branch_at_creation": "001-mcp-screen-tools",
+      "owner_path": "/home/gyasis/Documents/code/gentle-eye"
+    }
+  ]
+}

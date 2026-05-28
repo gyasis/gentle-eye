@@ -1,0 +1,34 @@
+{
+  "session_id": "session-1779956123",
+  "timestamp": "2026-05-28T04:15:23-04:00",
+  "mental_state": "docs: rebuild-session notes 2026-05-27/28 (recovery promotes, lib.rs, Hybrid Cascade, config fix)
+
+8 files promoted junk->clean (with .raw backups), Structuralist lib.rs rebuild,
+.cargo/config.toml markdown-fence fix, tasks.md regenerated to dependency-ordered
+Hybrid Cascade, module-layout dedup. Recovery exhausted. Findings drove the",
+  "current_phase": "docs: rebuild-session notes 2026-05-27/28 (recovery promotes, lib.rs, Hybrid Cascade, config fix)",
+  "progress": 22,
+  "tasks_completed": 12,
+  "tasks_total": 54,
+  "next_steps": [
+    "Review progress.md",
+    "Update projectbrief.md if needed",
+    "Continue next task from tasks.md"
+  ],
+  "blockers": [],
+  "git_commits": ["bdfcd32f4d9393124e886771be7537db51393cdc"],
+  "files_modified": [
+  ".claude/activity_stream.md",
+  ".claude/system_bus.json",
+  ".dk/tasks.md",
+  "execution_plan.json",
+  "memory-bank/private/gyasis/activeContext.md",
+  "memory-bank/private/gyasis/progress.md",
+  "tasks.md"
+],
+  "system_state": {
+    "memory_bank": "synchronized",
+    "context_protection": "active",
+    "skills": "operational"
+  }
+}

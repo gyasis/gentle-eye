@@ -1,0 +1,25 @@
+- [storage] section: base_dir, max_storage_mb, retention_days
+- [recording] section: default_fps, max_duration_seconds, encoder_mode
+- [vision] section: provider (gemini/ollama), api_key_env, model, max_video_size_mb
+- [server] section: log_level, temp_dir
+**T070:** Document MCP server startup for Claude Desktop in README.md
+Add section showing claude_desktop_config.json example:
+  "mcpServers": {
+    "gentle-eye": {
+      "command": "/path/to/gentle-eye",
+      "args": ["--config", "/path/to/gentle-eye.toml"]
+**T071:** Document MCP server startup for Cursor in README.md
+Add section for Cursor MCP configuration.
+**T072:** Document MCP server startup for Claude Code CLI in README.md
+Add section for Claude Code CLI MCP configuration.
+**T073:** Add environment variable validation at startup
+In src/bin/gentle-eye.rs:
+- Check GEMINI_API_KEY if gemini provider selected
+- Warn if API key missing but don't fail (allow local providers)
+- Log which provider is configured
+**T074:** Add prerequisite checks at startup
+In src/bin/gentle-eye.rs:
+- Verify FFmpeg installed (`ffmpeg -version`)
+- Verify storage directory writable
+- Check screen capture permissions (platform-specific)
+- Return clear error messages if prerequisites fail

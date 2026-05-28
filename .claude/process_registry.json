@@ -1,0 +1,32 @@
+{
+  "tasks": {
+    "T014": {
+      "mode": "native",
+      "command": "T050: Declare submodules affecting `src/security/mod.rs`",
+      "status": "running",
+      "started_at": "2026-05-28T08:26:04.444455465Z",
+      "constitution_rules": []
+    },
+    "T012": {
+      "mode": "native",
+      "command": "T023: Author error enum (thiserror) from data-model affecting `src/contracts/errors.rs`",
+      "status": "running",
+      "started_at": "2026-05-28T08:26:04.439304882Z",
+      "constitution_rules": []
+    },
+    "T013": {
+      "mode": "native",
+      "command": "T062: Declare submodules + re-exports, clear E0765 junk affecting `src/analysis/mod.rs`",
+      "status": "running",
+      "started_at": "2026-05-28T08:26:04.442000182Z",
+      "constitution_rules": []
+    },
+    "T002": {
+      "mode": "native",
+      "command": "T010: Promote synthesized HIGH-conf version affecting `src/models/mod.rs`",
+      "status": "running",
+      "started_at": "2026-05-27T07:14:44.414425377Z",
+      "constitution_rules": []
+    }
+  }
+}

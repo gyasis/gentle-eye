@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "video-capture",
+    "region-selector",
+    "region-selector-ui",
+resolver = "2"
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Dayflow Contributors"]
+license = "MIT"
+[workspace.dependencies]

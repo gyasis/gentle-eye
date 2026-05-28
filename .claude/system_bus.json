@@ -1,0 +1,320 @@
+{
+  "version": "1.0",
+  "initialized_at": "2026-05-26T05:33:39-04:00",
+  "events": [
+    {
+      "timestamp": "2026-05-26T05:33:39.435636",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-26T12:52:32.249388",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-26T13:33:00.835906",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-26T15:55:49.878453",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-26T15:55:58.458383",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T03:14:56.551277",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T03:15:05.284751",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T09:59:19.531648",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T10:58:00.920925",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T10:58:57.395029",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T14:04:32.234353",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T14:10:33.711395",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T14:13:24.597798",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T14:19:15.043590",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T14:24:18.301420",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T14:25:41.972396",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T15:45:06.362350",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T15:57:57.546015",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T16:05:04.853304",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T16:05:11.247733",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T16:10:25.870440",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T17:35:10.026973",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T17:46:04.037318",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T17:56:07.143748",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T18:02:02.908499",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T18:03:02.349499",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T18:09:01.002484",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T18:19:02.016970",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-27T18:27:41.561292",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T02:30:54.053113",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T02:33:42.936690",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T02:44:17.538970",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T02:56:37.092658",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T03:15:03.041190",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T03:55:32.332116",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T04:15:23.476942",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T04:17:33.534318",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T04:26:39.603773",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T04:49:15.112844",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T04:52:01.863039",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T04:54:25.239169",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T05:06:07.764001",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T05:21:57.598560",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T05:39:05.175159",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T06:11:42.334488",
+      "event_type": "context_compression_detected"
+    },
+    {
+      "timestamp": "2026-05-28T06:11:42.460499",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T06:16:34.670795",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T07:04:28.869040",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T07:22:30.108312",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T07:47:06.706679",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T07:48:47.969981",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T07:53:50.253432",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T08:16:23.371153",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T08:27:41.759800",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T09:46:31.970541",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T10:14:21.287716",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T10:16:54.094191",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T10:20:21.299105",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T10:40:12.148226",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T10:48:46.643732",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T11:08:22.217116",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T12:23:46.260345",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    },
+    {
+      "timestamp": "2026-05-28T12:43:14.657105",
+      "agent": "git-manager",
+      "event_type": "checkpoint_created"
+    }
+  ]
+}

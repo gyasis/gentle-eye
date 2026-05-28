@@ -1,0 +1,22 @@
+# gentle-eye — External API/Library Integrations (mined)
+
+## Detected term frequency
+
+- `tokio` (40687 mentions)
+- `mcp` (17848 mentions)
+- `serde_json` (11481 mentions)
+- `claude` (9863 mentions)
+- `ndarray` (7282 mentions)
+- `gemini` (6332 mentions)
+- `openai` (4164 mentions)
+- `opencv` (4160 mentions)
+- `anthropic` (2184 mentions)
+- `reqwest` (1991 mentions)
+- `serde` (1850 mentions)
+- `hyper` (1765 mentions)
+- `ffmpeg` (623 mentions)
+- `scrap` (401 mentions)
+- `generate_content` (28 mentions)
+- `wgpu` (7 mentions)
+- `axum` (5 mentions)
+- `x11rb` (4 mentions)

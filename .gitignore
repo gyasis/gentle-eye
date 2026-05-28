@@ -1,0 +1,38 @@
+.DS_Store
+
+# rust build artifacts
+target/
+**/*.rs.bk
+
+# recovery archives + artifacts (kept on disk, NEVER committed — may hold
+# secrets/cross-project data from recovered sessions)
+RECOVERY/
+recovered/
+recovered_source/
+recovered_validated/
+recovered_trimmed/
+recovered_review/
+_v2_recovery/
+*.raw.*
+*.synthesized.*
+*.partial
+*.corrupted-upgrade-*
+*.corrupted*
+# recovered launch dump (455KB, contained a hardcoded API key)
+scripts/launch.sh
+
+# editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# env / secrets
+.env
+.env.local
+
+# databases / recordings
+recordings/
+*.db
+*.sqlite
+.tooling/
