@@ -47,7 +47,7 @@ Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
       `> DONE:` types compile; `TimelineEntry` derives `FromRow`-compatible fields (match the Wave 4 SQLite columns exactly).
 - [ ] T202 [P] `src/dayflow/errors.rs` (or extend `contracts/errors.rs`) — `DayflowError` enum + `From` convs + `mcp_error_code()` mapping (mirror `GentleEyeError`).
       `> DONE:` `DayflowError` maps into `GentleEyeError`; compiles.
-- [ ] T203 Extend `src/config` — `DayflowConfig { chunk_minutes: 15, record_fps: 0.5, default_provider: Gemini, retention: RetentionConfig, disk_budget_bytes }`; sane serde defaults.
+- [ ] T203 Extend `src/config/mod.rs` — `DayflowConfig { chunk_minutes: 15, record_fps: 0.5, default_provider: Gemini, retention: RetentionConfig, disk_budget_bytes }`; sane serde defaults.
       `> DONE:` `DayflowConfig::default()` round-trips through the config loader; compiles.
 
 ## Wave 1 — fps heuristic (PRD P0 · quick · gate-green) `[S]`
