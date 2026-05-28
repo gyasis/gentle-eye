@@ -4,7 +4,7 @@
 # Tier/provider config inherited from ~/.dev-kid/ralph-tiers.json (Mac ollama LAN).
 
 project_name: gentle-eye
-branch: 001-mcp-screen-tools
+branch: 002-dayflow-mode
 
 # Small waves so the sentinel + you + atelier can scrutinise each checkpoint.
 wave_size: 6

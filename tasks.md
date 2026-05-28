@@ -162,3 +162,14 @@ escalation is the fallback only if you choose to invoke it on a stuck file.
 4. `/devkid.preflight` (Mac ollama tier1 reachable, no localhost fallback) — only
    needed for the ma-loop fallback tier; lite dispatch itself just needs the tasks.md.
 5. `/devkid.orchestrate` → `/devkid.execute` wave-by-wave; you implement + checkpoint each `[S]`.
+
+- [ ] SENTINEL-T005: Sentinel validation for T005: verify implementations pass tests
+- [ ] SENTINEL-T008: Sentinel validation for T006, T007, T008: verify implementations pass tests
+- [ ] SENTINEL-T012: Sentinel validation for T009, T010, T011, T012: verify implementations pass tests
+- [ ] SENTINEL-T016: Sentinel validation for T013, T014, T015, T016: verify implementations pass tests
+- [ ] SENTINEL-T019: Sentinel validation for T017, T018, T019: verify implementations pass tests
+- [ ] SENTINEL-T023: Sentinel validation for T020, T021, T022, T023: verify implementations pass tests
+- [ ] SENTINEL-T027: Sentinel validation for T024, T025, T026, T027: verify implementations pass tests
+- [ ] SENTINEL-T029: Sentinel validation for T028, T029: verify implementations pass tests
+- [ ] SENTINEL-T030: Sentinel validation for T030: verify implementations pass tests
+- [ ] SENTINEL-T031: Sentinel validation for T031: verify implementations pass tests
