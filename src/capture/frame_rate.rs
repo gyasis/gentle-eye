@@ -13,6 +13,34 @@ use std::time::{Duration, Instant};
 const MIN_FPS: u32 = 1;
 const MAX_FPS: u32 = 30;
 
+/// Recommend a capture fps for a recording of the given expected duration.
+///
+/// Duration-aware heuristic (see `docs/FPS_AND_DAYFLOW.md`), matching Gemini's
+/// native ~1fps video sampling so no frames are wasted:
+///
+/// | Expected length        | fps        | Why                                  |
+/// |------------------------|------------|--------------------------------------|
+/// | ≤ ~30 s, motion matters | 15         | smooth, tiny file                    |
+/// | ~30 s – 15 min          | 1          | a sequence of actions; cheap         |
+/// | 15 min – ~2 h (dayflow) | 0.5        | timelapse; chunk + Map-Reduce        |
+/// | ≥ ~2 h (long dayflow)   | 0.2        | aggressive timelapse for all-day     |
+///
+/// Returned as `f32` because the dayflow tiers are sub-1-fps; the integer
+/// [`FrameRateController`] covers the ≥1-fps recording tiers, while the dayflow
+/// capture path (Wave 2) consumes the fractional value directly.
+pub fn recommend_fps(expected: Duration) -> f32 {
+    let secs = expected.as_secs();
+    if secs <= 30 {
+        15.0
+    } else if secs <= 15 * 60 {
+        1.0
+    } else if secs <= 2 * 60 * 60 {
+        0.5
+    } else {
+        0.2
+    }
+}
+
 /// Throttles a capture loop to a target frame rate.
 #[derive(Debug, Clone)]
 pub struct FrameRateController {
@@ -78,6 +106,22 @@ mod tests {
         assert_eq!(FrameRateController::new(0).fps(), MIN_FPS);
         assert_eq!(FrameRateController::new(1000).fps(), MAX_FPS);
         assert_eq!(FrameRateController::new(5).fps(), 5);
+    }
+
+    #[test]
+    fn recommend_fps_is_duration_aware() {
+        // ≤30s, motion matters → smooth
+        assert_eq!(recommend_fps(Duration::from_secs(10)), 15.0);
+        assert_eq!(recommend_fps(Duration::from_secs(30)), 15.0);
+        // 30s–15min → 1 fps
+        assert_eq!(recommend_fps(Duration::from_secs(5 * 60)), 1.0);
+        assert_eq!(recommend_fps(Duration::from_secs(15 * 60)), 1.0);
+        // dayflow tier (15min–2h) → 0.5; long dayflow (≥2h) → 0.2
+        assert_eq!(recommend_fps(Duration::from_secs(60 * 60)), 0.5);
+        assert_eq!(recommend_fps(Duration::from_secs(4 * 60 * 60)), 0.2);
+        // dayflow-tier durations are always sub-1-fps
+        assert!(recommend_fps(Duration::from_secs(30 * 60)) <= 0.5);
+        assert!(recommend_fps(Duration::from_secs(12 * 60 * 60)) >= 0.2);
     }
 
     #[test]

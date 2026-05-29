@@ -17,10 +17,15 @@ use serde::{Deserialize, Serialize};
 /// that can be used to stop the recording or check its status.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct StartRecordingInput {
-    /// Frames per second for the recording (1-30, default: 1)
+    /// Frames per second for the recording (1-30, default: 1).
     ///
-    /// Lower values (1-5) are recommended for typical debugging sessions
-    /// to reduce file size.
+    /// Pick fps by how long you intend to record (duration-aware heuristic; see
+    /// `docs/FPS_AND_DAYFLOW.md`):
+    /// - ≤ ~30 s, motion matters → 15 (smooth, tiny file)
+    /// - ~30 s – 15 min, debugging → 1 (a sequence of actions; cheap)
+    /// - 15 min+ (all-day "dayflow") → sub-1 fps timelapse (0.2–0.5), which the
+    ///   dedicated dayflow tools handle (chunk + Map-Reduce), since this tool
+    ///   clamps to ≥1.
     #[schemars(range(min = 1, max = 30))]
     pub fps: Option<u32>,
 

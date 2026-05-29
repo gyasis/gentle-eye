@@ -52,7 +52,7 @@ Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
 
 ## Wave 1 — fps heuristic (PRD P0 · quick · gate-green) `[S]`
 
-- [ ] T210 [S] Duration-aware fps heuristic in `capture/frame_rate.rs` (≤30s→5–30; 30s–15min→1; 15min–hours→0.2–0.5) + **document it** in the `start_recording` MCP tool description AND `docs/FPS_AND_DAYFLOW.md`.
+- [x] T210 [S] Duration-aware fps heuristic in `capture/frame_rate.rs` (≤30s→5–30; 30s–15min→1; 15min–hours→0.2–0.5) + **document it** in the `start_recording` MCP tool description AND `docs/FPS_AND_DAYFLOW.md`.
       `> DONE:` heuristic fn returns 0.2–0.5 for dayflow-tier durations (unit test); `docs/FPS_AND_DAYFLOW.md` exists; tool desc mentions the table; `cargo check` green.
 
 ## Wave 2 — Long recording + on-the-fly 15-min chunking (PRD P1) `[S]`
