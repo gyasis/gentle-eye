@@ -1,5 +1,5 @@
 {
-  "_comment": "gentle-eye project-local tier ordering — CURATED 5-TIER LADDER (2026-05-28, user pick for the dayflow dogfood). Climb order: all-local → openai-artisan-local-critic → mixed-budget → mixed-mid → claude-code-handoff. Drops the redundant local-heavy variants (2,3), the gemini-lib tier (4, blocked anyway), the free groq/cerebras (5,6), the reasoning tier (10), and BOTH marker-gated frontier paid tiers (openai-heavy 11, openai-max 13). Net effect: local-first, then a short cheap-mixed escalation, then senior in-house handoff as the last mile — no frontier-paid spend reachable. Full 13-tier ladder preserved at ralph-tiers.full-13.bak.json. NOTE: this is the ma-loop FALLBACK ladder; in lite mode the in-session agent runs the [S] cargo-check checkpoints and only hands a stuck file to ma-loop.",
+  "_comment": "gentle-eye project-local tier ordering — USER PICK [1,2,3,5,7] from the full 13-tier ladder, in SOURCE ORDER (2026-05-28, corrected). Keeps the BUILT local horsepower tiers (local-coder-heavy 50GB qwen3-coder-next + local-reasoning-heavy 70b deepseek-r1) — do NOT drop these. Climb: all-local → local-coder-heavy → local-reasoning-heavy → groq-fast-free → openai-artisan-local-critic. Local-first + free before any paid; cheapest paid hop (gpt-4o-mini artisan, LOCAL critic) is the ceiling — NO handoff, NO mixed-paid, NO frontier. Full 13-tier ladder preserved at ralph-tiers.full-13.bak.json. NOTE: ma-loop FALLBACK ladder; in lite mode the in-session agent runs the [S] cargo-check checkpoints and only hands a stuck file to ma-loop.",
   "tiers": [
     {
       "_note": "TIER 1 — all-warm-local. ~56GB fits unified mem with TTS sidecars evicted. Default.",
@@ -13,7 +13,42 @@
       }
     },
     {
-      "_note": "TIER 2 (was 7) — first paid escalation, cheap. OpenAI mini artisan, LOCAL critic keeps cost down.",
+      "_note": "TIER 2 NEW — biggest local coder. Artisan=50GB; atelier MUST evict before loading. Run artisan-turn alone, then unload before librarian/critic. Slow but $0.",
+      "name": "local-coder-heavy",
+      "mode": "full",
+      "maxIterations": 4,
+      "requires_atelier_evict": true,
+      "models": {
+        "artisan": "ollama/nishtahir/qwen3-coder-next:latest",
+        "librarian": "ollama/gemma3:27b",
+        "critic": "ollama/deepseek-r1:32b"
+      }
+    },
+    {
+      "_note": "TIER 3 NEW — strongest local reasoner as critic. Critic=70b; pair with the 30b artisan to fit in mem when librarian is unloaded.",
+      "name": "local-reasoning-heavy",
+      "mode": "full",
+      "maxIterations": 4,
+      "requires_atelier_evict": true,
+      "models": {
+        "artisan": "ollama/qwen3-coder:30b",
+        "librarian": "ollama/gemma3:27b",
+        "critic": "ollama/deepseek-r1:70b"
+      }
+    },
+    {
+      "_note": "TIER 4 (was 5) — free fast cloud. Needs GROQ_API_KEY; skips on missing key at preflight.",
+      "name": "groq-fast-free",
+      "mode": "full",
+      "maxIterations": 5,
+      "models": {
+        "artisan": "groq/llama-3.3-70b-versatile",
+        "librarian": "groq/llama-3.1-8b-instant",
+        "critic": "groq/llama-3.3-70b-versatile"
+      }
+    },
+    {
+      "_note": "TIER 5 (was 7) — cheapest paid hop + LOCAL critic to keep cost down. The ceiling of this ladder.",
       "name": "openai-artisan-local-critic",
       "mode": "full",
       "maxIterations": 5,
@@ -21,41 +56,6 @@
         "artisan": "openai/gpt-4o-mini",
         "librarian": "google/gemini-2.5-flash",
         "critic": "ollama/deepseek-r1:32b"
-      }
-    },
-    {
-      "_note": "TIER 3 (was 8) — budget mixed. gemini-2.5-pro critic for stronger review.",
-      "name": "mixed-budget",
-      "mode": "full",
-      "maxIterations": 5,
-      "models": {
-        "artisan": "openai/gpt-4o-mini",
-        "librarian": "google/gemini-2.5-flash",
-        "critic": "google/gemini-2.5-pro"
-      }
-    },
-    {
-      "_note": "TIER 4 (was 9) — mid mixed. gpt-4.1-mini artisan, more iters.",
-      "name": "mixed-mid",
-      "mode": "full",
-      "maxIterations": 6,
-      "models": {
-        "artisan": "openai/gpt-4.1-mini",
-        "librarian": "google/gemini-2.5-flash",
-        "critic": "google/gemini-2.5-pro"
-      }
-    },
-    {
-      "_note": "TIER 5 (was 12) — senior in-house escalation, LAST MILE. Marker dropped so it fires automatically when reached. We code well; handoff is the right final escalation.",
-      "name": "claude-code-handoff",
-      "type": "handoff",
-      "mode": "full",
-      "maxIterations": 1,
-      "handoff_timeout_sec": 1800,
-      "models": {
-        "artisan": "claude-code-session",
-        "librarian": "claude-code-session",
-        "critic": "claude-code-session"
       }
     }
   ],
