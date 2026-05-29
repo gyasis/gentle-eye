@@ -1,0 +1,376 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛡️ auth for agents: https://vestauth.com
+[09:33:18] [32mINFO[0m 🤖 Micro Agent starting (Ralph Loop engine) {"target":"src/dayflow/models.rs","framework":"cargo","maxIterations":"5","maxBudget":"2.00","maxDuration":"15","adversarial":false,"resetFrequency":"1","simple":"5","escalate":true,"generate":true,"objective":"[P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.","test":"./.tooling/bin/cargo check --message-format=short","config":"/home/gyasis/Documents/code/gentle-eye/ralph.config.yaml"}
+(node:2378147) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[09:33:18] [32mINFO[0m Configuration loaded
+[09:33:18] [32mINFO[0m Run parameters prepared {"objective":"[P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.","targetFile":"src/dayflow/models.rs","workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short","testFramework":"cargo","maxIterations":5,"maxBudget":2,"maxDuration":15,"simpleIterations":5,"noEscalate":false,"fullMode":false}
+[09:33:18] [32mINFO[0m [goal-as-test] "./.tooling/bin/cargo check --message-format=short" is compile-only — generating a behavioral test for src/dayflow/models.rs
+[09:33:59] [32mINFO[0m [goal-as-test] Generated tests/sentinel_models.rs; test command → ./.tooling/bin/cargo test --test sentinel_models
+[09:33:59] [32mINFO[0m Infrastructure initialized
+[09:33:59] [32mINFO[0m Agents initialized {"librarian":"gemma3:27b","artisan":"qwen3-coder:30b","critic":"deepseek-r1:32b"}
+⚠️  Unknown model "gemma3:27b" - using conservative 8k token limit
+⚠️  Unknown model "qwen3-coder:30b" - using conservative 8k token limit
+⚠️  Unknown model "deepseek-r1:32b" - using conservative 8k token limit
+[09:33:59] [32mINFO[0m Starting iteration loop {"sessionId":"a20025b3-9ac8-4c5e-833c-8a3a2408ea2d","maxIterations":5}
+[09:33:59] [32mINFO[0m 
+============================================================
+[09:33:59] [32mINFO[0m Simple Mode: up to 5 iteration(s)
+[09:33:59] [32mINFO[0m ============================================================
+[09:33:59] [32mINFO[0m 
+[Simple 1/5]
+[09:33:59] [32mINFO[0m Simple Mode: Artisan generating code...
+[09:33:59] [32mINFO[0m [artisan] artisan agent initialized {"session":"a20025b3-9ac8-4c5e-833c-8a3a2408ea2d","iteration":{"iteration":1,"maxIterations":5,"objective":"[P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[09:33:59] [32mINFO[0m [artisan] artisan agent executing
+[09:34:08] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/models.rs","size":1502}
+Unknown model "qwen3-coder:30b", using default pricing
+[09:34:08] [32mINFO[0m [artisan] artisan agent completed {"duration":9019,"tokensUsed":1103,"cost":0.001103}
+[09:34:08] [32mINFO[0m   Artisan: Code generated based on objective
+[09:34:08] [32mINFO[0m   Change:  [object Object]
+[09:34:08] [32mINFO[0m Simple Mode: Running tests...
+[09:34:08] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:34:08] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo test --test sentinel_models","detectedFramework":"cargo"}
+[09:34:08] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:34:12] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:8:23\n    |\n  8 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:48:21\n    |\n 48 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:8:23\n    |\n  8 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:48:21\n    |\n 48 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[09:34:12] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[09:34:12] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[09:34:12] [32mINFO[0m       │ Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[09:34:12] [32mINFO[0m       │ error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`
+[09:34:12] [32mINFO[0m       │   --> src/dayflow/mod.rs:29:23
+[09:34:12] [32mINFO[0m       │    |
+[09:34:12] [32mINFO[0m       │ 29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,
+[09:34:12] [32mINFO[0m       │    |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`
+[09:34:12] [32mINFO[0m       │    |                       |
+[09:34:12] [32mINFO[0m       │    |                       no `ChunkRef` in `dayflow::models`
+[09:34:12] [32mINFO[0m       │ 
+[09:34:12] [32mINFO[0m       │ error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+[09:34:12] [32mINFO[0m       │    --> src/dayflow/models.rs:8:23
+[09:34:12] [32mINFO[0m       │     |
+[09:34:12] [32mINFO[0m   Cost:  $0.0011 this iteration
+[09:34:12] [32mINFO[0m [librarian] librarian agent cleaning up
+[09:34:12] [32mINFO[0m [artisan] artisan agent cleaning up
+[09:34:12] [32mINFO[0m [critic] critic agent cleaning up
+[09:34:12] [32mINFO[0m Context reset complete
+[09:34:12] [32mINFO[0m 
+[Simple 2/5]
+[09:34:12] [32mINFO[0m Simple Mode: Artisan generating code...
+[09:34:12] [32mINFO[0m [artisan] artisan agent initialized {"session":"a20025b3-9ac8-4c5e-833c-8a3a2408ea2d","iteration":{"iteration":2,"maxIterations":5,"objective":"[P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[09:34:12] [32mINFO[0m [artisan] artisan agent executing
+[09:34:20] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/models.rs","size":1563}
+Unknown model "qwen3-coder:30b", using default pricing
+[09:34:20] [32mINFO[0m [artisan] artisan agent completed {"duration":7499,"tokensUsed":1331,"cost":0.001331}
+[09:34:20] [32mINFO[0m   Artisan: Code generated based on objective
+[09:34:20] [32mINFO[0m   Change:  [object Object]
+[09:34:20] [32mINFO[0m Simple Mode: Running tests...
+[09:34:20] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:34:20] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo test --test sentinel_models","detectedFramework":"cargo"}
+[09:34:20] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:34:23] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:20:23\n    |\n 20 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:48:21\n    |\n 48 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:20:23\n    |\n 20 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:48:21\n    |\n 48 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[09:34:23] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[09:34:23] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[09:34:23] [32mINFO[0m       │ Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[09:34:23] [32mINFO[0m       │ error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`
+[09:34:23] [32mINFO[0m       │   --> src/dayflow/mod.rs:29:23
+[09:34:23] [32mINFO[0m       │    |
+[09:34:23] [32mINFO[0m       │ 29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,
+[09:34:23] [32mINFO[0m       │    |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`
+[09:34:23] [32mINFO[0m       │    |                       |
+[09:34:23] [32mINFO[0m       │    |                       no `ChunkRef` in `dayflow::models`
+[09:34:23] [32mINFO[0m       │ 
+[09:34:23] [32mINFO[0m       │ error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+[09:34:23] [32mINFO[0m       │    --> src/dayflow/models.rs:20:23
+[09:34:23] [32mINFO[0m       │     |
+[09:34:23] [32mINFO[0m   Cost:  $0.0013 this iteration
+[09:34:23] [32mINFO[0m [librarian] librarian agent cleaning up
+[09:34:23] [32mINFO[0m [artisan] artisan agent cleaning up
+[09:34:23] [32mINFO[0m [critic] critic agent cleaning up
+[09:34:23] [32mINFO[0m Context reset complete
+[09:34:23] [32mINFO[0m 
+[Simple 3/5]
+[09:34:23] [32mINFO[0m Simple Mode: Artisan generating code...
+[09:34:23] [32mINFO[0m [artisan] artisan agent initialized {"session":"a20025b3-9ac8-4c5e-833c-8a3a2408ea2d","iteration":{"iteration":3,"maxIterations":5,"objective":"[P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[09:34:23] [32mINFO[0m [artisan] artisan agent executing
+[09:34:32] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/models.rs","size":1874}
+Unknown model "qwen3-coder:30b", using default pricing
+[09:34:32] [32mINFO[0m [artisan] artisan agent completed {"duration":9819,"tokensUsed":1528,"cost":0.001528}
+[09:34:32] [32mINFO[0m   Artisan: Code generated based on objective
+[09:34:32] [32mINFO[0m   Change:  [object Object]
+[09:34:32] [32mINFO[0m Simple Mode: Running tests...
+[09:34:32] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:34:32] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo test --test sentinel_models","detectedFramework":"cargo"}
+[09:34:32] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:34:35] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:21:23\n    |\n 21 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:52:21\n    |\n 52 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:21:23\n    |\n 21 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:52:21\n    |\n 52 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[09:34:35] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[09:34:35] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[09:34:35] [32mINFO[0m       │ Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[09:34:35] [32mINFO[0m       │ error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`
+[09:34:35] [32mINFO[0m       │   --> src/dayflow/mod.rs:29:23
+[09:34:35] [32mINFO[0m       │    |
+[09:34:35] [32mINFO[0m       │ 29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,
+[09:34:35] [32mINFO[0m       │    |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`
+[09:34:35] [32mINFO[0m       │    |                       |
+[09:34:35] [32mINFO[0m       │    |                       no `ChunkRef` in `dayflow::models`
+[09:34:35] [32mINFO[0m       │ 
+[09:34:35] [32mINFO[0m       │ error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+[09:34:35] [32mINFO[0m       │    --> src/dayflow/models.rs:21:23
+[09:34:35] [32mINFO[0m       │     |
+[09:34:35] [32mINFO[0m   Cost:  $0.0015 this iteration
+[09:34:35] [32mINFO[0m [librarian] librarian agent cleaning up
+[09:34:35] [32mINFO[0m [artisan] artisan agent cleaning up
+[09:34:35] [32mINFO[0m [critic] critic agent cleaning up
+[09:34:35] [32mINFO[0m Context reset complete
+[09:34:35] [32mINFO[0m 
+[Simple 4/5]
+[09:34:35] [32mINFO[0m Simple Mode: Artisan generating code...
+[09:34:35] [32mINFO[0m [artisan] artisan agent initialized {"session":"a20025b3-9ac8-4c5e-833c-8a3a2408ea2d","iteration":{"iteration":4,"maxIterations":5,"objective":"[P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[09:34:35] [32mINFO[0m [artisan] artisan agent executing
+[09:34:43] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/models.rs","size":1582}
+Unknown model "qwen3-coder:30b", using default pricing
+[09:34:43] [32mINFO[0m [artisan] artisan agent completed {"duration":7377,"tokensUsed":1336,"cost":0.0013360000000000002}
+[09:34:43] [32mINFO[0m   Artisan: Code generated based on objective
+[09:34:43] [32mINFO[0m   Change:  [object Object]
+[09:34:43] [32mINFO[0m Simple Mode: Running tests...
+[09:34:43] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:34:43] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo test --test sentinel_models","detectedFramework":"cargo"}
+[09:34:43] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:34:46] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:20:23\n    |\n 20 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:48:21\n    |\n 48 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:20:23\n    |\n 20 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:48:21\n    |\n 48 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[09:34:46] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[09:34:46] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[09:34:46] [32mINFO[0m       │ Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[09:34:46] [32mINFO[0m       │ error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`
+[09:34:46] [32mINFO[0m       │   --> src/dayflow/mod.rs:29:23
+[09:34:46] [32mINFO[0m       │    |
+[09:34:46] [32mINFO[0m       │ 29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,
+[09:34:46] [32mINFO[0m       │    |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`
+[09:34:46] [32mINFO[0m       │    |                       |
+[09:34:46] [32mINFO[0m       │    |                       no `ChunkRef` in `dayflow::models`
+[09:34:46] [32mINFO[0m       │ 
+[09:34:46] [32mINFO[0m       │ error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+[09:34:46] [32mINFO[0m       │    --> src/dayflow/models.rs:20:23
+[09:34:46] [32mINFO[0m       │     |
+[09:34:46] [32mINFO[0m   Cost:  $0.0013 this iteration
+[09:34:46] [32mINFO[0m [librarian] librarian agent cleaning up
+[09:34:46] [32mINFO[0m [artisan] artisan agent cleaning up
+[09:34:46] [32mINFO[0m [critic] critic agent cleaning up
+[09:34:46] [32mINFO[0m Context reset complete
+[09:34:46] [32mINFO[0m 
+[Simple 5/5]
+[09:34:46] [32mINFO[0m Simple Mode: Artisan generating code...
+[09:34:46] [32mINFO[0m [artisan] artisan agent initialized {"session":"a20025b3-9ac8-4c5e-833c-8a3a2408ea2d","iteration":{"iteration":5,"maxIterations":5,"objective":"[P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[09:34:46] [32mINFO[0m [artisan] artisan agent executing
+[09:35:00] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/models.rs","size":3197}
+Unknown model "qwen3-coder:30b", using default pricing
+[09:35:00] [32mINFO[0m [artisan] artisan agent completed {"duration":14160,"tokensUsed":1740,"cost":0.00174}
+[09:35:00] [32mINFO[0m   Artisan: Code generated based on objective
+[09:35:00] [32mINFO[0m   Change:  [object Object]
+[09:35:00] [32mINFO[0m Simple Mode: Running tests...
+[09:35:00] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:35:00] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo test --test sentinel_models","detectedFramework":"cargo"}
+[09:35:00] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo test --test sentinel_models"}
+[09:35:03] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:21:23\n    |\n 21 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:52:21\n    |\n 52 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo test --test sentinel_models\n   Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nerror[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`\n  --> src/dayflow/mod.rs:29:23\n   |\n29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,\n   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`\n   |                       |\n   |                       no `ChunkRef` in `dayflow::models`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:21:23\n    |\n 21 |     pub recording_id: Uuid,\n    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nerror[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied\n   --> src/dayflow/models.rs:52:21\n    |\n 52 |     pub session_id: Uuid,\n    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`\n    |\n    = help: the following other types implement trait `JsonSchema`:\n              &'a T\n              &'a mut T\n              ()\n              (T0, T1)\n              (T0, T1, T2)\n              (T0, T1, T2, T3)\n              (T0, T1, T2, T3, T4)\n              (T0, T1, T2, T3, T4, T5)\n            and 162 others\nnote: required by a bound in `schemars::_private::insert_object_property`\n   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43\n    |\n126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(\n    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`\n\nSome errors have detailed explanations: E0277, E0432.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[09:35:03] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[09:35:03] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[09:35:03] [32mINFO[0m       │ Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[09:35:03] [32mINFO[0m       │ error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`
+[09:35:03] [32mINFO[0m       │   --> src/dayflow/mod.rs:29:23
+[09:35:03] [32mINFO[0m       │    |
+[09:35:03] [32mINFO[0m       │ 29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,
+[09:35:03] [32mINFO[0m       │    |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`
+[09:35:03] [32mINFO[0m       │    |                       |
+[09:35:03] [32mINFO[0m       │    |                       no `ChunkRef` in `dayflow::models`
+[09:35:03] [32mINFO[0m       │ 
+[09:35:03] [32mINFO[0m       │ error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+[09:35:03] [32mINFO[0m       │    --> src/dayflow/models.rs:21:23
+[09:35:03] [32mINFO[0m       │     |
+[09:35:03] [32mINFO[0m   Cost:  $0.0017 this iteration
+[09:35:03] [32mINFO[0m [librarian] librarian agent cleaning up
+[09:35:03] [32mINFO[0m [artisan] artisan agent cleaning up
+[09:35:03] [32mINFO[0m [critic] critic agent cleaning up
+[09:35:03] [32mINFO[0m Context reset complete
+[09:35:03] [32mINFO[0m 
+============================================================
+[09:35:03] [32mINFO[0m Escalating to Full Mode after 5 simple iteration(s)
+[09:35:03] [32mINFO[0m    Summary: SIMPLE MODE HISTORY (5 iterations, all failed):
+
+Iteration 1: Code generated based on objective. Tests: Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+error[E0432]: unresolved im...
+[09:35:03] [32mINFO[0m    Remaining budget: $1.993
+[09:35:03] [32mINFO[0m ============================================================
+[09:35:03] [32mINFO[0m 
+============================================================
+[09:35:03] [32mINFO[0m Micro Agent Complete
+[09:35:03] [32mINFO[0m ============================================================
+[09:35:03] [32mINFO[0m Status:     FAILED
+[09:35:03] [32mINFO[0m Mode:       Full only
+[09:35:03] [32mINFO[0m Iterations: 5 simple / 0 full / 5 total
+[09:35:03] [32mINFO[0m Cost:       $0.007 simple / $0.000 full / $0.007 total
+[09:35:03] [32mINFO[0m Duration:   105.5s
+[09:35:03] [32mINFO[0m 
+Simple mode errors:
+[09:35:03] [32mINFO[0m   - "Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`
+  --> src/dayflow/mod.rs:29:23
+   |
+29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,
+   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`
+   |                       |
+   |                       no `ChunkRef` in `dayflow::models`
+
+error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+   --> src/dayflow/models.rs:8:23
+    |
+  8 |     pub recording_id: Uuid,
+    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`
+    |
+    = help: the following other types implement trait `JsonSchema`:
+              &'a T
+              &'a mut T
+              ()
+              (T0, T1)
+              (T0, T1, T2)
+              (T0, T1, T2, T3)
+              (T0, T1, T2, T3, T4)
+              (T0, T1, T2, T3, T4, T5)
+            and 162 others
+note: required by a bound in `schemars::_private::insert_object_property`
+   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43
+    |
+126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(
+    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`
+
+error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+   --> src/dayflow/models.rs:48:21
+    |
+ 48 |     pub session_id: Uuid,
+    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`
+    |
+    = help: the following other types implement trait `JsonSchema`:
+              &'a T
+              &'a mut T
+              ()
+              (T0, T1)
+              (T0, T1, T2)
+              (T0, T1, T2, T3)
+              (T0, T1, T2, T3, T4)
+              (T0, T1, T2, T3, T4, T5)
+            and 162 others
+note: required by a bound in `schemars::_private::insert_object_property`
+   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43
+    |
+126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(
+    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`
+
+Some errors have detailed explanations: E0277, E0432.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `gentle-eye` (lib) due to 3 previous errors"
+[09:35:03] [32mINFO[0m   - "Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`
+  --> src/dayflow/mod.rs:29:23
+   |
+29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,
+   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`
+   |                       |
+   |                       no `ChunkRef` in `dayflow::models`
+
+error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+   --> src/dayflow/models.rs:20:23
+    |
+ 20 |     pub recording_id: Uuid,
+    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`
+    |
+    = help: the following other types implement trait `JsonSchema`:
+              &'a T
+              &'a mut T
+              ()
+              (T0, T1)
+              (T0, T1, T2)
+              (T0, T1, T2, T3)
+              (T0, T1, T2, T3, T4)
+              (T0, T1, T2, T3, T4, T5)
+            and 162 others
+note: required by a bound in `schemars::_private::insert_object_property`
+   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43
+    |
+126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(
+    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`
+
+error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+   --> src/dayflow/models.rs:48:21
+    |
+ 48 |     pub session_id: Uuid,
+    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`
+    |
+    = help: the following other types implement trait `JsonSchema`:
+              &'a T
+              &'a mut T
+              ()
+              (T0, T1)
+              (T0, T1, T2)
+              (T0, T1, T2, T3)
+              (T0, T1, T2, T3, T4)
+              (T0, T1, T2, T3, T4, T5)
+            and 162 others
+note: required by a bound in `schemars::_private::insert_object_property`
+   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43
+    |
+126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(
+    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`
+
+Some errors have detailed explanations: E0277, E0432.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `gentle-eye` (lib) due to 3 previous errors"
+[09:35:03] [32mINFO[0m   - "Compiling gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`
+  --> src/dayflow/mod.rs:29:23
+   |
+29 |     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,
+   |                       ^^^^^^^^                ^^^^^^^^^^^ no `DayflowMode` in `dayflow::models`
+   |                       |
+   |                       no `ChunkRef` in `dayflow::models`
+
+error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+   --> src/dayflow/models.rs:21:23
+    |
+ 21 |     pub recording_id: Uuid,
+    |                       ^^^^ the trait `JsonSchema` is not implemented for `Uuid`
+    |
+    = help: the following other types implement trait `JsonSchema`:
+              &'a T
+              &'a mut T
+              ()
+              (T0, T1)
+              (T0, T1, T2)
+              (T0, T1, T2, T3)
+              (T0, T1, T2, T3, T4)
+              (T0, T1, T2, T3, T4, T5)
+            and 162 others
+note: required by a bound in `schemars::_private::insert_object_property`
+   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43
+    |
+126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(
+    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`
+
+error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied
+   --> src/dayflow/models.rs:52:21
+    |
+ 52 |     pub session_id: Uuid,
+    |                     ^^^^ the trait `JsonSchema` is not implemented for `Uuid`
+    |
+    = help: the following other types implement trait `JsonSchema`:
+              &'a T
+              &'a mut T
+              ()
+              (T0, T1)
+              (T0, T1, T2)
+              (T0, T1, T2, T3)
+              (T0, T1, T2, T3, T4)
+              (T0, T1, T2, T3, T4, T5)
+            and 162 others
+note: required by a bound in `schemars::_private::insert_object_property`
+   --> /home/gyasis/Documents/code/gentle-eye/.tooling/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/schemars-0.8.22/src/_private.rs:126:43
+    |
+126 | pub fn insert_object_property<T: ?Sized + JsonSchema>(
+    |                                           ^^^^^^^^^^ required by this bound in `insert_object_property`
+
+Some errors have detailed explanations: E0277, E0432.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `gentle-eye` (lib) due to 3 previous errors"
