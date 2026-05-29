@@ -57,9 +57,21 @@ CREATE TABLE IF NOT EXISTS analysis_results (
     FOREIGN KEY (request_id) REFERENCES analysis_requests(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS timeline_entries (
+    id              TEXT PRIMARY KEY,
+    recording_id    TEXT NOT NULL,
+    start_time      TEXT NOT NULL,
+    end_time        TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    app             TEXT NOT NULL,
+    activity        TEXT NOT NULL,
+    summary         TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_recordings_status ON recordings(status);
 CREATE INDEX IF NOT EXISTS idx_recordings_start_time ON recordings(start_time);
 CREATE INDEX IF NOT EXISTS idx_results_request ON analysis_results(request_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_start ON timeline_entries(start_time);
 "#;
 
 /// Open (or create) the database at `db_path` and apply the schema.

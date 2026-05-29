@@ -77,9 +77,9 @@ Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
 
 ## Wave 4 — Timeline store + real-time scheduler (PRD P3 · D4) `[S]`
 
-- [ ] T240 `storage/database.rs` migration — `timeline_entries` table matching `TimelineEntry` columns EXACTLY (idempotent runner, `init_in_memory` for tests).
+- [x] T240 `storage/database.rs` migration — `timeline_entries` table matching `TimelineEntry` columns EXACTLY (idempotent runner, `init_in_memory` for tests).
       `> DONE:` migration creates the table; in-memory test inserts+selects a row.
-- [ ] T241 `src/dayflow/timeline.rs` — `TimelineStore` trait + impl over `StorageManager`'s connection: `insert_entry`, `query_range(from,to)`, `count`. Injection-safe.
+- [x] T241 `src/dayflow/timeline.rs` — `TimelineStore` trait + impl over `StorageManager`'s connection: `insert_entry`, `query_range(from,to)`, `count`. Injection-safe.
       `> DONE:` in-memory round-trip test (insert → query_range returns ordered entries).
 - [ ] T242 Real-time scheduler — background tokio task that, every `chunk_minutes` during an active session, summarizes the just-closed chunk (T230) and writes its `TimelineEntry` (T241). Channel-based, concurrency-safe with the capture loop.
       `> DONE:` a running session with stub provider produces timeline entries live (not only after stop); test with a fast clock.
