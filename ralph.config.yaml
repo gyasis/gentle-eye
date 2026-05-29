@@ -2,7 +2,7 @@
 models:
   artisan:
     provider: 'ollama'
-    model: 'nishtahir/qwen3-coder-next:latest'
+    model: 'qwen3-coder:30b'
     baseUrl: 'http://192.168.0.159:11434'
   librarian:
     provider: 'ollama'
