@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 const DEFAULT_OLLAMA_MAX_VIDEO_SIZE: u64 = 104_857_600; // 100 MB
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
-// Vision model tag as actually pulled on the LAN test box (192.168.0.159);
+// Vision model tag as actually pulled on the LAN test box (<LAN_OLLAMA_HOST>);
 // set `OLLAMA_HOST` to point there. Verified live 2026-05-28. Overridable via
 // `VisionConfig.model` (the box also has `qwen2.5vl:32b`, `moondream`).
 const DEFAULT_MODEL: &str = "qwen2.5vl:7b";

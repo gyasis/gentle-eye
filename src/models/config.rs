@@ -426,7 +426,17 @@ impl VisionConfig {
     /// assert_eq!(config.ollama_endpoint(), "http://localhost:11434");
     /// ```
     pub fn ollama_endpoint(&self) -> String {
-        format!("http://{}:{}", self.ollama_host, self.ollama_port)
+        // Robust against a host that already carries a scheme and/or port (a
+        // misconfig that previously produced `http://http://host:11434:11434`).
+        // Normalize to a bare host, then prefix scheme + port exactly once.
+        let host = self
+            .ollama_host
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        let host = host.split(':').next().unwrap_or(host);
+        format!("http://{}:{}", host, self.ollama_port)
     }
 
     /// Returns the current model name based on the selected provider.

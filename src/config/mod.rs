@@ -181,7 +181,7 @@ fn default_ollama_port() -> u16 {
 }
 
 fn default_ollama_model() -> String {
-    // Vision model present on the LAN box (192.168.0.159); validated live.
+    // Vision model present on the LAN box (<LAN_OLLAMA_HOST>); validated live.
     "qwen2.5vl:7b".to_string()
 }
 

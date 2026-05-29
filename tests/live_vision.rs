@@ -4,7 +4,7 @@
 //!
 //! Run them explicitly:
 //!   set -a; . ~/dev/.env; set +a
-//!   OLLAMA_HOST=http://192.168.0.159:11434 \
+//!   OLLAMA_HOST=http://<LAN_OLLAMA_HOST>:11434 \
 //!     cargo test --test live_vision -- --ignored --nocapture
 
 use gentle_eye::analysis::{GeminiProvider, OllamaProvider};

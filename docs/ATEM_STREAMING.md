@@ -44,8 +44,8 @@ gentle-eye  capture-stream  ──▶  PNG frame  ──▶  gentle-eye analyze 
 | `mediamtx` | `~/.local/bin/mediamtx` + cfg `~/.config/atem-relay/mediamtx.yml` | single-binary relay (host process — subject to ufw) |
 | `atem-serve` (script) | `~/.local/bin/atem-serve` | USB-UVC capture → HLS (fallback path) |
 
-This box's IPs: wired `enp2s0 192.168.0.146` · Wi-Fi `wlo1 192.168.1.108`.
-The ATEM on the LAN: `192.168.0.170` (Blackmagic MAC `7c:2e:0d`), USB device `/dev/video4` (MJPEG 1080p24).
+This box's IPs: wired `enp2s0 <THIS_BOX_IP>` · Wi-Fi `wlo1 <THIS_BOX_WIFI>`.
+The ATEM on the LAN: `<ATEM_IP>` (Blackmagic MAC `<ATEM_MAC>`), USB device `/dev/video4` (MJPEG 1080p24).
 
 ---
 
@@ -86,7 +86,7 @@ ports bypass ufw** (see §5). The relay is reachable from the LAN with *no firew
 | Field | Value |
 |---|---|
 | Service | **Custom RTMP** (may require loading a streaming XML/profile in ATEM Software Control) |
-| Server | `rtmp://192.168.0.146:7001/live`  (the **wired** IP, port **7001**) |
+| Server | `rtmp://<THIS_BOX_IP>:7001/live`  (the **wired** IP, port **7001**) |
 | Stream Key | `atem` |
 | then | press the **STREAM** button — confirm it shows a live **data rate (kbps)** |
 
@@ -166,7 +166,7 @@ is ATEM-side (STREAM not started, wrong server/key, or custom-RTMP XML not loade
 
 | Item | Value |
 |---|---|
-| ATEM stream target | `rtmp://192.168.0.146:7001/live`  key `atem` |
+| ATEM stream target | `rtmp://<THIS_BOX_IP>:7001/live`  key `atem` |
 | gentle-eye capture URL | `rtmp://localhost:7001/live/atem` |
 | Relay ports | RTMP 7001 · HLS 7080 · RTSP 8554 |
 | Relay container | `docker start atem-relay` (auto-restarts) |
@@ -179,7 +179,7 @@ is ATEM-side (STREAM not started, wrong server/key, or custom-RTMP XML not loade
 |---|---|---|
 | capture → `Input/output error` / no frame | nothing publishing to `live/atem` | start ATEM STREAM (or `atem-serve`); confirm port 7001 |
 | frame is ~6 KB | ATEM on-air source is no-signal | put a real HDMI source on air on the ATEM |
-| ATEM STREAM "connecting"/fails | can't reach relay | confirm `rtmp://192.168.0.146:7001/live` + relay up; if host-process relay, `ufw allow 7001` |
+| ATEM STREAM "connecting"/fails | can't reach relay | confirm `rtmp://<THIS_BOX_IP>:7001/live` + relay up; if host-process relay, `ufw allow 7001` |
 | `path '…' is not configured` (mediamtx) | empty config | `paths: { all_others: }` in `~/.config/atem-relay/mediamtx.yml` |
 | publisher shows `Lavf` user-agent | it's your own ffmpeg test, not the ATEM | `pkill -9 -x ffmpeg`, re-capture |
 

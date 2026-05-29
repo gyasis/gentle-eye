@@ -42,3 +42,9 @@ recordings/
 *.db
 *.sqlite
 .tooling/
+
+# machine-local config (private LAN addresses; not for the public repo)
+dev-kid.yml
+ralph.config.yaml
+ralph-tiers.json
+ralph-tiers.full-13.bak.json
