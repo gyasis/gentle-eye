@@ -1,5 +1,12 @@
 {
   "tasks": {
+    "T001": {
+      "mode": "native",
+      "command": "T200 [P] `src/dayflow/mod.rs` — module root: `pub mod {models, engine, summarizer, timeline, retention, daemon}` + re-exports. Wire `pub mod dayflow;` into `src/lib.rs`.",
+      "status": "running",
+      "started_at": "2026-05-29T01:15:21.172091422Z",
+      "constitution_rules": []
+    },
     "T014": {
       "mode": "native",
       "command": "T050: Declare submodules affecting `src/security/mod.rs`",
@@ -7,11 +14,25 @@
       "started_at": "2026-05-28T08:26:04.444455465Z",
       "constitution_rules": []
     },
-    "T012": {
+    "T002": {
       "mode": "native",
-      "command": "T023: Author error enum (thiserror) from data-model affecting `src/contracts/errors.rs`",
+      "command": "T201 [P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.",
       "status": "running",
-      "started_at": "2026-05-28T08:26:04.439304882Z",
+      "started_at": "2026-05-29T01:15:21.177307711Z",
+      "constitution_rules": []
+    },
+    "T004": {
+      "mode": "native",
+      "command": "T203 Extend `src/config/mod.rs` — `DayflowConfig { chunk_minutes: 15, record_fps: 0.5, default_provider: Gemini, retention: RetentionConfig, disk_budget_bytes }`; sane serde defaults.",
+      "status": "running",
+      "started_at": "2026-05-29T01:15:21.188324016Z",
+      "constitution_rules": []
+    },
+    "T005": {
+      "mode": "native",
+      "command": "T210 Duration-aware fps heuristic in `capture/frame_rate.rs` (≤30s→5–30; 30s–15min→1; 15min–hours→0.2–0.5) + **document it** in the `start_recording` MCP tool description AND `docs/FPS_AND_DAYFLOW.md`.",
+      "status": "running",
+      "started_at": "2026-05-29T01:19:29.249233008Z",
       "constitution_rules": []
     },
     "T013": {
@@ -21,11 +42,18 @@
       "started_at": "2026-05-28T08:26:04.442000182Z",
       "constitution_rules": []
     },
-    "T002": {
+    "T012": {
       "mode": "native",
-      "command": "T010: Promote synthesized HIGH-conf version affecting `src/models/mod.rs`",
+      "command": "T023: Author error enum (thiserror) from data-model affecting `src/contracts/errors.rs`",
       "status": "running",
-      "started_at": "2026-05-27T07:14:44.414425377Z",
+      "started_at": "2026-05-28T08:26:04.439304882Z",
+      "constitution_rules": []
+    },
+    "T003": {
+      "mode": "native",
+      "command": "T202 [P] `src/dayflow/errors.rs` (or extend `contracts/errors.rs`) — `DayflowError` enum + `From` convs + `mcp_error_code()` mapping (mirror `GentleEyeError`).",
+      "status": "running",
+      "started_at": "2026-05-29T01:15:21.182437892Z",
       "constitution_rules": []
     }
   }

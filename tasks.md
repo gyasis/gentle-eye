@@ -41,13 +41,13 @@ database,metadata}.rs` (`StorageManager`), `mcp/{server,tools}.rs`,
 
 Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
 
-- [ ] T200 [P] `src/dayflow/mod.rs` — module root: `pub mod {models, engine, summarizer, timeline, retention, daemon}` + re-exports. Wire `pub mod dayflow;` into `src/lib.rs`.
+- [x] T200 [P] `src/dayflow/mod.rs` — module root: `pub mod {models, engine, summarizer, timeline, retention, daemon}` + re-exports. Wire `pub mod dayflow;` into `src/lib.rs`.
       `> DONE:` lib.rs declares `dayflow`; `cargo check` resolves the module tree (stubs allowed).
-- [ ] T201 [P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.
+- [x] T201 [P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.
       `> DONE:` types compile; `TimelineEntry` derives `FromRow`-compatible fields (match the Wave 4 SQLite columns exactly).
-- [ ] T202 [P] `src/dayflow/errors.rs` (or extend `contracts/errors.rs`) — `DayflowError` enum + `From` convs + `mcp_error_code()` mapping (mirror `GentleEyeError`).
+- [x] T202 [P] `src/dayflow/errors.rs` (or extend `contracts/errors.rs`) — `DayflowError` enum + `From` convs + `mcp_error_code()` mapping (mirror `GentleEyeError`).
       `> DONE:` `DayflowError` maps into `GentleEyeError`; compiles.
-- [ ] T203 Extend `src/config/mod.rs` — `DayflowConfig { chunk_minutes: 15, record_fps: 0.5, default_provider: Gemini, retention: RetentionConfig, disk_budget_bytes }`; sane serde defaults.
+- [x] T203 Extend `src/config/mod.rs` — `DayflowConfig { chunk_minutes: 15, record_fps: 0.5, default_provider: Gemini, retention: RetentionConfig, disk_budget_bytes }`; sane serde defaults.
       `> DONE:` `DayflowConfig::default()` round-trips through the config loader; compiles.
 
 ## Wave 1 — fps heuristic (PRD P0 · quick · gate-green) `[S]`
@@ -163,7 +163,11 @@ escalation is the fallback only if you choose to invoke it on a stuck file.
    needed for the ma-loop fallback tier; lite dispatch itself just needs the tasks.md.
 5. `/devkid.orchestrate` → `/devkid.execute` wave-by-wave; you implement + checkpoint each `[S]`.
 
-- [ ] SENTINEL-T005: Sentinel validation for T005: verify implementations pass tests
+- [x] SENTINEL-T005: Sentinel validation for T005: verify implementations pass tests
+  > **[SENTINEL CASCADE WARNING - 2026-05-29T01:19:47Z]**
+  > Sentinel for SENTINEL-SENTINEL-T005 modified: `/home/gyasis/Documents/code/gentle-eye/docs/FPS_AND_DAYFLOW.md`
+  > Verify your implementation against the updated interface before marking complete.
+  > See: `.claude/sentinel/SENTINEL-SENTINEL-T005/summary.md`
 - [ ] SENTINEL-T008: Sentinel validation for T006, T007, T008: verify implementations pass tests
 - [ ] SENTINEL-T012: Sentinel validation for T009, T010, T011, T012: verify implementations pass tests
 - [ ] SENTINEL-T016: Sentinel validation for T013, T014, T015, T016: verify implementations pass tests
