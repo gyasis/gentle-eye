@@ -66,13 +66,13 @@ Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
 
 ## Wave 3 — Rust-native Map-Reduce summarizer (PRD P2 · D1) `[S]`
 
-- [ ] T230 `src/dayflow/summarizer.rs` — `ChunkSummarizer` trait + impl over `VisionProvider`: `summarize_chunk(chunk: &ChunkRef, prior: &RollingContext) -> Result<ChunkSummary, DayflowError>`. Default provider = **Gemini** (D2), native-video `analyze_video`; Ollama frame+OCR fallback.
+- [x] T230 `src/dayflow/summarizer.rs` — `ChunkSummarizer` trait + impl over `VisionProvider`: `summarize_chunk(chunk: &ChunkRef, prior: &RollingContext) -> Result<ChunkSummary, DayflowError>`. Default provider = **Gemini** (D2), native-video `analyze_video`; Ollama frame+OCR fallback.
       `> DONE:` summarize_chunk returns a structured `ChunkSummary`; deterministic test with a **stub VisionProvider** passes.
-- [ ] T231 [P] Map step — port the rolling `CONTEXT SUMMARY FOR NEXT CHUNK`: each chunk receives the prior chunk's `RollingContext`; context threads forward.
+- [x] T231 [P] Map step — port the rolling `CONTEXT SUMMARY FOR NEXT CHUNK`: each chunk receives the prior chunk's `RollingContext`; context threads forward.
       `> DONE:` test proves chunk N's prompt embeds chunk N-1's rolling context.
-- [ ] T232 [P] Reduce step — combine per-chunk `ChunkSummary` → a session digest.
+- [x] T232 [P] Reduce step — combine per-chunk `ChunkSummary` → a session digest.
       `> DONE:` reduce over 3 stub summaries yields a coherent digest; test.
-- [ ] T233 [S] Map-Reduce end-to-end (stub provider) — 3 chunks → 3 structured entries with threaded context + 1 digest.
+- [x] T233 [S] Map-Reduce end-to-end (stub provider) — 3 chunks → 3 structured entries with threaded context + 1 digest.
       `> DONE:` integration test green; `cargo check` + clippy `-D warnings` = 0.
 
 ## Wave 4 — Timeline store + real-time scheduler (PRD P3 · D4) `[S]`
