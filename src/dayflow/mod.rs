@@ -16,6 +16,7 @@
 //! - [`daemon`]     — continuous all-day daemon (Wave 5).
 //! - [`retention`]  — save → shrink → archive + disk-evict guard (Wave 6).
 
+pub mod chunking;
 pub mod daemon;
 pub mod engine;
 pub mod errors;
@@ -24,6 +25,7 @@ pub mod retention;
 pub mod summarizer;
 pub mod timeline;
 
+pub use chunking::{chunk_filename, plan_chunks};
 pub use errors::DayflowError;
 pub use models::{
     ActivityCategory, ChunkRef, ChunkSummary, DayflowMode, DayflowSession, DayflowStatus,

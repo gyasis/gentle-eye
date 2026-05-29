@@ -59,9 +59,9 @@ Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
 
 - [ ] T220 Extend `capture/encoder.rs` / `capture/service.rs` for **segmented capture** — ffmpeg segment muxer emitting 15-min chunk files on the fly (mirror videolocr `download_and_split_video`). Chunk index + wall-clock start/end recorded.
       `> DONE:` a long capture produces sequential `chunk_NNN.mp4` files at the configured boundary.
-- [ ] T221 [P] Chunk manifest — `ChunkRef { index, path, start_wall, end_wall }` emitted per segment; `MemoryMonitor` integration (file-based encoder under pressure, reuse `capture/memory.rs`).
+- [x] T221 [P] Chunk manifest — `ChunkRef { index, path, start_wall, end_wall }` emitted per segment; `MemoryMonitor` integration (file-based encoder under pressure, reuse `capture/memory.rs`).
       `> DONE:` manifest enumerates all chunks of a session; memory-pressure path exercised in a test.
-- [ ] T222 [S] Chunking integration — a simulated/short 35-min-equivalent capture yields 3 chunks with correct boundaries.
+- [x] T222 [S] Chunking integration — a simulated/short 35-min-equivalent capture yields 3 chunks with correct boundaries.
       `> DONE:` deterministic test asserts N chunks + monotonic non-overlapping time ranges; `cargo check` + test green.
 
 ## Wave 3 — Rust-native Map-Reduce summarizer (PRD P2 · D1) `[S]`
