@@ -19,8 +19,8 @@ pub mod traits;
 
 // Re-export all error types
 pub use errors::{
-    ConfigError, ConfigResult, GentleEyeError, GentleEyeResult, McpErrorCode, RecordingError,
-    RecordingResult, StorageError, StorageResult, VisionError, VisionResult,
+    ConfigError, ConfigResult, DayflowError, GentleEyeError, GentleEyeResult, McpErrorCode,
+    RecordingError, RecordingResult, StorageError, StorageResult, VisionError, VisionResult,
 };
 
 // Re-export all traits

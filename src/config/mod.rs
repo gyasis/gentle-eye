@@ -290,6 +290,85 @@ pub trait ConfigProvider: Send + Sync {
 // AppConfig Implementation
 // ============================================================================
 
+// ----------------------------------------------------------------------------
+// Dayflow configuration
+// ----------------------------------------------------------------------------
+
+fn default_chunk_minutes() -> u32 {
+    15
+}
+fn default_record_fps() -> f32 {
+    0.5
+}
+fn default_dayflow_provider() -> String {
+    "gemini".to_string()
+}
+fn default_hot_grace_hours() -> u32 {
+    48
+}
+fn default_warm_days() -> u32 {
+    14
+}
+fn default_disk_budget_bytes() -> u64 {
+    20 * 1024 * 1024 * 1024 // 20 GiB
+}
+
+/// 3-tier retention policy for dayflow recordings.
+///
+/// The timeline is the permanent artifact; raw video is scaffolding:
+/// Hot (raw chunks) → Warm (shrunk timelapse/frames) → Cold (timeline only).
+/// A disk-budget guard evicts oldest raw, then oldest warm — never the timeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionConfig {
+    /// Keep raw chunks until summarized + this grace window, then shrink.
+    #[serde(default = "default_hot_grace_hours")]
+    pub hot_grace_hours: u32,
+    /// Keep the shrunk (warm) artifact this many days before it's evictable.
+    #[serde(default = "default_warm_days")]
+    pub warm_days: u32,
+    /// Hard disk budget; over this, evict oldest raw then oldest warm.
+    #[serde(default = "default_disk_budget_bytes")]
+    pub disk_budget_bytes: u64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            hot_grace_hours: default_hot_grace_hours(),
+            warm_days: default_warm_days(),
+            disk_budget_bytes: default_disk_budget_bytes(),
+        }
+    }
+}
+
+/// Dayflow-mode settings (continuous recording → chunk summarization → timeline).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DayflowConfig {
+    /// On-the-fly chunk length in minutes (matches Gemini ~1fps native sampling math).
+    #[serde(default = "default_chunk_minutes")]
+    pub chunk_minutes: u32,
+    /// Low capture fps for dayflow (timelapse tier).
+    #[serde(default = "default_record_fps")]
+    pub record_fps: f32,
+    /// Default summarization provider: "gemini" (cloud, default) or "ollama" (local).
+    #[serde(default = "default_dayflow_provider")]
+    pub default_provider: String,
+    /// Retention / shrink / evict policy.
+    #[serde(default)]
+    pub retention: RetentionConfig,
+}
+
+impl Default for DayflowConfig {
+    fn default() -> Self {
+        Self {
+            chunk_minutes: default_chunk_minutes(),
+            record_fps: default_record_fps(),
+            default_provider: default_dayflow_provider(),
+            retention: RetentionConfig::default(),
+        }
+    }
+}
+
 /// Complete application configuration
 ///
 /// This struct implements the `ConfigProvider` trait and holds all
@@ -307,6 +386,10 @@ pub struct AppConfig {
     /// Storage settings
     #[serde(default)]
     pub storage: StorageConfig,
+
+    /// Dayflow (activity-timeline) settings
+    #[serde(default)]
+    pub dayflow: DayflowConfig,
 }
 
 impl Default for AppConfig {
@@ -315,6 +398,7 @@ impl Default for AppConfig {
             recording: RecordingConfig::default(),
             vision: VisionConfig::default(),
             storage: StorageConfig::default(),
+            dayflow: DayflowConfig::default(),
         }
     }
 }
