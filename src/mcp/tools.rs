@@ -291,9 +291,21 @@ pub struct GetVisionProviderInfoOutput {
 // read_screen_text Tool
 // ============================================================================
 
-/// Input parameters for the `read_screen_text` tool (OCR).
+/// Input parameters for the `read_screen_text` tool — fast, LOCAL OCR (tesseract).
 ///
 /// Provide exactly one of `image_path` or `video_path`.
+///
+/// CHOOSING A VISION METHOD (full guidance: `docs/VISION_METHODS.md`):
+/// - `read_screen_text` (this tool) — OCR. **Local, private, fast, free.** Good for
+///   crisp/light UI text and quick extraction. WEAK on dense, dark, multi-column
+///   screens (terminals/IDEs) — the text comes back garbled.
+/// - For ACCURATE text on a dense/dark screen, use `analyze_video` (the cloud vision
+///   provider, e.g. Gemini) with a "transcribe all on-screen text" prompt: it reads
+///   the full frame far better than OCR — at the cost of sending the image off-box.
+///   For an ultrawide, TILE into columns and analyze each at full resolution for
+///   near-perfect fidelity.
+/// - PRIVACY: prefer OCR / local vision for sensitive screens; use the cloud provider
+///   only when fidelity matters and the content is OK to share.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ReadScreenTextInput {
     /// Absolute path to an image to OCR.
