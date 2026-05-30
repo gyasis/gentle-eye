@@ -28,6 +28,9 @@ pub enum GentleEyeError {
     /// Dayflow (continuous activity-timeline) error
     #[error(transparent)]
     Dayflow(#[from] DayflowError),
+    /// Target (region-of-interest / crop) error
+    #[error(transparent)]
+    Target(#[from] crate::target::errors::TargetError),
     /// MCP-protocol-level error
     #[error("MCP error: {0}")]
     Mcp(String),
@@ -236,6 +239,7 @@ impl GentleEyeError {
             GentleEyeError::Storage(e) => e.mcp_error_code(),
             GentleEyeError::Config(_) => McpErrorCode::InternalError,
             GentleEyeError::Dayflow(e) => e.mcp_error_code(),
+            GentleEyeError::Target(e) => e.mcp_error_code(),
             GentleEyeError::Mcp(_) => McpErrorCode::InternalError,
         }
     }

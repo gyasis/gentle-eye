@@ -9,6 +9,7 @@
 //! unit-tested; the FFmpeg call needs a reachable stream and is integration-only.
 
 use crate::contracts::errors::RecordingError;
+use crate::target::model::PixelRect;
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +31,16 @@ pub fn capture_stream_frame(
     stream_url: &str,
     output_dir: &Path,
 ) -> Result<StreamFrame, RecordingError> {
+    capture_stream_frame_cropped(stream_url, output_dir, None)
+}
+
+/// Like [`capture_stream_frame`], but applies an optional `crop` pixel rect via
+/// an ffmpeg `crop=` filter (used by an active stream target).
+pub fn capture_stream_frame_cropped(
+    stream_url: &str,
+    output_dir: &Path,
+    crop: Option<PixelRect>,
+) -> Result<StreamFrame, RecordingError> {
     if stream_url.trim().is_empty() {
         return Err(RecordingError::InvalidConfig("stream_url is empty".to_string()));
     }
@@ -37,7 +48,7 @@ pub fn capture_stream_frame(
     let captured_at = Utc::now().to_rfc3339();
     let out_path = output_dir.join(format!("stream_{}.png", Utc::now().format("%Y%m%dT%H%M%SZ")));
 
-    let args = build_ffmpeg_args(stream_url, &out_path);
+    let args = build_ffmpeg_args(stream_url, &out_path, crop);
     let output = Command::new("ffmpeg")
         .args(&args)
         .output()
@@ -69,7 +80,7 @@ pub fn capture_stream_frame(
 /// Works with `rtmp://`, `rtsp://`, `http(s)://`, `srt://`, etc. `-rtsp_transport
 /// tcp` is added only for RTSP (it's an RTSP-only option); a best-effort I/O
 /// timeout means a dead stream fails fast instead of hanging.
-fn build_ffmpeg_args(stream_url: &str, out: &Path) -> Vec<String> {
+fn build_ffmpeg_args(stream_url: &str, out: &Path, crop: Option<PixelRect>) -> Vec<String> {
     let mut args = vec![
         "-y".to_string(),
         "-loglevel".to_string(),
@@ -83,14 +94,70 @@ fn build_ffmpeg_args(stream_url: &str, out: &Path) -> Vec<String> {
     if stream_url.starts_with("rtsp://") {
         args.extend(["-rtsp_transport".to_string(), "tcp".to_string()]);
     }
+    args.extend(["-i".to_string(), stream_url.to_string()]);
+    // Active target → crop the frame to its pixel rect (`crop=w:h:x:y`). This is
+    // an output-side filter, so it must come after `-i`.
+    if let Some(r) = crop {
+        args.extend([
+            "-vf".to_string(),
+            format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y),
+        ]);
+    }
     args.extend([
-        "-i".to_string(),
-        stream_url.to_string(),
         "-frames:v".to_string(),
         "1".to_string(),
         out.to_string_lossy().to_string(),
     ]);
     args
+}
+
+/// Encode a tightly-packed BGRA buffer to a PNG via ffmpeg's `rawvideo`
+/// demuxer — no `image`-crate dependency (Phase-1 dep discipline). Used for the
+/// `define_target` confirmation image of a display crop.
+pub fn write_bgra_png(
+    bgra: &[u8],
+    width: u32,
+    height: u32,
+    out: &Path,
+) -> Result<(), RecordingError> {
+    use std::io::Write;
+    use std::process::Stdio;
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(RecordingError::StorageError)?;
+    }
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgra",
+            "-s",
+            &format!("{width}x{height}"),
+            "-i",
+            "-",
+        ])
+        .arg(out)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| RecordingError::EncoderError(format!("failed to run ffmpeg: {e}")))?;
+    {
+        // Scope the stdin handle so it's dropped (EOF) before we wait.
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| RecordingError::EncoderError("ffmpeg stdin unavailable".into()))?;
+        stdin.write_all(bgra).map_err(RecordingError::StorageError)?;
+    }
+    let status = child.wait().map_err(RecordingError::StorageError)?;
+    if !status.success() {
+        return Err(RecordingError::EncoderError("ffmpeg PNG encode failed".into()));
+    }
+    Ok(())
 }
 
 /// Probe a PNG's pixel dimensions via ffprobe.
@@ -127,21 +194,34 @@ mod tests {
 
     #[test]
     fn rtsp_args_grab_one_frame_over_tcp() {
-        let args = build_ffmpeg_args("rtsp://cam/live", Path::new("/tmp/f.png"));
+        let args = build_ffmpeg_args("rtsp://cam/live", Path::new("/tmp/f.png"), None);
         assert!(args.windows(2).any(|w| w == ["-i", "rtsp://cam/live"]));
         assert!(args.windows(2).any(|w| w == ["-frames:v", "1"]));
         assert!(args.windows(2).any(|w| w == ["-rtsp_transport", "tcp"]));
         assert!(args.windows(2).any(|w| w == ["-rw_timeout", "15000000"]));
         assert_eq!(args.last().unwrap(), "/tmp/f.png");
+        // No active target → no crop filter.
+        assert!(!args.iter().any(|a| a == "-vf"));
     }
 
     #[test]
     fn rtmp_args_omit_rtsp_transport() {
-        let args = build_ffmpeg_args("rtmp://server/app/streamkey", Path::new("/tmp/f.png"));
+        let args = build_ffmpeg_args("rtmp://server/app/streamkey", Path::new("/tmp/f.png"), None);
         assert!(args.windows(2).any(|w| w == ["-i", "rtmp://server/app/streamkey"]));
         assert!(args.windows(2).any(|w| w == ["-frames:v", "1"]));
         // RTSP-only option must NOT be present for RTMP.
         assert!(!args.iter().any(|a| a == "-rtsp_transport"));
+    }
+
+    #[test]
+    fn active_target_injects_crop_filter() {
+        let crop = PixelRect { x: 100, y: 50, w: 640, h: 480 };
+        let args = build_ffmpeg_args("rtmp://server/live", Path::new("/tmp/f.png"), Some(crop));
+        // `crop=w:h:x:y`, placed after `-i` (output-side filter).
+        assert!(args.windows(2).any(|w| w == ["-vf", "crop=640:480:100:50"]));
+        let vf = args.iter().position(|a| a == "-vf").unwrap();
+        let i = args.iter().position(|a| a == "-i").unwrap();
+        assert!(vf > i, "the -vf filter must come after -i");
     }
 
     #[test]

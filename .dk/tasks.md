@@ -1,175 +1,148 @@
-# gentle-eye — Dayflow Mode tasks (dev-kid dogfood plan)
+# gentle-eye — "target" (region-of-interest / crop) tasks (dev-kid dogfood plan)
 
-Generated **2026-05-28** from PRD `gentle_eye_dayflow_mode_2026-05-28` (§5 design,
-§7 phased plan) + the locked architecture decisions (below). This is the **clean
-greenfield feature** to properly dogfood dev-kid orchestrate/execute + the
-Integration Sentinel + the ma-loop — the gentle-eye rebuild that preceded it
-devolved into manual recover→debate→synthesize because the work wasn't a
-well-specified forward build. Dayflow IS.
+Generated **2026-05-30** from PRD `gentle_eye_target_feature_2026-05-29` (§1 vision,
+§2 converged Claude×Gemini design, §3 dependency line, §4 TG1–TG7). Covers the
+**full scope TG1–TG7** (Phase 1 crop primitive → Phase 2 `imageproc` measurement →
+Phase 3 `opencv` tracking, deferred/feature-gated).
 
-Branch: `002-dayflow-mode` (off `main`). Sentinel test: `cargo check` (see dev-kid.yml).
-Local tier: Mac ollama LAN; escalation per `ralph-tiers.json`.
+Branch: `002-dayflow-mode`. Sentinel test: `./.tooling/bin/cargo check --message-format=short`
+(see `dev-kid.yml`). Local tier: Mac ollama LAN; escalation per `ralph-tiers.json`.
 
-## Locked decisions (2026-05-28)
+**Gemini is the runtime VISION provider** (the VLM "brain" per the PRD's
+Vision-First/CV-Second philosophy) — it decides *what* to target; pure-Rust CV
+(`geometry`/`imageproc`) is the caliper that measures *where-exactly*. Gemini is NOT
+a dev-kid code-gen tier here; code-gen runs all-local first.
+
+## Locked decisions (from the paired-debate, 2026-05-29)
 
 | # | Decision | Choice |
 |---|---|---|
-| D1 | Map-Reduce chunk-summarizer | **Rust-native port** of videolocr `process_video_chunks_with_gemini` (rolling `CONTEXT SUMMARY FOR NEXT CHUNK`). No Python dep — fully dogfoodable. |
-| D2 | Default vision provider | **Gemini** (native-video, motion-aware). Ollama = privacy fallback. |
-| D3 | Record model | **BOTH** — session-based (explicit 2h/5h sessions) **and** a continuous daemon. Same chunk→summarize→timeline pipeline underneath. |
-| D4 | Summarization timing | **Real-time** — a background task summarizes each 15-min chunk as the session proceeds. |
-| D5 | Retention | **3-tier** (Hot raw → Warm shrunk → Cold timeline-only) + disk-budget evict guard. Timeline is the permanent artifact; raw video is scaffolding. fps + retention windows are duration-aware/configurable ("depends on the kind of videos"). |
+| G1 | Coordinate space | Agent passes **normalized 0–1** `NormRect`; a pure utility maps `(NormRect, resolution, display offset) → PixelRect` (the critical "boring" code). |
+| G2 | Brain vs caliper | **Vision-First, CV-Second.** VLM (Gemini) decides semantics; classical CV only snaps/measures where the agent points. |
+| G3 | Active targets | **One active at a time**, persisted at `~/.config/gentle-eye/targets.json` (mirror the display catalogue `DisplayConfig::{load,save}`). |
+| G4 | Phase-1 crop dep | **No new crate.** Screen = pure-Rust BGRA sub-rectangle slice (stride-aware); stream = ffmpeg `-vf crop=w:h:x:y`. (`image` is NOT currently a dep — confirmed in `Cargo.lock` — so P1 avoids it.) |
+| G5 | Phase-2 dep | add **`imageproc`** (+ `image` iff imageproc needs it), **pinned**, pure Rust, no system libs (Canny / projection profiles / color-mask). |
+| G6 | Phase-3 dep | **`opencv` ONLY here**, behind an **off-by-default `tracking` cargo feature** as an optional dep — default `cargo check` must NOT require `libopencv-dev`. Deferred until real motion-tracking is needed. |
 
 ## Conventions
 
 - `[P]` = parallelizable within its wave.
 - `[S]` = **sentinel checkpoint**: on completion the crate is compilable AND this
-  task is a complete, runnable file with a clear objective (all its deps are green
-  → safely fixable in isolation). The orchestrator places a sentinel here.
-  Skeleton / pure-declaration tasks get **no** `[S]`.
+  task is a complete, runnable file with a clear objective. The orchestrator places
+  a sentinel here. Skeleton / pure-declaration tasks get **no** `[S]`.
 - Every task carries a **`> DONE:`** completion criterion the sentinel/ma-loop checks.
+- TG→T mapping: TG1=T310 · TG2=T320–T321 · TG3=T330–T333 · TG4=T340–T341 ·
+  TG5=T342 · TG6=T350–T354 · TG7=T360–T361. Gates+docs=T370–T372.
 
-Reuse — do NOT rebuild (existing, green): `capture/service.rs` (`CaptureService:
-RecordingService`), `capture/{frame_rate,encoder,screen,memory,stream}.rs`,
-`analysis/{gemini,ollama,ocr,traits}.rs` (`VisionProvider`), `storage/{manager,
-database,metadata}.rs` (`StorageManager`), `mcp/{server,tools}.rs`,
-`bin/gentle-eye.rs` (CLI), `api.rs` (HTTP), `contracts/traits.rs`.
+Reuse — do NOT rebuild (existing, green): `capture/display.rs`
+(`DisplayConfig::{load,save}` persistence pattern + `DisplayInfo` resolution),
+`capture/screen.rs` (`ScreenCapturer` → BGRA `Vec<u8>`, stride note), `capture/
+stream.rs` (`capture_stream_frame` + `build_ffmpeg_args` + `probe_dimensions`),
+`mcp/{server,tools}.rs` (`GentleEyeServer` `tool_*` + `list_tools`/`dispatch`,
+schemars input/output structs), `bin/gentle-eye.rs` (CLI), `analysis/{gemini,
+ocr,traits}.rs` (`VisionProvider`), `contracts/errors.rs` (`GentleEyeError`).
 
 ---
 
 ## Wave 0 — Foundation: module + models + contracts (skeleton, NO sentinel)
 
-Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
+Pure declarations so later waves compile incrementally.
 
-- [x] T200 [P] `src/dayflow/mod.rs` — module root: `pub mod {models, engine, summarizer, timeline, retention, daemon}` + re-exports. Wire `pub mod dayflow;` into `src/lib.rs`.
-      `> DONE:` lib.rs declares `dayflow`; `cargo check` resolves the module tree (stubs allowed).
-- [x] T201 [P] `src/dayflow/models.rs` — `TimelineEntry { recording_id: Uuid, start_time, end_time: DateTime<Utc>, category: ActivityCategory, app: String, activity: String, summary: String }`, `ActivityCategory` enum (Coding/Docs/Comms/Browsing/Meeting/Idle/Other), `ChunkSummary`, `RollingContext`, `DayflowSession`, `DayflowStatus`. Derive serde + schemars.
-      `> DONE:` types compile; `TimelineEntry` derives `FromRow`-compatible fields (match the Wave 4 SQLite columns exactly).
-- [x] T202 [P] `src/dayflow/errors.rs` (or extend `contracts/errors.rs`) — `DayflowError` enum + `From` convs + `mcp_error_code()` mapping (mirror `GentleEyeError`).
-      `> DONE:` `DayflowError` maps into `GentleEyeError`; compiles.
-- [x] T203 Extend `src/config/mod.rs` — `DayflowConfig { chunk_minutes: 15, record_fps: 0.5, default_provider: Gemini, retention: RetentionConfig, disk_budget_bytes }`; sane serde defaults.
-      `> DONE:` `DayflowConfig::default()` round-trips through the config loader; compiles.
+- [x] T300 [P] `src/target/mod.rs` — module root: `pub mod {model, geometry, store, crop, measure}` + re-exports. Wire `pub mod target;` into `src/lib.rs`.
+      `> DONE:` lib.rs declares `target`; `cargo check` resolves the module tree (stubs allowed).
+- [x] T301 [P] `src/target/model.rs` — `NormRect { x, y, w, h: f64 }` (0–1), `PixelRect { x, y, w, h: u32 }`, `TargetSource` enum (`Display(usize)` | `Stream(String)`), `Target { name: String, source: TargetSource, region: NormRect, active: bool }`. Derive `Serialize/Deserialize/Debug/Clone/PartialEq` + `schemars::JsonSchema`. `NormRect::is_valid()` (all in 0–1, w/h>0).
+      `> DONE:` types compile; serde round-trip test for `Target`; `is_valid()` rejects out-of-range.
+- [x] T302 [P] `src/target/errors.rs` — `TargetError` enum (`Io`, `Config`, `NotFound`, `InvalidRegion`, `NoActive`, `Capture`, `Measure`) + `From<TargetError> for GentleEyeError` + `mcp_error_code()` (mirror the `DisplayError`/`GentleEyeError` pattern in `contracts/errors.rs`).
+      `> DONE:` `TargetError` maps into `GentleEyeError`; compiles.
 
-## Wave 1 — fps heuristic (PRD P0 · quick · gate-green) `[S]`
+## Wave 1 — TG1: coordinate-mapping utility (the critical "boring" code) `[S]`
 
-- [x] T210 [S] Duration-aware fps heuristic in `capture/frame_rate.rs` (≤30s→5–30; 30s–15min→1; 15min–hours→0.2–0.5) + **document it** in the `start_recording` MCP tool description AND `docs/FPS_AND_DAYFLOW.md`.
-      `> DONE:` heuristic fn returns 0.2–0.5 for dayflow-tier durations (unit test); `docs/FPS_AND_DAYFLOW.md` exists; tool desc mentions the table; `cargo check` green.
+- [x] T310 [S] `src/target/geometry.rs` — pure fns: `norm_to_pixel(r: NormRect, res: (u32,u32), offset: (i32,i32)) -> PixelRect` and inverse `pixel_to_norm(r: PixelRect, res, offset) -> NormRect`. Multi-monitor/ultrawide origins; clamp to bounds; round half-up; reject degenerate. No I/O, no deps.
+      `> DONE:` unit tests cover (a) a 21:9 ultrawide box, (b) a non-zero multi-monitor offset, (c) norm→pixel→norm round-trips within ≤1px tolerance, (d) clamping past edges; `cargo check` + tests green.
 
-## Wave 2 — Long recording + on-the-fly 15-min chunking (PRD P1) `[S]`
+## Wave 2 — TG2: target state + persistence `[S]`
 
-- [ ] T220 Extend `capture/encoder.rs` / `capture/service.rs` for **segmented capture** — ffmpeg segment muxer emitting 15-min chunk files on the fly (mirror videolocr `download_and_split_video`). Chunk index + wall-clock start/end recorded.
-      `> DONE:` a long capture produces sequential `chunk_NNN.mp4` files at the configured boundary.
-- [x] T221 [P] Chunk manifest — `ChunkRef { index, path, start_wall, end_wall }` emitted per segment; `MemoryMonitor` integration (file-based encoder under pressure, reuse `capture/memory.rs`).
-      `> DONE:` manifest enumerates all chunks of a session; memory-pressure path exercised in a test.
-- [x] T222 [S] Chunking integration — a simulated/short 35-min-equivalent capture yields 3 chunks with correct boundaries.
-      `> DONE:` deterministic test asserts N chunks + monotonic non-overlapping time ranges; `cargo check` + test green.
+- [x] T320 `src/target/store.rs` — `TargetStore` over `~/.config/gentle-eye/targets.json` (mirror `DisplayConfig::{load,save}` incl. `config_path()` + `HOME` handling): `load`/`save`, `add(Target)`, `list() -> &[Target]`, `remove(name)`, `set_active(name)` (clears any prior active — **one at a time**), `active() -> Option<&Target>`.
+      `> DONE:` in a temp `HOME`, add→save→load returns the same set; `set_active` makes exactly one active; `remove` of the active clears active; tests.
+- [x] T321 [S] Target lifecycle integration — `define → use → active()` returns the right `Target`; round-trips through disk.
+      `> DONE:` integration test (define two, use the second, reload, assert active==second); `cargo check` + tests green.
 
-## Wave 3 — Rust-native Map-Reduce summarizer (PRD P2 · D1) `[S]`
+## Wave 3 — TG3: crop primitive on capture (Phase 1 basis) `[S]`
 
-- [x] T230 `src/dayflow/summarizer.rs` — `ChunkSummarizer` trait + impl over `VisionProvider`: `summarize_chunk(chunk: &ChunkRef, prior: &RollingContext) -> Result<ChunkSummary, DayflowError>`. Default provider = **Gemini** (D2), native-video `analyze_video`; Ollama frame+OCR fallback.
-      `> DONE:` summarize_chunk returns a structured `ChunkSummary`; deterministic test with a **stub VisionProvider** passes.
-- [x] T231 [P] Map step — port the rolling `CONTEXT SUMMARY FOR NEXT CHUNK`: each chunk receives the prior chunk's `RollingContext`; context threads forward.
-      `> DONE:` test proves chunk N's prompt embeds chunk N-1's rolling context.
-- [x] T232 [P] Reduce step — combine per-chunk `ChunkSummary` → a session digest.
-      `> DONE:` reduce over 3 stub summaries yields a coherent digest; test.
-- [x] T233 [S] Map-Reduce end-to-end (stub provider) — 3 chunks → 3 structured entries with threaded context + 1 digest.
-      `> DONE:` integration test green; `cargo check` + clippy `-D warnings` = 0.
+- [x] T330 `src/target/crop.rs` — pure-Rust **stride-aware** BGRA sub-rectangle crop: `crop_bgra(buf: &[u8], full_w: usize, full_h: usize, stride: usize, rect: PixelRect) -> Result<(Vec<u8>, u32, u32), TargetError>`. No new dep. Bounds-checked.
+      `> DONE:` a known small BGRA buffer (e.g. 4×4) cropped to a 2×2 box yields exactly the expected bytes + dims; out-of-bounds rect errors; test.
+- [x] T331 [P] Wire **screen** crop — in the screen frame path (`capture/screen.rs` and/or `capture/service.rs`), if an active target with `source = Display` exists, apply `geometry`(T310)+`crop_bgra`(T330) to the BGRA frame BEFORE encode/analyze/OCR. Pass-through when no active target.
+      `> DONE:` with an active target the produced frame's dims == the cropped dims; no-target path is byte-identical pass-through; test with a stubbed frame.
+- [x] T332 [P] Wire **stream** crop — in `capture/stream.rs::build_ffmpeg_args`, when an active target with `source = Stream` exists, inject `-vf crop=w:h:x:y` (pixel rect from `geometry` over the stream resolution via `probe_dimensions`). Filter omitted when no active target.
+      `> DONE:` `build_ffmpeg_args` with an active target adds the correct `crop=W:H:X:Y` filter in the right position; without a target the args are unchanged; unit test on the arg vector.
+- [x] T333 [S] Crop integration — screen sub-image + stream `crop=` arg path both exercised end-to-end.
+      `> DONE:` integration test (screen crop dims + stream arg presence); `cargo check` + tests green.
 
-## Wave 4 — Timeline store + real-time scheduler (PRD P3 · D4) `[S]`
+## Wave 4 — TG4 + TG5: MCP/CLI surface + confirmation image `[S]`
 
-- [x] T240 `storage/database.rs` migration — `timeline_entries` table matching `TimelineEntry` columns EXACTLY (idempotent runner, `init_in_memory` for tests).
-      `> DONE:` migration creates the table; in-memory test inserts+selects a row.
-- [x] T241 `src/dayflow/timeline.rs` — `TimelineStore` trait + impl over `StorageManager`'s connection: `insert_entry`, `query_range(from,to)`, `count`. Injection-safe.
-      `> DONE:` in-memory round-trip test (insert → query_range returns ordered entries).
-- [ ] T242 Real-time scheduler — background tokio task that, every `chunk_minutes` during an active session, summarizes the just-closed chunk (T230) and writes its `TimelineEntry` (T241). Channel-based, concurrency-safe with the capture loop.
-      `> DONE:` a running session with stub provider produces timeline entries live (not only after stop); test with a fast clock.
-- [ ] T243 [S] `ask_day(question) -> String` — grounds Q&A on `query_range` entries (timeline as context to the provider).
-      `> DONE:` `ask_day` over seeded entries returns a grounded answer (stub provider); `cargo check` + tests green.
+- [x] T340 `mcp/tools.rs` + `mcp/server.rs` — add `define_target` (input: `name`, `source`, normalized `region`) and `focus_target` (input: `name` → set active) following the existing `tool_*` + schemars input/output struct pattern; register in `list_tools`; route in `dispatch`. Tool **descriptions teach** the normalized-0–1-coords contract + the confirmation-image self-correction loop.
+      `> DONE:` `tools/list` shows both tools with schemas; a `call_tool` round-trip defines then focuses a target and returns valid JSON; `cargo check` green.
+- [x] T341 [P] `bin/gentle-eye.rs` — CLI subcommands `target add <name> --display N|--stream URL --region x,y,w,h`, `target use <name>`, `target list` (JSON out, reuse lib `TargetStore`).
+      `> DONE:` each subcommand prints valid JSON; `target list` reflects the store; `target use` sets the active target.
+- [x] T342 [S] TG5 **confirmation image** — `define_target`/`focus_target` return the resulting crop so the agent sees + self-corrects (no CV yet). Screen: grab one frame → `crop_bgra` → encode PNG (reuse the existing screen→PNG encode path; add `image` ONLY if no encoder exists). Stream: `capture_stream_frame` + `crop=`. Returns a path (and/or base64) to the cropped PNG.
+      `> DONE:` `define_target` returns a crop image whose pixel dims match the requested normalized box (within rounding); `cargo check` + tests green.
 
-## Wave 5 — Both record models: session + daemon (PRD P4 · D3) `[S]`
+## Wave 5 — TG6: Phase 2 measurement mode (`imageproc`, Zoom-then-Snap) `[S]`
 
-- [ ] T250 `src/dayflow/engine.rs` — `DayflowEngine` trait + impl: `start_session(opts)` / `stop_session(id)` / `status()`. Session mode honors a max duration (2h/5h/etc, capped per config).
-      `> DONE:` session start→stop drives Wave 2–4 pipeline; max-duration cap honored in a test.
-- [ ] T251 `src/dayflow/daemon.rs` — continuous daemon: long-lived background capture, auto-rolling sessions/segments across the day, lifecycle (start/stop/status) + persisted state/pid.
-      `> DONE:` daemon starts, auto-segments continuously, reports status, stops cleanly; test with a short interval.
-- [ ] T252 [S] Both modes share one pipeline — session + daemon both feed chunk→summarize→timeline.
-      `> DONE:` parametrized test runs the pipeline in both modes; `cargo check` + tests green.
+- [x] T350 Add **`imageproc`** (pinned, e.g. `imageproc = "0.25"`; add matching `image` if required) to `Cargo.toml` per the constitution's pin discipline. `src/target/measure.rs` skeleton: `MeasurementResult { snapped_rect: NormRect, aspect_ratio: f64, confidence: f64, detected_grid: Option<(u32,u32)>, edge_alignment: f64 }` + `measure(buf, pixel_rect, full_dims) -> Result<MeasurementResult, TargetError>` stub.
+      `> DONE:` `imageproc` pinned; `MeasurementResult` derives serde+schemars; `cargo check` green (stub).
+- [x] T351 **Zoom-then-Snap** — crop a ~10%-padded high-res buffer around the rough rect, run Canny edge detection, snap the rough rect to the nearest strong horizontal/vertical edges; fill `snapped_rect` + `edge_alignment` + `confidence`.
+      `> DONE:` a synthetic image with a known bordered rectangle → `snapped_rect` aligns to its borders within ≤2px; test.
+- [x] T352 [P] **Projection-profile gutter detection** for tiled panes — sum column intensities → find low-variance gutters between panes → pane bounds; fill `detected_grid`.
+      `> DONE:` a synthetic 4-column image → detects 3 gutters / 4 panes with correct boundaries; test.
+- [x] T353 [P] **Red-marker** color-mask → bbox ("find the red box") + **Redline-Overlay** diagnostic crop (green = edges found, red = unsure) so the VLM supervises the CV.
+      `> DONE:` a synthetic image with a red rectangle → bbox matches the marker; an overlay image is produced; test.
+- [x] T354 [S] Measurement integration + MCP wiring — `define_target` gains a measure mode ("snap" / "find red marker") returning `MeasurementResult` + the Redline overlay for the agent to confirm/re-target.
+      `> DONE:` measure mode returns a `MeasurementResult` + overlay over a synthetic frame; `cargo check` + `cargo clippy -D warnings` + tests green.
 
-## Wave 6 — Tiered retention: save → shrink → archive + disk guard (D5) `[S]`
+## Wave 6 — TG7: Phase 3 tracking (`opencv`) — DEFERRED, feature-gated skeleton `[S]`
 
-- [ ] T260 [P] `src/dayflow/retention.rs` — `RetentionConfig { hot_grace_hours, warm_days, disk_budget_bytes }` + tier state machine (Hot/Warm/Cold).
-      `> DONE:` tier transitions computed from age + summarized-flag; unit test.
-- [ ] T261 **Shrink** step — after a chunk is summarized (T242), transcode raw → timelapse / N change-threshold frames + OCR text (reuse `analysis/ocr.rs`; videolocr `videoocr.py` change-extraction as blueprint), replacing the raw chunk.
-      `> DONE:` post-summarize, raw chunk is replaced by a warm artifact ≤10% size; test asserts size drop + OCR text retained.
-- [ ] T262 **Evict** step — disk-pressure-driven eviction mirroring `MemoryMonitor` warm/cold/evict: over budget → drop oldest raw (already summarized), then oldest warm; **never** the timeline DB.
-      `> DONE:` simulated over-budget evicts raw-then-warm in age order; timeline_entries untouched; test.
-- [ ] T263 [S] Retention end-to-end — summarize → shrink → (over-budget) evict, timeline preserved throughout.
-      `> DONE:` integration test proves total bytes drop while `query_range` still returns every entry; `cargo check` + tests green.
+PRD §3: opencv is deferred (system/build-dep friction). Land only an **opt-in
+skeleton** so the default build never requires `libopencv-dev`.
 
-## Wave 7 — Surfaces: MCP + CLI + HTTP `[S]`
+- [x] T360 `Cargo.toml` `[features] tracking = ["dep:opencv"]` with `opencv` as an **optional** dep; `src/target/track.rs` — `RegionTracker` trait (`init(frame, rect)`, `update(frame) -> Option<PixelRect>`) + a default no-op stub impl compiled without the feature. opencv-backed impl gated behind `#[cfg(feature = "tracking")]`.
+      `> DONE:` default `cargo check` (no features) compiles WITHOUT pulling opencv; `RegionTracker` trait + stub present; the `libopencv-dev`/deferral note is written in `docs/TARGET.md`.
+- [x] T361 [S] Gate — confirm tracking is opt-in only.
+      `> DONE:` `./.tooling/bin/cargo check` (default features) green and opencv absent from the default build graph; the `tracking` feature is documented as opt-in.
 
-- [ ] T270 `mcp/tools.rs` + `mcp/server.rs` — add `start_dayflow` / `stop_dayflow` / `get_timeline` / `ask_day` / `dayflow_status` (schemars input/output schemas + dispatch over `DayflowEngine`/`TimelineStore`).
-      `> DONE:` `tools/list` shows the new tools; a `call_tool` round-trip for each returns valid JSON (stub provider).
-- [ ] T271 [P] `bin/gentle-eye.rs` — CLI subcommands `dayflow start|stop|timeline|ask|status` (JSON out, reuse lib).
-      `> DONE:` each subcommand prints valid JSON; `dayflow status` reflects engine state.
-- [ ] T272 [P] `api.rs` — HTTP `POST /dayflow/start`, `POST /dayflow/stop`, `GET /dayflow/timeline`, `POST /dayflow/ask`, `GET /dayflow/status` (reuse lib, no new deps).
-      `> DONE:` each endpoint returns correct JSON on the hand-rolled server; live curl test.
-- [ ] T273 [S] All three front-ends drive dayflow against the same engine.
-      `> DONE:` MCP + CLI + HTTP each start→status→timeline; `cargo check` + clippy `-D warnings` = 0.
+## Wave 7 — Gates + docs `[S]`
 
-## Wave 8 — Categories + standup view (PRD P4) `[S]`
-
-- [ ] T280 Activity-category taxonomy applied in the summarizer prompt (D5 categories) → `TimelineEntry.category` populated.
-      `> DONE:` summaries carry a category; test asserts category ∈ taxonomy.
-- [ ] T281 [S] Standup/highlights view — yesterday's highlights / today's priorities / a GitHub-style activity grid, surfaced via `ask_day` + a `get_timeline --standup` shape.
-      `> DONE:` `ask_day("what did I do today")` returns a categorized, time-ranged digest; `cargo check` + tests green.
-
-## Wave 9 — Gates `[S]`
-
-- [ ] T290 [S] `cargo test` — all unit + integration tests green.
+- [x] T370 [S] `cargo test` — all unit + integration tests green.
       `> DONE:` `./.tooling/bin/cargo test` exit 0.
-- [ ] T291 [S] `cargo clippy --all-targets -- -D warnings` — zero warnings.
+- [x] T371 [S] `cargo clippy --all-targets -- -D warnings` — zero warnings.
       `> DONE:` clippy exit 0.
-- [ ] T292 Live validation (ignored test) — real session → 15-min chunks → **Gemini** Map-Reduce → timeline → `ask_day`; success-criterion = a coherent queryable activity timeline ("what was I doing at 2pm?"). Plus the **local-first** path on LAN Ollama.
-      `> DONE:` `cargo test --test dayflow_live -- --ignored` produces a real timeline; both provider paths exercised.
+- [x] T372 `docs/TARGET.md` — the Vision-First/CV-Second design, the normalized-coords + confirmation-image agent loop, the 3-phase dependency line (image-free P1 → `imageproc` P2 → deferred feature-gated `opencv` P3), and MCP/CLI usage examples.
+      `> DONE:` `docs/TARGET.md` exists and documents the agent-facing target workflow + the dep decisions.
 
 ---
 
-## Run mode: dev-kid LITE + in-session checkpoints (2026-05-28)
+## Run mode: dev-kid LITE + in-session checkpoints
 
-We run this with **dev-kid lite**: it only needs a `tasks.md` to orchestrate waves
-on (`.dk/tasks.md`). dev-kid lite **dispatches** Wave N to the Developer agent
-(in-session Claude) to implement, then waits for `[x]`. The **`[S]` checkpoints are
-done by the in-session agent** — i.e. *you* run `cargo check` (`./.tooling/bin/cargo
-check`) at each `[S]`, not the full autonomous sentinel/ma-loop. ma-loop / tier
-escalation is the fallback only if you choose to invoke it on a stuck file.
+Runs with **dev-kid lite**: it only needs this `.dk/tasks.md` to orchestrate waves.
+Lite **dispatches** Wave N to the in-session Developer agent to implement, then waits
+for `[x]`. The **`[S]` checkpoints are run by the in-session agent** — i.e. run
+`./.tooling/bin/cargo check` at each `[S]` (and `cargo test` + `cargo clippy -D
+warnings` at gate waves). ma-loop / tier escalation is the fallback only on a stuck
+file.
 
-- At each `[S]`: run `cargo check` (and at gate waves, `cargo test` + `cargo clippy
-  -D warnings`). Green → mark the wave `[x]` and advance. Red → fix in place
-  (attribution-aware: if the primary error span is a *dependency* file, fix that,
-  don't mangle the target), then re-check.
-- **Halt-and-fix:** any dev-kid / sentinel / ma-loop bug encountered = the valued
-  finding. Stop, capture, fix the TOOL, resume. (This is the whole point of the dogfood.)
+- At each `[S]`: green → mark `[x]` and advance. Red → fix in place (attribution-aware:
+  if the primary error span is a *dependency* file, fix that, don't mangle the target),
+  then re-check.
+- **Halt-and-fix:** any dev-kid / sentinel / ma-loop bug encountered IS the valued
+  dogfood finding. Stop, capture, fix the TOOL, resume.
+- **Constitution:** Edition 2021, all deps pinned, `scrap 0.5`, `rmcp 0.1`. New deps
+  (`imageproc` W5, optional `opencv` W6) MUST be pinned; opencv MUST stay feature-gated.
 
-## Dev-kid LITE wiring prerequisites (do BEFORE `/devkid.orchestrate`)
-
-1. `git switch -c 002-dayflow-mode` (off `main`).
-2. `dev-kid.yml` → `branch: 002-dayflow-mode`.
-3. Mirror THIS file to where lite reads it: `.dk/tasks.md` (lite's working copy).
-   Run `dev-kid spec-resolve` and verify `.dk/tasks.md` matches this file with the
-   `[S]` markers intact (the 2026-05-28 finding: a root-level `tasks.md` is NOT in
-   the resolver chain — use the branch-resolved path / `.dk/tasks.md`).
-4. `/devkid.preflight` (Mac ollama tier1 reachable, no localhost fallback) — only
-   needed for the ma-loop fallback tier; lite dispatch itself just needs the tasks.md.
-5. `/devkid.orchestrate` → `/devkid.execute` wave-by-wave; you implement + checkpoint each `[S]`.
-
-- [x] SENTINEL-T005: Sentinel validation for T005: verify implementations pass tests
-- [x] SENTINEL-T008: Sentinel validation for T006, T007, T008: verify implementations pass tests
-- [ ] SENTINEL-T012: Sentinel validation for T009, T010, T011, T012: verify implementations pass tests
-- [ ] SENTINEL-T016: Sentinel validation for T013, T014, T015, T016: verify implementations pass tests
-- [ ] SENTINEL-T019: Sentinel validation for T017, T018, T019: verify implementations pass tests
-- [ ] SENTINEL-T023: Sentinel validation for T020, T021, T022, T023: verify implementations pass tests
-- [ ] SENTINEL-T027: Sentinel validation for T024, T025, T026, T027: verify implementations pass tests
-- [ ] SENTINEL-T029: Sentinel validation for T028, T029: verify implementations pass tests
-- [ ] SENTINEL-T030: Sentinel validation for T030: verify implementations pass tests
-- [ ] SENTINEL-T031: Sentinel validation for T031: verify implementations pass tests
+- [ ] SENTINEL-T004: Sentinel validation for T004: verify implementations pass tests
+- [ ] SENTINEL-T006: Sentinel validation for T005, T006: verify implementations pass tests
+- [ ] SENTINEL-T010: Sentinel validation for T007, T008, T009, T010: verify implementations pass tests
+- [ ] SENTINEL-T013: Sentinel validation for T013: verify implementations pass tests
+- [ ] SENTINEL-T018: Sentinel validation for T014, T015, T016, T017, T018: verify implementations pass tests
+- [ ] SENTINEL-T020: Sentinel validation for T019, T020: verify implementations pass tests
+- [ ] SENTINEL-T021: Sentinel validation for T021: verify implementations pass tests
+- [ ] SENTINEL-T022: Sentinel validation for T022: verify implementations pass tests

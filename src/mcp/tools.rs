@@ -372,6 +372,111 @@ pub struct CaptureStreamFrameOutput {
 }
 
 // ============================================================================
+// define_target / focus_target Tools
+// ============================================================================
+
+/// Input for the `define_target` tool.
+///
+/// A *target* is an OBS-style crop on a display or stream. You — the agent —
+/// pick WHAT to focus on and pass a **rough region in normalized 0–1
+/// coordinates**: `region.x`/`y` is the top-left corner, `region.w`/`h` the
+/// size, both as fractions of the source. Example: the 2nd of 4 equal code
+/// columns on an ultrawide = `{x: 0.25, y: 0.0, w: 0.25, h: 1.0}`.
+///
+/// `define_target` returns a **confirmation image** of the resulting crop so
+/// you can SEE what you selected and re-call with an adjusted region if it's
+/// off. (Phase 2 will snap the box to real edges; for now use the image to
+/// self-correct.)
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct DefineTargetInput {
+    /// Unique name for this target (e.g. "editor", "left-pane", "atem-cam").
+    pub name: String,
+    /// What to crop from: `{"kind":"display","index":0}` or
+    /// `{"kind":"stream","url":"rtsp://…"}`.
+    pub source: crate::target::model::TargetSource,
+    /// The region of interest in NORMALIZED 0–1 coordinates.
+    pub region: crate::target::model::NormRect,
+    /// Make this the active target (default: true). Only one is active at a time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set_active: Option<bool>,
+}
+
+/// Output for the `define_target` tool.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DefineTargetOutput {
+    /// The target's name.
+    pub name: String,
+    /// Whether this target is now the active one.
+    pub active: bool,
+    /// The resolved absolute pixel rect, when a confirmation capture succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_rect: Option<crate::target::model::PixelRect>,
+    /// Path to the cropped confirmation PNG, when a frame could be captured.
+    /// Pass it to `analyze_video` (image mode) or inspect it to self-correct.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_image: Option<String>,
+    /// Human-readable status (incl. why a confirmation image may be absent).
+    pub message: String,
+}
+
+/// Input for the `focus_target` tool — switch the active target by name.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FocusTargetInput {
+    /// The name of a previously-defined target to make active.
+    pub name: String,
+}
+
+/// Output for the `focus_target` tool.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FocusTargetOutput {
+    /// The now-active target's name.
+    pub name: String,
+    /// Always true on success (the named target is active).
+    pub active: bool,
+    /// The active target's normalized region.
+    pub region: crate::target::model::NormRect,
+    /// Human-readable confirmation message.
+    pub message: String,
+}
+
+// ============================================================================
+// measure_target Tool (Phase 2)
+// ============================================================================
+
+/// Input for the `measure_target` tool — Zoom-then-Snap measurement.
+///
+/// Give a ROUGH normalized region; the pure-Rust CV snaps it to the nearest
+/// strong edges and detects any tiled-pane grid. Inspect the returned overlay
+/// image (green = edges found, red = the snapped box) and the `snapped_rect`,
+/// then pass `snapped_rect` to `define_target`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct MeasureTargetInput {
+    /// What to measure on: `{"kind":"display","index":0}` or `{"kind":"stream","url":"…"}`.
+    pub source: crate::target::model::TargetSource,
+    /// The rough region in NORMALIZED 0–1 coordinates.
+    pub region: crate::target::model::NormRect,
+    /// Also locate a hand-drawn red marker and return its bbox (default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub find_red_marker: Option<bool>,
+}
+
+/// Output for the `measure_target` tool.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MeasureTargetOutput {
+    /// The snapped measurement (normalized rect, confidence, detected grid).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::target::measure::MeasurementResult>,
+    /// Bounding box of a detected red marker (when `find_red_marker` was set).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub red_marker: Option<crate::target::model::PixelRect>,
+    /// Path to the "Redline Overlay" diagnostic PNG, when one could be rendered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay_image: Option<String>,
+    /// Human-readable status.
+    pub message: String,
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
