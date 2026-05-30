@@ -30,7 +30,7 @@ USAGE:
   gentle-eye analyze --image PATH  --prompt TEXT [--provider gemini|ollama]
   gentle-eye analyze --video PATH  --prompt TEXT [--start S --end E] [--provider …]
   gentle-eye record  [--duration SECS] [--fps N] [--out FILE.mp4] [--display IDX|LABEL]
-  gentle-eye capture-stream --url URL [--out DIR]     Grab one frame from a stream (ATEM/RTSP/HTTP)
+  gentle-eye capture-stream --url URL [--out DIR] [--region x,y,w,h]   Grab one frame from a stream (ATEM/RTSP/HTTP); --region crops (normalized 0-1)
   gentle-eye list    [--status all|recording|completed|cancelled|failed] [--limit N]
   gentle-eye read-text --image PATH | --video PATH    Extract on-screen text (OCR) as JSON
   gentle-eye displays                                 List available displays (the catalogue)
@@ -184,7 +184,20 @@ async fn run_record(args: &[String]) -> Result<()> {
 async fn run_capture_stream(args: &[String]) -> Result<()> {
     let url = flag(args, "--url").ok_or_else(|| anyhow!("--url <stream-url> is required"))?;
     let out = flag(args, "--out").unwrap_or("/tmp/gentle-eye/frames");
-    let frame = gentle_eye::capture::stream::capture_stream_frame(url, Path::new(out))?;
+    // Optional --region x,y,w,h (normalized 0-1) crops the grabbed frame to a
+    // sub-region via the same ffmpeg `crop=` filter an active stream target uses.
+    let frame = if let Some(region_str) = flag(args, "--region") {
+        let region = parse_region(region_str)?;
+        if !region.is_valid() {
+            return Err(anyhow!("region must lie within 0-1 with positive area"));
+        }
+        // Probe full-frame resolution → compute pixel rect → capture cropped.
+        let full = gentle_eye::capture::stream::capture_stream_frame(url, Path::new(out))?;
+        let rect = gentle_eye::target::geometry::norm_to_pixel(region, (full.width, full.height), (0, 0));
+        gentle_eye::capture::stream::capture_stream_frame_cropped(url, Path::new(out), Some(rect))?
+    } else {
+        gentle_eye::capture::stream::capture_stream_frame(url, Path::new(out))?
+    };
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
