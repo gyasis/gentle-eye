@@ -5,13 +5,14 @@
 //! is close to exhausting RAM — mirroring the unified-memory swap-death guard
 //! documented for Apple Silicon hosts.
 //!
-//! Reads `/proc/meminfo` on Linux (std-only, no extra dependency). On other
-//! platforms it reports [`MemoryPressure::Normal`] with unknown stats so the
-//! pipeline degrades gracefully rather than failing to build.
+//! Reads system memory via the cross-platform `sysinfo` crate, so the monitor
+//! works on Linux, macOS, and Windows (the original Linux-only `/proc/meminfo`
+//! reader degraded to "unknown" everywhere else).
 //!
 //! Authored 2026-05-28 from the recovered public API
 //! (`MemoryConfig, MemoryMonitor, MemoryPressure, MemoryStats`) + PRD memory
-//! notes — the recovered source for this file was garbage.
+//! notes — the recovered source for this file was garbage. Made cross-platform
+//! 2026-05-30 (sysinfo).
 
 /// A point-in-time snapshot of system memory.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -111,70 +112,41 @@ impl MemoryMonitor {
     }
 }
 
-/// Read total + available memory from `/proc/meminfo` (Linux only).
-#[cfg(target_os = "linux")]
+/// Read total + available physical memory (bytes) via `sysinfo` — works on
+/// Linux, macOS, and Windows. Returns `None` if the platform reports no total
+/// (callers then fall back to [`MemoryPressure::Normal`]).
 fn read_system_memory() -> Option<MemoryStats> {
-    let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
-    parse_meminfo(&raw)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_system_memory() -> Option<MemoryStats> {
-    // No std-only portable source on macOS/Windows; report unknown so callers
-    // fall back to MemoryPressure::Normal rather than failing to build.
-    None
-}
-
-/// Parse `MemTotal` / `MemAvailable` (in kB) from `/proc/meminfo` content.
-/// Factored out so it can be unit-tested without touching the real filesystem.
-fn parse_meminfo(content: &str) -> Option<MemoryStats> {
-    let mut total_kb = None;
-    let mut avail_kb = None;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            total_kb = parse_kb(rest);
-        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            avail_kb = parse_kb(rest);
-        }
-        if total_kb.is_some() && avail_kb.is_some() {
-            break;
-        }
+    use sysinfo::System;
+    // Refresh memory only — we don't touch processes/CPU/disks, so this stays
+    // cheap even if the monitor is polled repeatedly.
+    let mut sys = System::new();
+    sys.refresh_memory();
+    let total_bytes = sys.total_memory(); // bytes (sysinfo >= 0.30)
+    if total_bytes == 0 {
+        return None;
     }
-    let total = total_kb?;
-    let avail = avail_kb?;
     Some(MemoryStats {
-        total_bytes: total * 1024,
-        available_bytes: avail * 1024,
+        total_bytes,
+        available_bytes: sys.available_memory(),
     })
-}
-
-/// Parse the leading integer (kB) from a `/proc/meminfo` value field.
-fn parse_kb(field: &str) -> Option<u64> {
-    field.split_whitespace().next()?.parse::<u64>().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = "\
-MemTotal:       16384000 kB
-MemFree:         1000000 kB
-MemAvailable:    4096000 kB
-Buffers:          200000 kB
-";
-
     #[test]
-    fn parses_meminfo() {
-        let stats = parse_meminfo(SAMPLE).unwrap();
-        assert_eq!(stats.total_bytes, 16_384_000 * 1024);
-        assert_eq!(stats.available_bytes, 4_096_000 * 1024);
-        assert_eq!(stats.used_bytes(), (16_384_000 - 4_096_000) * 1024);
-    }
-
-    #[test]
-    fn missing_fields_yield_none() {
-        assert!(parse_meminfo("Buffers: 200000 kB\n").is_none());
+    fn reads_real_system_memory() {
+        // sysinfo reports memory on every supported host (Linux/macOS/Windows),
+        // so this returns sane stats on the build machine.
+        let stats = read_system_memory().expect("sysinfo should report memory");
+        assert!(stats.total_bytes > 0, "total memory must be positive");
+        assert!(
+            stats.available_bytes <= stats.total_bytes,
+            "available ({}) must not exceed total ({})",
+            stats.available_bytes,
+            stats.total_bytes
+        );
     }
 
     #[test]
