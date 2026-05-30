@@ -38,6 +38,9 @@ USAGE:
   gentle-eye target add NAME (--display IDX | --stream URL) --region x,y,w,h   Define a crop (normalized 0-1)
   gentle-eye target use NAME                          Make NAME the active target
   gentle-eye target list                              List targets + the active one
+  gentle-eye preview [FILE] [--loop once|forever] [--seconds N]   Preview a capture (default: most recent); ffplay/OS-open
+  gentle-eye preview --gallery [--port N]             Serve a media gallery (browser; Range video) until idle
+  gentle-eye preview --live                           Live preview of the active target via ffplay (default off)
   gentle-eye provider-info [--provider gemini|ollama]
   gentle-eye help
 
@@ -66,6 +69,7 @@ async fn main() -> ExitCode {
         "displays" => run_displays(rest).await,
         "label" => run_label(rest).await,
         "target" => run_target(rest).await,
+        "preview" => run_preview(rest).await,
         "help" | "-h" | "--help" => {
             println!("{HELP}");
             Ok(())
@@ -209,6 +213,155 @@ async fn run_capture_stream(args: &[String]) -> Result<()> {
             "captured_at": frame.captured_at,
         }))?
     );
+    Ok(())
+}
+
+async fn run_preview(args: &[String]) -> Result<()> {
+    use gentle_eye::preview::discover::{classify, latest_capture, CaptureKind};
+    use gentle_eye::preview::gallery;
+    use gentle_eye::preview::player::{open_with_player, LoopMode, PlaybackOpts};
+
+    // `--gallery`: spin up the zero-dep std::net media gallery (serves until idle).
+    if args.iter().any(|a| a == "--gallery") {
+        let port: u16 = match flag(args, "--port") {
+            Some(p) => p.parse().context("--port must be a number")?,
+            None => 8080,
+        };
+        let root = AppConfig::load()
+            .map(|c| c.storage.base_dir)
+            .map_err(|e| anyhow!("config error: {e}"))?;
+        let listener = gallery::bind(port).map_err(|e| anyhow!("{e}"))?;
+        let actual = listener.local_addr()?.port();
+        let url = gallery::announce(actual, gallery::is_ssh_session());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "gallery": url, "root": root.to_string_lossy()
+            }))?
+        );
+        // Blocks until ~5 min idle (or Ctrl-C).
+        gallery::serve_listener(listener, root, Duration::from_secs(300)).map_err(|e| anyhow!("{e}"))?;
+        return Ok(());
+    }
+
+    let opts = PlaybackOpts {
+        loop_mode: match flag(args, "--loop") {
+            Some("once") => Some(LoopMode::Once),
+            Some("forever") => Some(LoopMode::Forever),
+            Some(other) => return Err(anyhow!("--loop must be once|forever (got '{other}')")),
+            None => None,
+        },
+        autoclose_secs: match flag(args, "--seconds") {
+            Some(s) => Some(s.parse().context("--seconds must be an integer")?),
+            None => None,
+        },
+    };
+
+    // `--live`: real-time preview of the active target (default OFF).
+    if args.iter().any(|a| a == "--live") {
+        return run_live().await;
+    }
+
+    // Positional FILE is the first arg that isn't a flag; else the latest capture.
+    let path = match args.first().filter(|a| !a.starts_with("--")) {
+        Some(f) => PathBuf::from(f),
+        None => {
+            let root = AppConfig::load()
+                .map(|c| c.storage.base_dir)
+                .map_err(|e| anyhow!("config error: {e}"))?;
+            latest_capture(&root)?
+                .ok_or_else(|| anyhow!("no captures found under {}", root.display()))?
+                .path
+        }
+    };
+    let kind = classify(&path).unwrap_or(CaptureKind::Image);
+    let backend = open_with_player(&path, kind, &opts)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "previewing": path.to_string_lossy(),
+            "kind": format!("{kind:?}").to_lowercase(),
+            "backend": backend,
+        }))?
+    );
+    Ok(())
+}
+
+/// `preview --live` — real-time preview of the active target via ffplay.
+async fn run_live() -> Result<()> {
+    use gentle_eye::preview::live::live_stream_args;
+    use gentle_eye::target::geometry::norm_to_pixel;
+    use gentle_eye::target::model::TargetSource;
+    use gentle_eye::target::store::TargetStore;
+
+    let store = TargetStore::load().map_err(|e| anyhow!("{e}"))?;
+    let target = store
+        .active()
+        .ok_or_else(|| anyhow!("no active target — define one with `gentle-eye target add ...`"))?
+        .clone();
+
+    match &target.source {
+        TargetSource::Stream { url } => {
+            // Best-effort: probe one frame for resolution → crop rect.
+            let tmp = std::env::temp_dir().join("gentle-eye/live");
+            let crop = gentle_eye::capture::stream::capture_stream_frame(url, &tmp)
+                .ok()
+                .map(|f| norm_to_pixel(target.region, (f.width, f.height), (0, 0)));
+            let args = live_stream_args(url, crop);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "live": "stream", "url": url, "ffplay_args": args
+                }))?
+            );
+            std::process::Command::new("ffplay")
+                .args(&args)
+                .status()
+                .map_err(|e| anyhow!("ffplay failed (is it installed?): {e}"))?;
+        }
+        TargetSource::Display { index } => run_display_live(*index, target.region)?,
+    }
+    Ok(())
+}
+
+/// Pump cropped screen frames to ffplay's stdin as rawvideo (blocks until closed).
+fn run_display_live(index: usize, region: gentle_eye::target::model::NormRect) -> Result<()> {
+    use gentle_eye::preview::live::live_display_args;
+    use gentle_eye::target::crop::crop_bgra;
+    use gentle_eye::target::geometry::norm_to_pixel;
+    use std::io::Write as _;
+
+    let mut cap = gentle_eye::capture::screen::ScreenCapturer::new(index)
+        .map_err(|e| anyhow!("display capture unavailable: {e}"))?;
+    let (fw, fh) = (cap.width(), cap.height());
+    let rect = norm_to_pixel(region, (fw as u32, fh as u32), (0, 0));
+    let args = live_display_args(rect.w, rect.h);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "live": "display", "index": index, "crop": [rect.x, rect.y, rect.w, rect.h]
+        }))?
+    );
+    let mut child = std::process::Command::new("ffplay")
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow!("ffplay failed (is it installed?): {e}"))?;
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no ffplay stdin"))?;
+    loop {
+        let frame = match cap.capture_frame(Duration::from_millis(200)) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let stride = frame.len().checked_div(fh).unwrap_or(fw * 4);
+        let (cropped, _, _) = match crop_bgra(&frame, fw, fh, stride, rect) {
+            Ok(c) => c,
+            Err(e) => return Err(anyhow!("crop failed: {e}")),
+        };
+        if stdin.write_all(&cropped).is_err() {
+            break; // ffplay window closed
+        }
+    }
     Ok(())
 }
 

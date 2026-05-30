@@ -42,6 +42,7 @@ pub mod models;
 pub mod security;
 pub mod startup;
 pub mod storage;
+pub mod preview;
 pub mod target;
 
 // Convenience re-exports for library consumers — the one-call facade plus the

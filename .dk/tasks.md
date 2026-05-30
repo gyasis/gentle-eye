@@ -1,148 +1,118 @@
-# gentle-eye — "target" (region-of-interest / crop) tasks (dev-kid dogfood plan)
+# gentle-eye — preview pane (live + post-capture) tasks (dev-kid dogfood plan)
 
-Generated **2026-05-30** from PRD `gentle_eye_target_feature_2026-05-29` (§1 vision,
-§2 converged Claude×Gemini design, §3 dependency line, §4 TG1–TG7). Covers the
-**full scope TG1–TG7** (Phase 1 crop primitive → Phase 2 `imageproc` measurement →
-Phase 3 `opencv` tracking, deferred/feature-gated).
+Generated **2026-05-30** from PRD `gentle_eye_preview_pane_2026-05-30` (§2 locked
+design). OBS-style preview in two parts. **Supply-chain-minimal: the DEFAULT build
+adds ZERO new crates** (reuses the already-installed ffmpeg + a hand-rolled
+`std::net` server). The pure-Rust window is **opt-in, off by default**. **No
+countdown** (dropped as friction).
 
-Branch: `002-dayflow-mode`. Sentinel test: `./.tooling/bin/cargo check --message-format=short`
-(see `dev-kid.yml`). Local tier: Mac ollama LAN; escalation per `ralph-tiers.json`.
+Branch: `006-preview-pane` (off `main`). Sentinel test: `./.tooling/bin/cargo check
+--message-format=short` (see `dev-kid.yml`). ma-loop fallback floor = `mixed-budget`
+(OpenAI+Gemini; Mac-LAN ollama skipped per user).
 
-**Gemini is the runtime VISION provider** (the VLM "brain" per the PRD's
-Vision-First/CV-Second philosophy) — it decides *what* to target; pure-Rust CV
-(`geometry`/`imageproc`) is the caliper that measures *where-exactly*. Gemini is NOT
-a dev-kid code-gen tier here; code-gen runs all-local first.
-
-## Locked decisions (from the paired-debate, 2026-05-29)
+## Locked decisions (paired-debate, 2026-05-30)
 
 | # | Decision | Choice |
 |---|---|---|
-| G1 | Coordinate space | Agent passes **normalized 0–1** `NormRect`; a pure utility maps `(NormRect, resolution, display offset) → PixelRect` (the critical "boring" code). |
-| G2 | Brain vs caliper | **Vision-First, CV-Second.** VLM (Gemini) decides semantics; classical CV only snaps/measures where the agent points. |
-| G3 | Active targets | **One active at a time**, persisted at `~/.config/gentle-eye/targets.json` (mirror the display catalogue `DisplayConfig::{load,save}`). |
-| G4 | Phase-1 crop dep | **No new crate.** Screen = pure-Rust BGRA sub-rectangle slice (stride-aware); stream = ffmpeg `-vf crop=w:h:x:y`. (`image` is NOT currently a dep — confirmed in `Cargo.lock` — so P1 avoids it.) |
-| G5 | Phase-2 dep | add **`imageproc`** (+ `image` iff imageproc needs it), **pinned**, pure Rust, no system libs (Canny / projection profiles / color-mask). |
-| G6 | Phase-3 dep | **`opencv` ONLY here**, behind an **off-by-default `tracking` cargo feature** as an optional dep — default `cargo check` must NOT require `libopencv-dev`. Deferred until real motion-tracking is needed. |
+| P1 | Default renderer | **ffplay subprocess** (reuses ffmpeg — 0 new crates). OS-open (`xdg-open`/`open`) fallback. |
+| P2 | Headless/remote | hand-rolled **`std::net` HTTP gallery** (0 crates, NOT tiny_http), `<video>` + **Range/206**, 127.0.0.1, idle self-close. Native window can't render over SSH → this is the fallback. |
+| P3 | Rich window | **opt-in `richwindow` feature** (winit+softbuffer, 75 crates) — **NOT built by default**. Agent-controlled multi-monitor placement. |
+| P4 | Countdown | **none** (removed). |
+| P5 | opencv-highgui | documented **reuse** backend under the existing `tracking` feature — NOT built for preview. |
 
 ## Conventions
 
 - `[P]` = parallelizable within its wave.
-- `[S]` = **sentinel checkpoint**: on completion the crate is compilable AND this
-  task is a complete, runnable file with a clear objective. The orchestrator places
-  a sentinel here. Skeleton / pure-declaration tasks get **no** `[S]`.
-- Every task carries a **`> DONE:`** completion criterion the sentinel/ma-loop checks.
-- TG→T mapping: TG1=T310 · TG2=T320–T321 · TG3=T330–T333 · TG4=T340–T341 ·
-  TG5=T342 · TG6=T350–T354 · TG7=T360–T361. Gates+docs=T370–T372.
+- `[S]` = **sentinel checkpoint**: crate compilable + this task is a complete runnable
+  file. Run `./.tooling/bin/cargo check` (+ tests at gate waves) here. Skeleton tasks get no `[S]`.
+- Every task carries a **`> DONE:`** completion criterion.
 
-Reuse — do NOT rebuild (existing, green): `capture/display.rs`
-(`DisplayConfig::{load,save}` persistence pattern + `DisplayInfo` resolution),
-`capture/screen.rs` (`ScreenCapturer` → BGRA `Vec<u8>`, stride note), `capture/
-stream.rs` (`capture_stream_frame` + `build_ffmpeg_args` + `probe_dimensions`),
-`mcp/{server,tools}.rs` (`GentleEyeServer` `tool_*` + `list_tools`/`dispatch`,
-schemars input/output structs), `bin/gentle-eye.rs` (CLI), `analysis/{gemini,
-ocr,traits}.rs` (`VisionProvider`), `contracts/errors.rs` (`GentleEyeError`).
+Reuse — do NOT rebuild (existing, green): `capture/stream.rs` (`build_ffmpeg_args`,
+`probe_dimensions`, `write_bgra_png`, ffmpeg subprocess pattern), `capture/screen.rs`
+(`ScreenCapturer` → BGRA frames, for live), `capture/display.rs` (display catalogue
+→ monitor geometry for placement), `target/{store,geometry,crop}` (active target →
+live preview honors the crop), `storage/manager.rs` (recordings dir), `bin/gentle-eye.rs`
+(CLI dispatch + `flag`/`parse_region` helpers), `contracts/errors.rs` (`GentleEyeError`).
 
 ---
 
-## Wave 0 — Foundation: module + models + contracts (skeleton, NO sentinel)
+## Wave 0 — module skeleton + capture discovery (skeleton, NO sentinel)
 
-Pure declarations so later waves compile incrementally.
+- [x] T400 [P] `src/preview/mod.rs` — `pub mod {discover, player, gallery, live, renderer}` + re-exports; wire `pub mod preview;` into `src/lib.rs`. Stub files for not-yet-filled submodules.
+      `> DONE:` lib.rs declares `preview`; `cargo check` resolves the module tree (stubs allowed).
+- [x] T401 [P] `src/preview/errors.rs` — `PreviewError` enum (`Io`, `NotFound`, `NoCaptures`, `Spawn`, `Http`) + `From<PreviewError> for GentleEyeError` + `mcp_error_code()` (mirror `TargetError`).
+      `> DONE:` maps into `GentleEyeError`; compiles.
+- [x] T402 [P] `src/preview/discover.rs` — `Capture { path, kind: Image|Video, modified }` + `recent_captures(root, limit) -> Vec<Capture>` (walk the recordings dir, classify by extension png/jpg vs mp4/mkv, sort by mtime desc). `latest_capture(root)`.
+      `> DONE:` against a temp dir seeded with mixed files, returns them newest-first with correct kinds; unit test.
 
-- [x] T300 [P] `src/target/mod.rs` — module root: `pub mod {model, geometry, store, crop, measure}` + re-exports. Wire `pub mod target;` into `src/lib.rs`.
-      `> DONE:` lib.rs declares `target`; `cargo check` resolves the module tree (stubs allowed).
-- [x] T301 [P] `src/target/model.rs` — `NormRect { x, y, w, h: f64 }` (0–1), `PixelRect { x, y, w, h: u32 }`, `TargetSource` enum (`Display(usize)` | `Stream(String)`), `Target { name: String, source: TargetSource, region: NormRect, active: bool }`. Derive `Serialize/Deserialize/Debug/Clone/PartialEq` + `schemars::JsonSchema`. `NormRect::is_valid()` (all in 0–1, w/h>0).
-      `> DONE:` types compile; serde round-trip test for `Target`; `is_valid()` rejects out-of-range.
-- [x] T302 [P] `src/target/errors.rs` — `TargetError` enum (`Io`, `Config`, `NotFound`, `InvalidRegion`, `NoActive`, `Capture`, `Measure`) + `From<TargetError> for GentleEyeError` + `mcp_error_code()` (mirror the `DisplayError`/`GentleEyeError` pattern in `contracts/errors.rs`).
-      `> DONE:` `TargetError` maps into `GentleEyeError`; compiles.
+## Wave 1 — PV1: `preview [FILE]` (default, zero-dep) `[S]`
 
-## Wave 1 — TG1: coordinate-mapping utility (the critical "boring" code) `[S]`
+- [x] T410 `src/preview/player.rs` — `PlaybackOpts { loop_mode: Once|Forever|None, autoclose_secs: Option<u64> }`; `ffplay_args(path, kind, &PlaybackOpts) -> Vec<String>` (`-autoexit`, `-loop`, image `-t`/`-loop 1`) + `open_with_player(path, opts)` that spawns ffplay, falling back to OS-open (`xdg-open`/`open`) when ffplay is absent.
+      `> DONE:` arg-builder unit tests cover image vs video + each loop/autoclose combo; ffplay-absent path selects OS-open; `cargo check` + tests green.
+- [x] T411 [P] CLI `preview [FILE] [--loop once|forever] [--seconds N]` in `bin/gentle-eye.rs` — no FILE → `latest_capture` (T402); calls T410. JSON status out.
+      `> DONE:` `preview` with no file resolves the most-recent capture; flags map to `PlaybackOpts`; prints valid JSON.
+- [x] T412 [S] PV1 integration — discovery + arg-building exercised end-to-end (no live spawn needed).
+      `> DONE:` integration test (seed temp recordings, assert chosen file + ffplay args); `cargo check` + tests green.
 
-- [x] T310 [S] `src/target/geometry.rs` — pure fns: `norm_to_pixel(r: NormRect, res: (u32,u32), offset: (i32,i32)) -> PixelRect` and inverse `pixel_to_norm(r: PixelRect, res, offset) -> NormRect`. Multi-monitor/ultrawide origins; clamp to bounds; round half-up; reject degenerate. No I/O, no deps.
-      `> DONE:` unit tests cover (a) a 21:9 ultrawide box, (b) a non-zero multi-monitor offset, (c) norm→pixel→norm round-trips within ≤1px tolerance, (d) clamping past edges; `cargo check` + tests green.
+## Wave 2 — PV2: `preview --gallery` (default, zero-dep `std::net` + Range) `[S]`
 
-## Wave 2 — TG2: target state + persistence `[S]`
+- [x] T420 `src/preview/gallery.rs` — hand-rolled `std::net::TcpListener` GET server: parse the request line, route `/` (gallery HTML) and `/media/<name>` (serve a capture). **Path-traversal-safe**: resolve under the recordings root, reject `..`/absolute escapes. Bind **127.0.0.1** only.
+      `> DONE:` `/media/../../etc/passwd` (and encoded variants) are rejected with 403/404; only files under root serve; unit test on the path-resolver.
+- [x] T421 [P] Range support — parse `Range: bytes=start-end`; reply **206** + `Content-Range`/`Accept-Ranges` + sliced body; full **200** when absent. Pure range-math fn.
+      `> DONE:` unit tests: a range returns the exact byte slice + correct headers; no-range returns full 200; open-ended `bytes=N-` handled.
+- [x] T422 [P] `src/preview/gallery_html` — embedded single-page HTML (no external files): lists `recent_captures` (T402), `<img>` inline, `<video controls>` for video; optional ffprobe metadata (dims/duration).
+      `> DONE:` the rendered HTML references each capture via `/media/<name>` and uses `<video>` for video / `<img>` for images; unit test on the HTML builder.
+- [x] T423 idle self-shutdown (~5 min no requests → exit) + SSH detect (`SSH_TTY`/`SSH_CLIENT`): local → auto-open the URL (`xdg-open`/`open`); remote → print the `ssh -L` tunnel hint.
+      `> DONE:` SSH-detection branch selects the right action (unit-testable via env); idle-timeout logic unit-tested with a fast clock.
+- [x] T424 [S] PV2 integration — bind an ephemeral port, real HTTP round-trips.
+      `> DONE:` `GET /` → 200 listing a seeded capture; `GET /media/<f>` with a Range → 206 + correct bytes; traversal rejected; `cargo check` + tests green.
 
-- [x] T320 `src/target/store.rs` — `TargetStore` over `~/.config/gentle-eye/targets.json` (mirror `DisplayConfig::{load,save}` incl. `config_path()` + `HOME` handling): `load`/`save`, `add(Target)`, `list() -> &[Target]`, `remove(name)`, `set_active(name)` (clears any prior active — **one at a time**), `active() -> Option<&Target>`.
-      `> DONE:` in a temp `HOME`, add→save→load returns the same set; `set_active` makes exactly one active; `remove` of the active clears active; tests.
-- [x] T321 [S] Target lifecycle integration — `define → use → active()` returns the right `Target`; round-trips through disk.
-      `> DONE:` integration test (define two, use the second, reload, assert active==second); `cargo check` + tests green.
+## Wave 3 — PV3: live preview (default OFF, ffplay) `[S]`
 
-## Wave 3 — TG3: crop primitive on capture (Phase 1 basis) `[S]`
+- [x] T430 `src/preview/live.rs` — `live_ffplay_cmd(source, active_target) -> Command spec`: for a **Display** source, pipe `ScreenCapturer` BGRA frames as rawvideo to ffplay stdin, **honoring the active `target` crop** (reuse `target::geometry` + `target::crop`); for a **Stream**, point ffplay at the relay URL (+ ffmpeg `crop=` when a target is active). Arg/spec is unit-tested; the pipe loop is integration-only.
+      `> DONE:` the command spec for display vs stream is correct (rawvideo `-f`/`-pixel_format bgra`/`-video_size`, or stream URL + crop); honors-target asserted in a unit test; `cargo check`.
+- [x] T431 [P] CLI `preview --live` (default OFF — only when invoked). Uses the active target/source.
+      `> DONE:` `preview --live` builds the live command from the active target; no-op/clear message when no source; prints status.
+- [x] T432 [S] PV3 — live command-building green.
+      `> DONE:` unit tests for display + stream live specs; `cargo check` + tests green.
 
-- [x] T330 `src/target/crop.rs` — pure-Rust **stride-aware** BGRA sub-rectangle crop: `crop_bgra(buf: &[u8], full_w: usize, full_h: usize, stride: usize, rect: PixelRect) -> Result<(Vec<u8>, u32, u32), TargetError>`. No new dep. Bounds-checked.
-      `> DONE:` a known small BGRA buffer (e.g. 4×4) cropped to a 2×2 box yields exactly the expected bytes + dims; out-of-bounds rect errors; test.
-- [x] T331 [P] Wire **screen** crop — in the screen frame path (`capture/screen.rs` and/or `capture/service.rs`), if an active target with `source = Display` exists, apply `geometry`(T310)+`crop_bgra`(T330) to the BGRA frame BEFORE encode/analyze/OCR. Pass-through when no active target.
-      `> DONE:` with an active target the produced frame's dims == the cropped dims; no-target path is byte-identical pass-through; test with a stubbed frame.
-- [x] T332 [P] Wire **stream** crop — in `capture/stream.rs::build_ffmpeg_args`, when an active target with `source = Stream` exists, inject `-vf crop=w:h:x:y` (pixel rect from `geometry` over the stream resolution via `probe_dimensions`). Filter omitted when no active target.
-      `> DONE:` `build_ffmpeg_args` with an active target adds the correct `crop=W:H:X:Y` filter in the right position; without a target the args are unchanged; unit test on the arg vector.
-- [x] T333 [S] Crop integration — screen sub-image + stream `crop=` arg path both exercised end-to-end.
-      `> DONE:` integration test (screen crop dims + stream arg presence); `cargo check` + tests green.
+## Wave 4 — PV4: renderer trait + opt-in `richwindow` (winit+softbuffer) `[S]`
 
-## Wave 4 — TG4 + TG5: MCP/CLI surface + confirmation image `[S]`
+- [x] T440 `src/preview/renderer.rs` — `PreviewRenderer` trait (`show_image(path)`, `show_live(frame, dims)`, `place(monitor)`); default impl = the ffplay-backed renderer (reuse player/live). The CLI uses the trait.
+      `> DONE:` trait + default ffplay impl compile; the default path goes through the trait; `cargo check`.
+- [x] T441 `Cargo.toml` `[features] richwindow = ["dep:winit","dep:softbuffer"]` with **optional** `winit`/`softbuffer` deps; `#[cfg(feature="richwindow")]` window backend: open a (small, ~10%) window, blit BGRA frames, **agent-controlled placement** from the display catalogue + scale-factor.
+      `> DONE:` `--features richwindow` compiles the winit backend; placement uses monitor geometry; (default build untouched).
+- [x] T442 [S] Gate — `richwindow` is opt-in only.
+      `> DONE:` default `./.tooling/bin/cargo check` compiles WITHOUT winit/softbuffer (absent from the default build graph — `cargo tree -e no-dev`); the opencv-highgui reuse backend is documented in `docs/PREVIEW.md`.
 
-- [x] T340 `mcp/tools.rs` + `mcp/server.rs` — add `define_target` (input: `name`, `source`, normalized `region`) and `focus_target` (input: `name` → set active) following the existing `tool_*` + schemars input/output struct pattern; register in `list_tools`; route in `dispatch`. Tool **descriptions teach** the normalized-0–1-coords contract + the confirmation-image self-correction loop.
-      `> DONE:` `tools/list` shows both tools with schemas; a `call_tool` round-trip defines then focuses a target and returns valid JSON; `cargo check` green.
-- [x] T341 [P] `bin/gentle-eye.rs` — CLI subcommands `target add <name> --display N|--stream URL --region x,y,w,h`, `target use <name>`, `target list` (JSON out, reuse lib `TargetStore`).
-      `> DONE:` each subcommand prints valid JSON; `target list` reflects the store; `target use` sets the active target.
-- [x] T342 [S] TG5 **confirmation image** — `define_target`/`focus_target` return the resulting crop so the agent sees + self-corrects (no CV yet). Screen: grab one frame → `crop_bgra` → encode PNG (reuse the existing screen→PNG encode path; add `image` ONLY if no encoder exists). Stream: `capture_stream_frame` + `crop=`. Returns a path (and/or base64) to the cropped PNG.
-      `> DONE:` `define_target` returns a crop image whose pixel dims match the requested normalized box (within rounding); `cargo check` + tests green.
+## Wave 5 — Gates + docs `[S]`
 
-## Wave 5 — TG6: Phase 2 measurement mode (`imageproc`, Zoom-then-Snap) `[S]`
-
-- [x] T350 Add **`imageproc`** (pinned, e.g. `imageproc = "0.25"`; add matching `image` if required) to `Cargo.toml` per the constitution's pin discipline. `src/target/measure.rs` skeleton: `MeasurementResult { snapped_rect: NormRect, aspect_ratio: f64, confidence: f64, detected_grid: Option<(u32,u32)>, edge_alignment: f64 }` + `measure(buf, pixel_rect, full_dims) -> Result<MeasurementResult, TargetError>` stub.
-      `> DONE:` `imageproc` pinned; `MeasurementResult` derives serde+schemars; `cargo check` green (stub).
-- [x] T351 **Zoom-then-Snap** — crop a ~10%-padded high-res buffer around the rough rect, run Canny edge detection, snap the rough rect to the nearest strong horizontal/vertical edges; fill `snapped_rect` + `edge_alignment` + `confidence`.
-      `> DONE:` a synthetic image with a known bordered rectangle → `snapped_rect` aligns to its borders within ≤2px; test.
-- [x] T352 [P] **Projection-profile gutter detection** for tiled panes — sum column intensities → find low-variance gutters between panes → pane bounds; fill `detected_grid`.
-      `> DONE:` a synthetic 4-column image → detects 3 gutters / 4 panes with correct boundaries; test.
-- [x] T353 [P] **Red-marker** color-mask → bbox ("find the red box") + **Redline-Overlay** diagnostic crop (green = edges found, red = unsure) so the VLM supervises the CV.
-      `> DONE:` a synthetic image with a red rectangle → bbox matches the marker; an overlay image is produced; test.
-- [x] T354 [S] Measurement integration + MCP wiring — `define_target` gains a measure mode ("snap" / "find red marker") returning `MeasurementResult` + the Redline overlay for the agent to confirm/re-target.
-      `> DONE:` measure mode returns a `MeasurementResult` + overlay over a synthetic frame; `cargo check` + `cargo clippy -D warnings` + tests green.
-
-## Wave 6 — TG7: Phase 3 tracking (`opencv`) — DEFERRED, feature-gated skeleton `[S]`
-
-PRD §3: opencv is deferred (system/build-dep friction). Land only an **opt-in
-skeleton** so the default build never requires `libopencv-dev`.
-
-- [x] T360 `Cargo.toml` `[features] tracking = ["dep:opencv"]` with `opencv` as an **optional** dep; `src/target/track.rs` — `RegionTracker` trait (`init(frame, rect)`, `update(frame) -> Option<PixelRect>`) + a default no-op stub impl compiled without the feature. opencv-backed impl gated behind `#[cfg(feature = "tracking")]`.
-      `> DONE:` default `cargo check` (no features) compiles WITHOUT pulling opencv; `RegionTracker` trait + stub present; the `libopencv-dev`/deferral note is written in `docs/TARGET.md`.
-- [x] T361 [S] Gate — confirm tracking is opt-in only.
-      `> DONE:` `./.tooling/bin/cargo check` (default features) green and opencv absent from the default build graph; the `tracking` feature is documented as opt-in.
-
-## Wave 7 — Gates + docs `[S]`
-
-- [x] T370 [S] `cargo test` — all unit + integration tests green.
+- [x] T450 [S] `cargo test` — all unit + integration tests green.
       `> DONE:` `./.tooling/bin/cargo test` exit 0.
-- [x] T371 [S] `cargo clippy --all-targets -- -D warnings` — zero warnings.
-      `> DONE:` clippy exit 0.
-- [x] T372 `docs/TARGET.md` — the Vision-First/CV-Second design, the normalized-coords + confirmation-image agent loop, the 3-phase dependency line (image-free P1 → `imageproc` P2 → deferred feature-gated `opencv` P3), and MCP/CLI usage examples.
-      `> DONE:` `docs/TARGET.md` exists and documents the agent-facing target workflow + the dep decisions.
+- [x] T451 [S] `cargo clippy --all-targets -- -D warnings` (default features) — zero warnings.
+      `> DONE:` clippy exit 0; default build confirmed 0 new crates.
+- [x] T452 `docs/PREVIEW.md` (+ QUICKSTART/TOOLS updates) — the 2-part design, the feature-gated renderer table, supply-chain rationale, the `richwindow` opt-in + opencv-highgui reuse note, CLI usage.
+      `> DONE:` `docs/PREVIEW.md` exists and documents the preview pane + the dep posture.
 
 ---
 
 ## Run mode: dev-kid LITE + in-session checkpoints
 
-Runs with **dev-kid lite**: it only needs this `.dk/tasks.md` to orchestrate waves.
-Lite **dispatches** Wave N to the in-session Developer agent to implement, then waits
-for `[x]`. The **`[S]` checkpoints are run by the in-session agent** — i.e. run
-`./.tooling/bin/cargo check` at each `[S]` (and `cargo test` + `cargo clippy -D
-warnings` at gate waves). ma-loop / tier escalation is the fallback only on a stuck
-file.
+dev-kid lite reads this `.dk/tasks.md`. It dispatches Wave N to the in-session
+Developer agent (Claude) to implement; the **`[S]` checkpoints are run by the
+in-session agent** (`./.tooling/bin/cargo check`, + `cargo test`/`clippy -D warnings`
+at gate waves). ma-loop / tier escalation is the fallback only on a stuck file
+(floor `mixed-budget`).
 
-- At each `[S]`: green → mark `[x]` and advance. Red → fix in place (attribution-aware:
-  if the primary error span is a *dependency* file, fix that, don't mangle the target),
-  then re-check.
-- **Halt-and-fix:** any dev-kid / sentinel / ma-loop bug encountered IS the valued
-  dogfood finding. Stop, capture, fix the TOOL, resume.
-- **Constitution:** Edition 2021, all deps pinned, `scrap 0.5`, `rmcp 0.1`. New deps
-  (`imageproc` W5, optional `opencv` W6) MUST be pinned; opencv MUST stay feature-gated.
+- **Constitution:** Edition 2021, deps pinned. The **default build MUST add zero new
+  crates** (ffplay subprocess + hand-rolled `std::net`). `winit`/`softbuffer` MUST be
+  optional + feature-gated (`richwindow`, off by default). No countdown.
+- **Halt-and-fix:** any dev-kid / sentinel bug = the valued finding. Stop, capture,
+  fix the tool, resume.
 
-- [ ] SENTINEL-T004: Sentinel validation for T004: verify implementations pass tests
-- [ ] SENTINEL-T006: Sentinel validation for T005, T006: verify implementations pass tests
-- [ ] SENTINEL-T010: Sentinel validation for T007, T008, T009, T010: verify implementations pass tests
-- [ ] SENTINEL-T013: Sentinel validation for T013: verify implementations pass tests
-- [ ] SENTINEL-T018: Sentinel validation for T014, T015, T016, T017, T018: verify implementations pass tests
-- [ ] SENTINEL-T020: Sentinel validation for T019, T020: verify implementations pass tests
-- [ ] SENTINEL-T021: Sentinel validation for T021: verify implementations pass tests
-- [ ] SENTINEL-T022: Sentinel validation for T022: verify implementations pass tests
+- [ ] SENTINEL-T006: Sentinel validation for T004, T005, T006: verify implementations pass tests
+- [ ] SENTINEL-T011: Sentinel validation for T007, T008, T009, T010, T011: verify implementations pass tests
+- [ ] SENTINEL-T014: Sentinel validation for T012, T013, T014: verify implementations pass tests
+- [ ] SENTINEL-T017: Sentinel validation for T015, T016, T017: verify implementations pass tests
+- [ ] SENTINEL-T018: Sentinel validation for T018: verify implementations pass tests
+- [ ] SENTINEL-T019: Sentinel validation for T019: verify implementations pass tests

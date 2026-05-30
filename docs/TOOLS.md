@@ -19,6 +19,7 @@ What an agent can do with gentle-eye. Two surfaces over one library:
 | OCR on-screen text | `read_screen_text` | `read-text` |
 | Grab a frame from a live stream (ATEM/RTSP/HTTP/SRT) | `capture_stream_frame` | `capture-stream` |
 | Focus capture on a sub-region (crop) | `define_target` / `focus_target` | `target add` / `target use` / `target list` |
+| Preview a capture (image/video) or live feed | — | `preview [FILE]` / `preview --gallery` / `preview --live` (see [PREVIEW.md](PREVIEW.md)) |
 | Snap a rough region to real edges / find a red marker | `measure_target` | — |
 | Inspect the configured vision provider | `get_vision_provider_info` | `provider-info` |
 | List / label displays | — | `displays` / `label` |
@@ -72,6 +73,9 @@ gentle-eye label   --display IDX --name "left"        Label a display (persists)
 gentle-eye target add NAME (--display IDX | --stream URL) --region x,y,w,h
 gentle-eye target use NAME
 gentle-eye target list
+gentle-eye preview [FILE] [--loop once|forever] [--seconds N]   Preview a capture (default: most recent)
+gentle-eye preview --gallery [--port N]   Browser media gallery (Range video) until idle
+gentle-eye preview --live                 Live preview of the active target (default off)
 gentle-eye provider-info [--provider gemini|ollama]
 gentle-eye help
 ```

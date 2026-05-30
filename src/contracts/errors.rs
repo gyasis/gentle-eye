@@ -31,6 +31,9 @@ pub enum GentleEyeError {
     /// Target (region-of-interest / crop) error
     #[error(transparent)]
     Target(#[from] crate::target::errors::TargetError),
+    /// Preview (media pane) error
+    #[error(transparent)]
+    Preview(#[from] crate::preview::errors::PreviewError),
     /// MCP-protocol-level error
     #[error("MCP error: {0}")]
     Mcp(String),
@@ -240,6 +243,7 @@ impl GentleEyeError {
             GentleEyeError::Config(_) => McpErrorCode::InternalError,
             GentleEyeError::Dayflow(e) => e.mcp_error_code(),
             GentleEyeError::Target(e) => e.mcp_error_code(),
+            GentleEyeError::Preview(e) => e.mcp_error_code(),
             GentleEyeError::Mcp(_) => McpErrorCode::InternalError,
         }
     }
