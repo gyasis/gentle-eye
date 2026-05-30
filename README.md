@@ -2,6 +2,14 @@
 
 > Rust + MCP server for LLM-agent screen and video understanding.
 
+## Quickstart
+
+- **Install & run (per machine):** [`docs/QUICKSTART.md`](docs/QUICKSTART.md) —
+  Linux (validated), macOS (cross-platform, not yet verified), Windows (experimental).
+- **What it can do (agent tools + CLI):** [`docs/TOOLS.md`](docs/TOOLS.md).
+- **Region-of-interest cropping ("target"):** [`docs/TARGET.md`](docs/TARGET.md).
+- **Stream a live source (ATEM/OBS):** [`docs/ATEM_STREAMING.md`](docs/ATEM_STREAMING.md).
+
 ## Status
 
 **Recovered project — partially rebuilt from session archives (2026-05-09).**
