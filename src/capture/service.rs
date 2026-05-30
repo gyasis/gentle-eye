@@ -81,8 +81,16 @@ fn run_capture(
     control: &RecordingControl,
 ) -> Result<CaptureStats, RecordingError> {
     let mut capturer = ScreenCapturer::new(display_index)?;
-    let width = capturer.width() as u32;
-    let height = capturer.height() as u32;
+    let full_w = capturer.width();
+    let full_h = capturer.height();
+
+    // If an active target points at THIS display, crop every frame to it. The
+    // encoder is sized to the crop, so the whole recording is the sub-region.
+    let crop_rect = active_display_crop(display_index, full_w as u32, full_h as u32);
+    let (width, height) = match crop_rect {
+        Some(r) => (r.w, r.h),
+        None => (full_w as u32, full_h as u32),
+    };
     let fps = u32::from(config.fps);
     let mut encoder = PipeEncoder::start(width, height, fps, output)?;
     let mut frame_rate = FrameRateController::new(fps);
@@ -104,7 +112,16 @@ fn run_capture(
         let now = Instant::now();
         if frame_rate.should_capture(now) {
             let frame = capturer.capture_frame(Duration::from_millis(200))?;
-            encoder.write_frame(&frame)?;
+            match crop_rect {
+                Some(rect) => {
+                    let stride = frame.len().checked_div(full_h).unwrap_or(full_w * 4);
+                    let (cropped, _, _) =
+                        crate::target::crop::crop_bgra(&frame, full_w, full_h, stride, rect)
+                            .map_err(|e| RecordingError::EncoderError(e.to_string()))?;
+                    encoder.write_frame(&cropped)?;
+                }
+                None => encoder.write_frame(&frame)?,
+            }
         } else {
             std::thread::sleep(frame_rate.time_until_next(now).min(Duration::from_millis(10)));
         }
@@ -116,6 +133,21 @@ fn run_capture(
         duration_ms: start.elapsed().as_millis() as u64,
         file_size_bytes,
     })
+}
+
+/// Resolve the active target into a pixel crop rect — but only when it targets
+/// THIS display. Returns `None` (full-frame capture) when there's no active
+/// target, it targets a different display, or it's a stream target (stream crops
+/// are applied by the ffmpeg `crop=` filter in `capture::stream`, not here).
+fn active_display_crop(display_index: usize, w: u32, h: u32) -> Option<crate::target::model::PixelRect> {
+    let store = crate::target::store::TargetStore::load().ok()?;
+    let target = store.active()?;
+    match &target.source {
+        crate::target::model::TargetSource::Display { index } if *index == display_index => {
+            Some(crate::target::geometry::norm_to_pixel(target.region, (w, h), (0, 0)))
+        }
+        _ => None,
+    }
 }
 
 /// Update a recording's persisted state once its capture loop has ended.
