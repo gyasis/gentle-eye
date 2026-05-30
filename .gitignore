@@ -1,7 +1,9 @@
 .DS_Store
 
 # rust build artifacts
-target/
+# Anchored to the repo root so it ONLY ignores the build dir, NOT the
+# `src/target/` source module (the unanchored `target/` matched both).
+/target/
 **/*.rs.bk
 
 # recovery archives + artifacts (kept on disk, NEVER committed — may hold
