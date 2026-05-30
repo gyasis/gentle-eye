@@ -62,10 +62,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # libopencv-dev + C++ linkage). See `docs/TARGET.md` and PRD §3.
 opencv = { version = "0.94", optional = true }
 
+# Opt-in "richwindow" preview backend ONLY (optional; behind the feature). A
+# pure-Rust window for the live preview — NOT built by default (75-crate tree
+# kept out of the default trust surface). See docs/PREVIEW.md.
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+
 [features]
 # Opt-in real-time region tracking (Phase 3). Off by default — enable with
 # `--features tracking`, which requires `libopencv-dev` to be installed.
 tracking = ["dep:opencv"]
+# Opt-in pure-Rust preview window for the live preview. Off by default — enable
+# with `--features richwindow` (pulls winit+softbuffer, ~75 crates).
+richwindow = ["dep:winit", "dep:softbuffer"]
 
 [dev-dependencies]
 mockall = "0.12"
