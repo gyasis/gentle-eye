@@ -1,0 +1,47 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+[06:25:07] [32mINFO[0m 🤖 Micro Agent starting (Ralph Loop engine) {"target":"capture/frame_rate.rs","framework":"cargo","maxIterations":"5","maxBudget":"2.00","maxDuration":"15","adversarial":false,"resetFrequency":"1","simple":"5","escalate":true,"generate":true,"objective":"[S] Duration-aware fps heuristic in `capture/frame_rate.rs` (≤30s→5–30; 30s–15min→1; 15min–hours→0.2–0.5) + **document it** in the `start_recording` MCP tool description AND `docs/FPS_AND_DAYFLOW.md`.","test":"./.tooling/bin/cargo check --message-format=short","config":"/home/gyasis/Documents/code/gentle-eye/ralph.config.yaml"}
+(node:1481130) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[06:25:07] [32mINFO[0m Configuration loaded
+[06:25:07] [32mINFO[0m Run parameters prepared {"objective":"[S] Duration-aware fps heuristic in `capture/frame_rate.rs` (≤30s→5–30; 30s–15min→1; 15min–hours→0.2–0.5) + **document it** in the `start_recording` MCP tool description AND `docs/FPS_AND_DAYFLOW.md`.","targetFile":"capture/frame_rate.rs","workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short","testFramework":"cargo","maxIterations":5,"maxBudget":2,"maxDuration":15,"simpleIterations":5,"noEscalate":false,"fullMode":false}
+[06:25:07] [32mINFO[0m Infrastructure initialized
+[06:25:07] [32mINFO[0m Agents initialized {"librarian":"gemma3:27b","artisan":"qwen3-coder:30b","critic":"deepseek-r1:32b"}
+⚠️  Unknown model "gemma3:27b" - using conservative 8k token limit
+⚠️  Unknown model "qwen3-coder:30b" - using conservative 8k token limit
+⚠️  Unknown model "deepseek-r1:32b" - using conservative 8k token limit
+[06:25:07] [32mINFO[0m Starting iteration loop {"sessionId":"524e268b-6db4-46ed-954d-d806ca07eb18","maxIterations":5}
+[06:25:07] [32mINFO[0m 
+============================================================
+[06:25:07] [32mINFO[0m Simple Mode: up to 5 iteration(s)
+[06:25:07] [32mINFO[0m ============================================================
+[06:25:07] [32mINFO[0m 
+[Simple 1/5]
+[06:25:07] [32mINFO[0m Simple Mode: Artisan generating code...
+[06:25:07] [32mINFO[0m [artisan] artisan agent initialized {"session":"524e268b-6db4-46ed-954d-d806ca07eb18","iteration":{"iteration":1,"maxIterations":5,"objective":"[S] Duration-aware fps heuristic in `capture/frame_rate.rs` (≤30s→5–30; 30s–15min→1; 15min–hours→0.2–0.5) + **document it** in the `start_recording` MCP tool description AND `docs/FPS_AND_DAYFLOW.md`.","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[06:25:07] [32mINFO[0m [artisan] artisan agent executing
+[06:25:29] [32mINFO[0m [artisan] Code written {"file":"capture/frame_rate.rs","size":793}
+Unknown model "qwen3-coder:30b", using default pricing
+[06:25:29] [32mINFO[0m [artisan] artisan agent completed {"duration":21810,"tokensUsed":1249,"cost":0.0012490000000000001}
+[06:25:29] [32mINFO[0m   Artisan: pub fn calculate_frame_rate(duration: Duration) -> f64 {
+    let seconds = duration.as_secs_f64();
+    
+    if seconds <= 30.0 {
+        // For short recordings, use a higher frame rate for better qua...
+[06:25:29] [32mINFO[0m   Change:  [object Object]
+[06:25:29] [32mINFO[0m Simple Mode: Running tests...
+[06:25:29] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short"}
+[06:25:29] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo check --message-format=short","detectedFramework":"cargo"}
+[06:25:29] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo check --message-format=short"}
+[06:25:30] [32mINFO[0m Tests completed {"status":"passed","total":0,"passed":0,"failed":0,"duration":359}
+[06:25:30] [32mINFO[0m   Tests: ✓ ALL PASSED (0 tests)
+[06:25:30] [32mINFO[0m   Cost:  $0.0012 this iteration
+[06:25:30] [32mINFO[0m Simple Mode: Solved in 1/5 iterations
+[06:25:30] [32mINFO[0m 
+============================================================
+[06:25:30] [32mINFO[0m Simple Mode: Solved in 1/5 iterations
+[06:25:30] [32mINFO[0m ============================================================
+[06:25:30] [32mINFO[0m Status:     SUCCESS
+[06:25:30] [32mINFO[0m Mode:       Simple only
+[06:25:30] [32mINFO[0m Iterations: 1 simple / 0 full / 1 total
+[06:25:30] [32mINFO[0m Cost:       $0.001 simple / $0.000 full / $0.001 total
+[06:25:30] [32mINFO[0m Duration:   22.2s

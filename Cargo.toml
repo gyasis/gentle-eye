@@ -17,6 +17,12 @@ async-trait = "0.1"
 # Screen Capture
 scrap = "0.5"
 
+# Computer vision for "target" measurement mode (Phase 2): pure-Rust Canny /
+# projection profiles / color masks. No system libraries (opencv stays deferred
+# behind the optional `tracking` feature). Pinned per the dep discipline.
+image = "0.25"
+imageproc = "0.25"
+
 # Storage
 rusqlite = { version = "0.31", features = ["bundled"] }
 
@@ -45,6 +51,16 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Phase 3 (DEFERRED) region tracking only. OPTIONAL + behind the `tracking`
+# feature so the default build needs NO system libraries (opencv requires
+# libopencv-dev + C++ linkage). See `docs/TARGET.md` and PRD §3.
+opencv = { version = "0.94", optional = true }
+
+[features]
+# Opt-in real-time region tracking (Phase 3). Off by default — enable with
+# `--features tracking`, which requires `libopencv-dev` to be installed.
+tracking = ["dep:opencv"]
 
 [dev-dependencies]
 mockall = "0.12"

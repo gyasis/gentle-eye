@@ -109,7 +109,7 @@ single-file ma-loop, decides where a cross-file fix belongs).
    isolation only. A real `[S]`-driven wave + a real broken-dependency recovery
    remain unproven against live tooling.
 2. **Tiering must be wired** for a real run — `tier1.ollama_url` must point at the
-   Mac ollama (`192.168.0.159`), or it repeats S2.
+   Mac ollama (`<LAN_OLLAMA_HOST>`), or it repeats S2.
 3. **D2 guard** (warn on tasks.md divergence) is proposed, not implemented.
 4. **(c) attribution is cargo-only** (rustc JSON spans); other languages fall back
    to plain escalation.

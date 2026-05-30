@@ -57,9 +57,21 @@ CREATE TABLE IF NOT EXISTS analysis_results (
     FOREIGN KEY (request_id) REFERENCES analysis_requests(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS timeline_entries (
+    id              TEXT PRIMARY KEY,
+    recording_id    TEXT NOT NULL,
+    start_time      TEXT NOT NULL,
+    end_time        TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    app             TEXT NOT NULL,
+    activity        TEXT NOT NULL,
+    summary         TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_recordings_status ON recordings(status);
 CREATE INDEX IF NOT EXISTS idx_recordings_start_time ON recordings(start_time);
 CREATE INDEX IF NOT EXISTS idx_results_request ON analysis_results(request_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_start ON timeline_entries(start_time);
 "#;
 
 /// Open (or create) the database at `db_path` and apply the schema.
@@ -82,6 +94,25 @@ fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
         .map_err(|e| StorageError::MigrationError(e.to_string()))?;
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|e| StorageError::MigrationError(e.to_string()))?;
+    // Column-add migrations for databases created before these columns existed.
+    // `CREATE TABLE IF NOT EXISTS` never ALTERs an existing table, so a db file
+    // from an older schema is missing newer columns and inserts fail. Add them
+    // idempotently: a "duplicate column name" error means it's already present
+    // (fresh db from the DDL above) and is safely ignored.
+    const COLUMN_ADDS: &[&str] = &[
+        "ALTER TABLE recordings ADD COLUMN max_duration_seconds INTEGER",
+        "ALTER TABLE recordings ADD COLUMN output_dir TEXT",
+        "ALTER TABLE recordings ADD COLUMN display_name TEXT",
+        "ALTER TABLE recordings ADD COLUMN encoder_mode TEXT NOT NULL DEFAULT 'in_memory_pipe'",
+    ];
+    for stmt in COLUMN_ADDS {
+        if let Err(e) = conn.execute(stmt, []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(StorageError::MigrationError(msg));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -108,6 +139,31 @@ mod tests {
     fn migrations_are_idempotent() {
         let conn = init_in_memory().unwrap();
         // Re-applying must not error.
+        assert!(apply_migrations(&conn).is_ok());
+    }
+
+    #[test]
+    fn upgrades_old_schema_missing_columns() {
+        // Simulate a db created before the newer columns existed: a bare
+        // `recordings` table. CREATE TABLE IF NOT EXISTS won't touch it, so the
+        // column-add migration must backfill the missing columns (the bug that
+        // caused "table recordings has no column named max_duration_seconds").
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE recordings (id TEXT PRIMARY KEY, status TEXT NOT NULL, start_time TEXT NOT NULL);",
+        )
+        .unwrap();
+        apply_migrations(&conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(recordings)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(cols.contains(&"max_duration_seconds".to_string()));
+        assert!(cols.contains(&"output_dir".to_string()));
+        // Re-applying over the upgraded db must still be idempotent.
         assert!(apply_migrations(&conn).is_ok());
     }
 }

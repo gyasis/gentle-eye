@@ -17,10 +17,15 @@ use serde::{Deserialize, Serialize};
 /// that can be used to stop the recording or check its status.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct StartRecordingInput {
-    /// Frames per second for the recording (1-30, default: 1)
+    /// Frames per second for the recording (1-30, default: 1).
     ///
-    /// Lower values (1-5) are recommended for typical debugging sessions
-    /// to reduce file size.
+    /// Pick fps by how long you intend to record (duration-aware heuristic; see
+    /// `docs/FPS_AND_DAYFLOW.md`):
+    /// - ≤ ~30 s, motion matters → 15 (smooth, tiny file)
+    /// - ~30 s – 15 min, debugging → 1 (a sequence of actions; cheap)
+    /// - 15 min+ (all-day "dayflow") → sub-1 fps timelapse (0.2–0.5), which the
+    ///   dedicated dayflow tools handle (chunk + Map-Reduce), since this tool
+    ///   clamps to ≥1.
     #[schemars(range(min = 1, max = 30))]
     pub fps: Option<u32>,
 
@@ -286,9 +291,21 @@ pub struct GetVisionProviderInfoOutput {
 // read_screen_text Tool
 // ============================================================================
 
-/// Input parameters for the `read_screen_text` tool (OCR).
+/// Input parameters for the `read_screen_text` tool — fast, LOCAL OCR (tesseract).
 ///
 /// Provide exactly one of `image_path` or `video_path`.
+///
+/// CHOOSING A VISION METHOD (full guidance: `docs/VISION_METHODS.md`):
+/// - `read_screen_text` (this tool) — OCR. **Local, private, fast, free.** Good for
+///   crisp/light UI text and quick extraction. WEAK on dense, dark, multi-column
+///   screens (terminals/IDEs) — the text comes back garbled.
+/// - For ACCURATE text on a dense/dark screen, use `analyze_video` (the cloud vision
+///   provider, e.g. Gemini) with a "transcribe all on-screen text" prompt: it reads
+///   the full frame far better than OCR — at the cost of sending the image off-box.
+///   For an ultrawide, TILE into columns and analyze each at full resolution for
+///   near-perfect fidelity.
+/// - PRIVACY: prefer OCR / local vision for sensitive screens; use the cloud provider
+///   only when fidelity matters and the content is OK to share.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ReadScreenTextInput {
     /// Absolute path to an image to OCR.
@@ -351,6 +368,111 @@ pub struct CaptureStreamFrameOutput {
     pub captured_at: String,
 
     /// Human-readable confirmation message.
+    pub message: String,
+}
+
+// ============================================================================
+// define_target / focus_target Tools
+// ============================================================================
+
+/// Input for the `define_target` tool.
+///
+/// A *target* is an OBS-style crop on a display or stream. You — the agent —
+/// pick WHAT to focus on and pass a **rough region in normalized 0–1
+/// coordinates**: `region.x`/`y` is the top-left corner, `region.w`/`h` the
+/// size, both as fractions of the source. Example: the 2nd of 4 equal code
+/// columns on an ultrawide = `{x: 0.25, y: 0.0, w: 0.25, h: 1.0}`.
+///
+/// `define_target` returns a **confirmation image** of the resulting crop so
+/// you can SEE what you selected and re-call with an adjusted region if it's
+/// off. (Phase 2 will snap the box to real edges; for now use the image to
+/// self-correct.)
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct DefineTargetInput {
+    /// Unique name for this target (e.g. "editor", "left-pane", "atem-cam").
+    pub name: String,
+    /// What to crop from: `{"kind":"display","index":0}` or
+    /// `{"kind":"stream","url":"rtsp://…"}`.
+    pub source: crate::target::model::TargetSource,
+    /// The region of interest in NORMALIZED 0–1 coordinates.
+    pub region: crate::target::model::NormRect,
+    /// Make this the active target (default: true). Only one is active at a time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set_active: Option<bool>,
+}
+
+/// Output for the `define_target` tool.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DefineTargetOutput {
+    /// The target's name.
+    pub name: String,
+    /// Whether this target is now the active one.
+    pub active: bool,
+    /// The resolved absolute pixel rect, when a confirmation capture succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_rect: Option<crate::target::model::PixelRect>,
+    /// Path to the cropped confirmation PNG, when a frame could be captured.
+    /// Pass it to `analyze_video` (image mode) or inspect it to self-correct.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_image: Option<String>,
+    /// Human-readable status (incl. why a confirmation image may be absent).
+    pub message: String,
+}
+
+/// Input for the `focus_target` tool — switch the active target by name.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FocusTargetInput {
+    /// The name of a previously-defined target to make active.
+    pub name: String,
+}
+
+/// Output for the `focus_target` tool.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FocusTargetOutput {
+    /// The now-active target's name.
+    pub name: String,
+    /// Always true on success (the named target is active).
+    pub active: bool,
+    /// The active target's normalized region.
+    pub region: crate::target::model::NormRect,
+    /// Human-readable confirmation message.
+    pub message: String,
+}
+
+// ============================================================================
+// measure_target Tool (Phase 2)
+// ============================================================================
+
+/// Input for the `measure_target` tool — Zoom-then-Snap measurement.
+///
+/// Give a ROUGH normalized region; the pure-Rust CV snaps it to the nearest
+/// strong edges and detects any tiled-pane grid. Inspect the returned overlay
+/// image (green = edges found, red = the snapped box) and the `snapped_rect`,
+/// then pass `snapped_rect` to `define_target`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct MeasureTargetInput {
+    /// What to measure on: `{"kind":"display","index":0}` or `{"kind":"stream","url":"…"}`.
+    pub source: crate::target::model::TargetSource,
+    /// The rough region in NORMALIZED 0–1 coordinates.
+    pub region: crate::target::model::NormRect,
+    /// Also locate a hand-drawn red marker and return its bbox (default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub find_red_marker: Option<bool>,
+}
+
+/// Output for the `measure_target` tool.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MeasureTargetOutput {
+    /// The snapped measurement (normalized rect, confidence, detected grid).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::target::measure::MeasurementResult>,
+    /// Bounding box of a detected red marker (when `find_red_marker` was set).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub red_marker: Option<crate::target::model::PixelRect>,
+    /// Path to the "Redline Overlay" diagnostic PNG, when one could be rendered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay_image: Option<String>,
+    /// Human-readable status.
     pub message: String,
 }
 

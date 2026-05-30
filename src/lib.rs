@@ -36,11 +36,13 @@ pub mod api;
 pub mod capture;
 pub mod config;
 pub mod contracts;
+pub mod dayflow;
 pub mod mcp;
 pub mod models;
 pub mod security;
 pub mod startup;
 pub mod storage;
+pub mod target;
 
 // Convenience re-exports for library consumers — the one-call facade plus the
 // types those calls return/accept, so `use gentle_eye::{record, VisionConfig};`

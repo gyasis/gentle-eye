@@ -30,11 +30,14 @@ USAGE:
   gentle-eye analyze --image PATH  --prompt TEXT [--provider gemini|ollama]
   gentle-eye analyze --video PATH  --prompt TEXT [--start S --end E] [--provider …]
   gentle-eye record  [--duration SECS] [--fps N] [--out FILE.mp4] [--display IDX|LABEL]
-  gentle-eye capture-stream --url URL [--out DIR]     Grab one frame from a stream (ATEM/RTSP/HTTP)
+  gentle-eye capture-stream --url URL [--out DIR] [--region x,y,w,h]   Grab one frame from a stream (ATEM/RTSP/HTTP); --region crops (normalized 0-1)
   gentle-eye list    [--status all|recording|completed|cancelled|failed] [--limit N]
   gentle-eye read-text --image PATH | --video PATH    Extract on-screen text (OCR) as JSON
   gentle-eye displays                                 List available displays (the catalogue)
   gentle-eye label   --display IDX --name \"left\"      Label a display (persists across runs)
+  gentle-eye target add NAME (--display IDX | --stream URL) --region x,y,w,h   Define a crop (normalized 0-1)
+  gentle-eye target use NAME                          Make NAME the active target
+  gentle-eye target list                              List targets + the active one
   gentle-eye provider-info [--provider gemini|ollama]
   gentle-eye help
 
@@ -62,6 +65,7 @@ async fn main() -> ExitCode {
         "read-text" => run_read_text(rest).await,
         "displays" => run_displays(rest).await,
         "label" => run_label(rest).await,
+        "target" => run_target(rest).await,
         "help" | "-h" | "--help" => {
             println!("{HELP}");
             Ok(())
@@ -180,7 +184,20 @@ async fn run_record(args: &[String]) -> Result<()> {
 async fn run_capture_stream(args: &[String]) -> Result<()> {
     let url = flag(args, "--url").ok_or_else(|| anyhow!("--url <stream-url> is required"))?;
     let out = flag(args, "--out").unwrap_or("/tmp/gentle-eye/frames");
-    let frame = gentle_eye::capture::stream::capture_stream_frame(url, Path::new(out))?;
+    // Optional --region x,y,w,h (normalized 0-1) crops the grabbed frame to a
+    // sub-region via the same ffmpeg `crop=` filter an active stream target uses.
+    let frame = if let Some(region_str) = flag(args, "--region") {
+        let region = parse_region(region_str)?;
+        if !region.is_valid() {
+            return Err(anyhow!("region must lie within 0-1 with positive area"));
+        }
+        // Probe full-frame resolution → compute pixel rect → capture cropped.
+        let full = gentle_eye::capture::stream::capture_stream_frame(url, Path::new(out))?;
+        let rect = gentle_eye::target::geometry::norm_to_pixel(region, (full.width, full.height), (0, 0));
+        gentle_eye::capture::stream::capture_stream_frame_cropped(url, Path::new(out), Some(rect))?
+    } else {
+        gentle_eye::capture::stream::capture_stream_frame(url, Path::new(out))?
+    };
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -193,6 +210,83 @@ async fn run_capture_stream(args: &[String]) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+async fn run_target(args: &[String]) -> Result<()> {
+    use gentle_eye::target::model::{Target, TargetSource};
+    use gentle_eye::target::store::TargetStore;
+
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    match sub {
+        "list" => {
+            let store = TargetStore::load()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "targets": store.list(),
+                    "active": store.active().map(|t| t.name.clone()),
+                }))?
+            );
+        }
+        "use" => {
+            let name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: target use NAME"))?;
+            let mut store = TargetStore::load()?;
+            store.set_active(name).map_err(|e| anyhow!("{e}"))?;
+            store.save()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"active": name}))?
+            );
+        }
+        "add" => {
+            let name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: target add NAME (--display IDX | --stream URL) --region x,y,w,h"))?;
+            let source = match (flag(args, "--display"), flag(args, "--stream")) {
+                (Some(idx), None) => TargetSource::Display {
+                    index: idx.parse().context("--display must be an integer index")?,
+                },
+                (None, Some(url)) => TargetSource::Stream { url: url.to_string() },
+                _ => return Err(anyhow!("provide exactly one of --display IDX or --stream URL")),
+            };
+            let region = parse_region(
+                flag(args, "--region").ok_or_else(|| anyhow!("--region x,y,w,h is required"))?,
+            )?;
+            if !region.is_valid() {
+                return Err(anyhow!("region must lie within 0-1 with positive area"));
+            }
+            let mut store = TargetStore::load()?;
+            let mut target = Target::new(name.clone(), source, region);
+            target.active = true; // adding makes it active (one at a time)
+            store.add(target);
+            store.save()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "added": name, "active": name
+                }))?
+            );
+        }
+        other => return Err(anyhow!("unknown target subcommand '{other}' (add|use|list)")),
+    }
+    Ok(())
+}
+
+/// Parse a `x,y,w,h` normalized-coordinate string into a `NormRect`.
+fn parse_region(s: &str) -> Result<gentle_eye::target::model::NormRect> {
+    let parts: Vec<f64> = s
+        .split(',')
+        .map(|p| p.trim().parse::<f64>())
+        .collect::<std::result::Result<_, _>>()
+        .context("--region must be four numbers: x,y,w,h")?;
+    if parts.len() != 4 {
+        return Err(anyhow!("--region must be exactly four numbers: x,y,w,h"));
+    }
+    Ok(gentle_eye::target::model::NormRect::new(
+        parts[0], parts[1], parts[2], parts[3],
+    ))
 }
 
 async fn run_list(args: &[String]) -> Result<()> {

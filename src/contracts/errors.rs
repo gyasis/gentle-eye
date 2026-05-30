@@ -25,9 +25,44 @@ pub enum GentleEyeError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Config(#[from] ConfigError),
+    /// Dayflow (continuous activity-timeline) error
+    #[error(transparent)]
+    Dayflow(#[from] DayflowError),
+    /// Target (region-of-interest / crop) error
+    #[error(transparent)]
+    Target(#[from] crate::target::errors::TargetError),
     /// MCP-protocol-level error
     #[error("MCP error: {0}")]
     Mcp(String),
+}
+
+/// Dayflow-mode errors (continuous recording → chunk summarization → timeline).
+#[derive(Debug, Error)]
+pub enum DayflowError {
+    /// No dayflow session is currently active.
+    #[error("No active dayflow session")]
+    NoActiveSession,
+    /// A dayflow session is already running.
+    #[error("A dayflow session is already running")]
+    AlreadyRunning,
+    /// Underlying recording/capture failure.
+    #[error("Capture error: {0}")]
+    Capture(#[from] RecordingError),
+    /// Chunk summarization (vision) failure.
+    #[error("Summarization error: {0}")]
+    Summarization(#[from] VisionError),
+    /// Timeline persistence failure.
+    #[error("Timeline storage error: {0}")]
+    Timeline(#[from] StorageError),
+    /// Retention / shrink / evict failure.
+    #[error("Retention error: {0}")]
+    Retention(String),
+    /// Invalid dayflow configuration or request.
+    #[error("Invalid dayflow request: {0}")]
+    Invalid(String),
+    /// Internal/unexpected error.
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 /// Recording-related errors
@@ -203,7 +238,24 @@ impl GentleEyeError {
             GentleEyeError::Vision(e) => e.mcp_error_code(),
             GentleEyeError::Storage(e) => e.mcp_error_code(),
             GentleEyeError::Config(_) => McpErrorCode::InternalError,
+            GentleEyeError::Dayflow(e) => e.mcp_error_code(),
+            GentleEyeError::Target(e) => e.mcp_error_code(),
             GentleEyeError::Mcp(_) => McpErrorCode::InternalError,
+        }
+    }
+}
+
+impl DayflowError {
+    /// Get the appropriate MCP error code for this error.
+    pub fn mcp_error_code(&self) -> McpErrorCode {
+        match self {
+            DayflowError::NoActiveSession => McpErrorCode::InvalidParams,
+            DayflowError::AlreadyRunning => McpErrorCode::InvalidParams,
+            DayflowError::Invalid(_) => McpErrorCode::InvalidParams,
+            DayflowError::Capture(e) => e.mcp_error_code(),
+            DayflowError::Summarization(e) => e.mcp_error_code(),
+            DayflowError::Timeline(e) => e.mcp_error_code(),
+            _ => McpErrorCode::InternalError,
         }
     }
 }

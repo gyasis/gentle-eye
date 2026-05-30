@@ -19,13 +19,17 @@ use crate::contracts::traits::{
 };
 use crate::mcp::tools::{
     AnalyzeVideoInput, AnalyzeVideoOutput, CancelRecordingInput, CancelRecordingOutput,
-    CaptureStreamFrameInput, CaptureStreamFrameOutput,
+    CaptureStreamFrameInput, CaptureStreamFrameOutput, DefineTargetInput, DefineTargetOutput,
+    FocusTargetInput, FocusTargetOutput, MeasureTargetInput, MeasureTargetOutput,
     GetRecordingStatusInput, GetRecordingStatusOutput, GetVisionProviderInfoOutput,
     ListRecordingsInput, ListRecordingsOutput, ReadScreenTextInput, ReadScreenTextOutput,
     RecordingSummary, StartRecordingInput, StartRecordingOutput, StopRecordingInput,
     StopRecordingOutput,
 };
 use crate::storage::StorageManager;
+use crate::target::geometry::norm_to_pixel;
+use crate::target::model::{PixelRect, Target, TargetSource};
+use crate::target::store::TargetStore;
 use chrono::Utc;
 use rmcp::model::{
     CallToolRequestParam, CallToolResult, Content, ErrorData, Implementation, JsonObject,
@@ -110,6 +114,9 @@ impl GentleEyeServer {
             "get_vision_provider_info" => self.tool_provider_info().await,
             "read_screen_text" => self.tool_read_screen_text(parse_args(args)?).await,
             "capture_stream_frame" => self.tool_capture_stream_frame(parse_args(args)?).await,
+            "define_target" => self.tool_define_target(parse_args(args)?).await,
+            "focus_target" => self.tool_focus_target(parse_args(args)?).await,
+            "measure_target" => self.tool_measure_target(parse_args(args)?).await,
             other => {
                 return Err(ErrorData::invalid_params(
                     format!("unknown tool: {other}"),
@@ -305,6 +312,169 @@ impl GentleEyeServer {
             error_message: health.err().map(|e| e.to_string()),
         })
     }
+
+    async fn tool_define_target(&self, input: DefineTargetInput) -> CallToolResult {
+        if !input.region.is_valid() {
+            return err_text(format!(
+                "invalid region {:?}: x,y,w,h must lie within 0–1 with positive area",
+                input.region
+            ));
+        }
+        let make_active = input.set_active.unwrap_or(true);
+        let mut target = Target::new(input.name.clone(), input.source.clone(), input.region);
+        target.active = make_active;
+
+        let mut store = match TargetStore::load() {
+            Ok(s) => s,
+            Err(e) => return err_text(format!("could not load targets: {e}")),
+        };
+        store.add(target.clone());
+        if let Err(e) = store.save() {
+            return err_text(format!("could not save target: {e}"));
+        }
+
+        // Best-effort confirmation image so the agent can SEE the crop and
+        // re-call with an adjusted region. Absent when no source is reachable.
+        let (pixel_rect, confirmation_image, note) = match self.confirm_target(&target) {
+            Ok((rect, path)) => (Some(rect), Some(path), String::new()),
+            Err(e) => (None, None, format!(" (no confirmation image: {e})")),
+        };
+
+        ok_json(DefineTargetOutput {
+            name: input.name,
+            active: make_active,
+            pixel_rect,
+            confirmation_image,
+            message: format!(
+                "Target defined{}.{}",
+                if make_active { " and active" } else { "" },
+                note
+            ),
+        })
+    }
+
+    async fn tool_focus_target(&self, input: FocusTargetInput) -> CallToolResult {
+        let mut store = match TargetStore::load() {
+            Ok(s) => s,
+            Err(e) => return err_text(format!("could not load targets: {e}")),
+        };
+        if let Err(e) = store.set_active(&input.name) {
+            return err_text(e.to_string());
+        }
+        if let Err(e) = store.save() {
+            return err_text(format!("could not save target: {e}"));
+        }
+        let region = store
+            .active()
+            .map(|t| t.region)
+            .unwrap_or_else(|| crate::target::model::NormRect::new(0.0, 0.0, 1.0, 1.0));
+        ok_json(FocusTargetOutput {
+            name: input.name.clone(),
+            active: true,
+            region,
+            message: format!("Now focused on target '{}'", input.name),
+        })
+    }
+
+    async fn tool_measure_target(&self, input: MeasureTargetInput) -> CallToolResult {
+        if !input.region.is_valid() {
+            return err_text(format!("invalid region {:?}", input.region));
+        }
+        let (bgra, w, h) = match self.capture_bgra(&input.source) {
+            Ok(t) => t,
+            Err(e) => return err_text(format!("could not capture frame for measurement: {e}")),
+        };
+        let stride = w * 4;
+        let result = match crate::target::measure::measure(&bgra, w, h, stride, input.region) {
+            Ok(r) => r,
+            Err(e) => return err_text(e.to_string()),
+        };
+        let red_marker = if input.find_red_marker.unwrap_or(false) {
+            crate::target::measure::find_red_marker(&bgra, w, h, stride)
+        } else {
+            None
+        };
+        // Best-effort Redline Overlay so the VLM can supervise the CV.
+        let overlay_image = {
+            let dir = std::env::temp_dir().join("gentle-eye/targets");
+            let out = dir.join("measure_overlay.png");
+            let snapped_px = norm_to_pixel(result.snapped_rect, (w as u32, h as u32), (0, 0));
+            match crate::target::measure::bgra_to_gray(&bgra, w, h, stride) {
+                Ok(gray)
+                    if crate::target::measure::write_redline_overlay(&gray, snapped_px, &out)
+                        .is_ok() =>
+                {
+                    Some(out.to_string_lossy().into_owned())
+                }
+                _ => None,
+            }
+        };
+        ok_json(MeasureTargetOutput {
+            result: Some(result),
+            red_marker,
+            overlay_image,
+            message: "Measurement complete — inspect the overlay and snapped_rect.".to_string(),
+        })
+    }
+
+    /// Capture one frame as a tightly-packed BGRA buffer for measurement.
+    /// Best-effort — errors when no display/stream is reachable.
+    fn capture_bgra(&self, source: &TargetSource) -> Result<(Vec<u8>, usize, usize), GentleEyeError> {
+        match source {
+            TargetSource::Display { index } => {
+                let mut cap = crate::capture::screen::ScreenCapturer::new(*index)?;
+                let (fw, fh) = (cap.width(), cap.height());
+                let buf = cap.capture_frame(std::time::Duration::from_secs(2))?;
+                let stride = buf.len().checked_div(fh).unwrap_or(fw * 4);
+                if stride == fw * 4 {
+                    Ok((buf, fw, fh))
+                } else {
+                    // Repack padded rows into a tight BGRA buffer.
+                    let rect = PixelRect { x: 0, y: 0, w: fw as u32, h: fh as u32 };
+                    let (tight, tw, th) = crate::target::crop::crop_bgra(&buf, fw, fh, stride, rect)?;
+                    Ok((tight, tw as usize, th as usize))
+                }
+            }
+            TargetSource::Stream { url } => {
+                let dir = std::env::temp_dir().join("gentle-eye/targets");
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| GentleEyeError::Mcp(format!("temp dir: {e}")))?;
+                let frame = crate::capture::stream::capture_stream_frame(url, &dir)?;
+                let (bgra, w, h) = crate::target::measure::load_image_as_bgra(&frame.file_path)?;
+                Ok((bgra, w, h))
+            }
+        }
+    }
+
+    /// Capture one frame for `target`, crop it, and write a confirmation PNG.
+    /// Returns the resolved pixel rect + the PNG path. Best-effort — errors when
+    /// no display/stream is reachable (e.g. headless / CI).
+    fn confirm_target(&self, target: &Target) -> Result<(PixelRect, String), GentleEyeError> {
+        let dir = std::env::temp_dir().join("gentle-eye/targets");
+        std::fs::create_dir_all(&dir).map_err(|e| GentleEyeError::Mcp(format!("temp dir: {e}")))?;
+        match &target.source {
+            TargetSource::Display { index } => {
+                let mut cap = crate::capture::screen::ScreenCapturer::new(*index)?;
+                let (fw, fh) = (cap.width(), cap.height());
+                let buf = cap.capture_frame(std::time::Duration::from_secs(2))?;
+                let stride = buf.len().checked_div(fh).unwrap_or(fw * 4);
+                let rect = norm_to_pixel(target.region, (fw as u32, fh as u32), (0, 0));
+                let (cropped, cw, ch) = crate::target::crop::crop_bgra(&buf, fw, fh, stride, rect)?;
+                let out = dir.join(format!("{}.png", sanitize(&target.name)));
+                crate::capture::stream::write_bgra_png(&cropped, cw, ch, &out)?;
+                Ok((rect, out.to_string_lossy().into_owned()))
+            }
+            TargetSource::Stream { url } => {
+                // Probe a full frame for resolution → compute pixel rect →
+                // capture the cropped frame.
+                let full = crate::capture::stream::capture_stream_frame(url, &dir)?;
+                let rect = norm_to_pixel(target.region, (full.width, full.height), (0, 0));
+                let frame =
+                    crate::capture::stream::capture_stream_frame_cropped(url, &dir, Some(rect))?;
+                Ok((rect, frame.file_path.to_string_lossy().into_owned()))
+            }
+        }
+    }
 }
 
 impl ServerHandler for GentleEyeServer {
@@ -415,7 +585,29 @@ fn tool_catalog() -> Vec<Tool> {
             "Grab a single frame from a live stream URL (RTSP/HTTP/SRT, e.g. an ATEM output) as a PNG.",
             schema_for::<CaptureStreamFrameInput>(),
         ),
+        Tool::new(
+            "define_target",
+            "Define a region-of-interest ('target') to crop a display or stream to, using NORMALIZED 0-1 coordinates. Returns a confirmation image of the crop so you can self-correct the region.",
+            schema_for::<DefineTargetInput>(),
+        ),
+        Tool::new(
+            "focus_target",
+            "Switch the active target by name (one target is active at a time). All subsequent capture/analysis crops to it.",
+            schema_for::<FocusTargetInput>(),
+        ),
+        Tool::new(
+            "measure_target",
+            "Zoom-then-Snap measurement: snap a rough normalized region to real edges, detect a tiled-pane grid, optionally find a red marker. Returns a snapped_rect + a Redline overlay to supervise the CV.",
+            schema_for::<MeasureTargetInput>(),
+        ),
     ]
+}
+
+/// Filesystem-safe slug for a target name (used in the confirmation PNG path).
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 fn schema_for<T: schemars::JsonSchema>() -> Arc<JsonObject> {
@@ -478,13 +670,21 @@ mod tests {
     #[test]
     fn catalog_exposes_all_tools() {
         let tools = tool_catalog();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 12);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(names.contains(&"start_recording"));
         assert!(names.contains(&"analyze_video"));
         assert!(names.contains(&"get_vision_provider_info"));
         assert!(names.contains(&"read_screen_text"));
         assert!(names.contains(&"capture_stream_frame"));
+        assert!(names.contains(&"define_target"));
+        assert!(names.contains(&"focus_target"));
+        assert!(names.contains(&"measure_target"));
+    }
+
+    #[test]
+    fn target_name_sanitized() {
+        assert_eq!(sanitize("left-pane 2!"), "left_pane_2_");
     }
 
     #[test]

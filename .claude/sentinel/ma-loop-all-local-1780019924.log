@@ -1,0 +1,43 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+[01:58:45] [32mINFO[0m 🤖 Micro Agent starting (Ralph Loop engine) {"target":".","framework":"cargo","maxIterations":"5","maxBudget":"2.00","maxDuration":"15","adversarial":false,"resetFrequency":"1","simple":"5","escalate":true,"generate":true,"objective":"Sentinel validation for T006, T007, T008: verify implementations pass tests","test":"./.tooling/bin/cargo check --message-format=short","config":"/home/gyasis/Documents/code/gentle-eye/ralph.config.yaml"}
+(node:464268) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[01:58:45] [32mINFO[0m Configuration loaded
+[01:58:45] [32mINFO[0m Run parameters prepared {"objective":"Sentinel validation for T006, T007, T008: verify implementations pass tests","workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short","testFramework":"cargo","maxIterations":5,"maxBudget":2,"maxDuration":15,"simpleIterations":5,"noEscalate":false,"fullMode":false}
+[01:58:45] [32mINFO[0m Infrastructure initialized
+[01:58:45] [32mINFO[0m Agents initialized {"librarian":"gemma3:27b","artisan":"qwen3-coder:30b","critic":"deepseek-r1:32b"}
+⚠️  Unknown model "gemma3:27b" - using conservative 8k token limit
+⚠️  Unknown model "qwen3-coder:30b" - using conservative 8k token limit
+⚠️  Unknown model "deepseek-r1:32b" - using conservative 8k token limit
+[01:58:45] [32mINFO[0m Starting iteration loop {"sessionId":"55e1593e-e85a-42ff-91d4-6e5e3823af86","maxIterations":5}
+[01:58:45] [32mINFO[0m 
+============================================================
+[01:58:45] [32mINFO[0m Simple Mode: up to 5 iteration(s)
+[01:58:45] [32mINFO[0m ============================================================
+[01:58:45] [32mINFO[0m 
+[Simple 1/5]
+[01:58:45] [32mINFO[0m Simple Mode: Artisan generating code...
+[01:58:45] [32mINFO[0m [artisan] artisan agent initialized {"session":"55e1593e-e85a-42ff-91d4-6e5e3823af86","iteration":{"iteration":1,"maxIterations":5,"objective":"Sentinel validation for T006, T007, T008: verify implementations pass tests","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[01:58:45] [32mINFO[0m [artisan] artisan agent executing
+[01:58:56] [32mINFO[0m [artisan] Code written {"file":"src/sentinel-validation-for-t006-t007-t008-verify-impl.rs","size":2466}
+Unknown model "qwen3-coder:30b", using default pricing
+[01:58:56] [32mINFO[0m [artisan] artisan agent completed {"duration":11138,"tokensUsed":1087,"cost":0.001087}
+[01:58:56] [32mINFO[0m   Artisan: Code generated based on objective
+[01:58:56] [32mINFO[0m   Change:  [object Object]
+[01:58:56] [32mINFO[0m Simple Mode: Running tests...
+[01:58:56] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short"}
+[01:58:56] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo check --message-format=short","detectedFramework":"cargo"}
+[01:58:56] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo check --message-format=short"}
+[01:58:56] [32mINFO[0m Tests completed {"status":"passed","total":0,"passed":0,"failed":0,"duration":233}
+[01:58:56] [32mINFO[0m   Tests: ✓ ALL PASSED (0 tests)
+[01:58:56] [32mINFO[0m   Cost:  $0.0011 this iteration
+[01:58:56] [32mINFO[0m Simple Mode: Solved in 1/5 iterations
+[01:58:56] [32mINFO[0m 
+============================================================
+[01:58:56] [32mINFO[0m Simple Mode: Solved in 1/5 iterations
+[01:58:56] [32mINFO[0m ============================================================
+[01:58:56] [32mINFO[0m Status:     SUCCESS
+[01:58:56] [32mINFO[0m Mode:       Simple only
+[01:58:56] [32mINFO[0m Iterations: 1 simple / 0 full / 1 total
+[01:58:56] [32mINFO[0m Cost:       $0.001 simple / $0.000 full / $0.001 total
+[01:58:56] [32mINFO[0m Duration:   11.4s

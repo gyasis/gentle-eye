@@ -1,0 +1,192 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+[16:22:37] [32mINFO[0m 🤖 Micro Agent starting (Ralph Loop engine) {"target":"src/dayflow/mod.rs","framework":"cargo","maxIterations":"3","maxBudget":"2.00","maxDuration":"15","adversarial":false,"resetFrequency":"1","simple":"5","escalate":true,"generate":true,"objective":"Fix `src/dayflow/mod.rs`: it has compile errors that block `src/dayflow/models.rs`. Make `src/dayflow/mod.rs` compile and satisfy how `src/dayflow/models.rs` uses it. Errors: unresolved imports `models::ChunkRef`, `models::DayflowMode`","test":"./.tooling/bin/cargo check --message-format=short","config":"/home/gyasis/Documents/code/gentle-eye/ralph.config.yaml"}
+(node:4092658) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[16:22:37] [32mINFO[0m Configuration loaded
+[16:22:37] [32mINFO[0m Run parameters prepared {"objective":"Fix `src/dayflow/mod.rs`: it has compile errors that block `src/dayflow/models.rs`. Make `src/dayflow/mod.rs` compile and satisfy how `src/dayflow/models.rs` uses it. Errors: unresolved imports `models::ChunkRef`, `models::DayflowMode`","targetFile":"src/dayflow/mod.rs","workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short","testFramework":"cargo","maxIterations":3,"maxBudget":2,"maxDuration":15,"simpleIterations":5,"noEscalate":false,"fullMode":false}
+[16:22:37] [32mINFO[0m [goal-as-test] "./.tooling/bin/cargo check --message-format=short" is compile-only — generating a behavioral test for src/dayflow/mod.rs
+[16:22:47] [32mINFO[0m [goal-as-test] Generated tests/sentinel_mod.rs; test command → ./.tooling/bin/cargo test --test sentinel_mod
+[16:22:51] [33mWARN[0m [goal-as-test] Generated test does NOT compile — escalating to a stronger QA-author model...
+[16:24:45] [33mWARN[0m [goal-as-test] No compiling test could be generated — DISCARDING it and falling back to "./.tooling/bin/cargo check --message-format=short" (refusing to drive a source fix with a broken test).
+[16:24:45] [32mINFO[0m Infrastructure initialized
+[16:24:45] [32mINFO[0m Agents initialized {"librarian":"gemma3:27b","artisan":"qwen3-coder:30b","critic":"deepseek-r1:32b"}
+⚠️  Unknown model "gemma3:27b" - using conservative 8k token limit
+⚠️  Unknown model "qwen3-coder:30b" - using conservative 8k token limit
+⚠️  Unknown model "deepseek-r1:32b" - using conservative 8k token limit
+[16:24:45] [32mINFO[0m Starting iteration loop {"sessionId":"f996d497-8e27-4ca0-ade4-2b5595e3b9cb","maxIterations":3}
+[16:24:45] [32mINFO[0m 
+============================================================
+[16:24:45] [32mINFO[0m Simple Mode: up to 5 iteration(s)
+[16:24:45] [32mINFO[0m ============================================================
+[16:24:45] [32mINFO[0m 
+[Simple 1/5]
+[16:24:45] [32mINFO[0m Simple Mode: Artisan generating code...
+[16:24:45] [32mINFO[0m [artisan] artisan agent initialized {"session":"f996d497-8e27-4ca0-ade4-2b5595e3b9cb","iteration":{"iteration":1,"maxIterations":3,"objective":"Fix `src/dayflow/mod.rs`: it has compile errors that block `src/dayflow/models.rs`. Make `src/dayflow/mod.rs` compile and satisfy how `src/dayflow/models.rs` uses it. Errors: unresolved imports `models::ChunkRef`, `models::DayflowMode`","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[16:24:45] [32mINFO[0m [artisan] artisan agent executing
+[16:24:57] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/mod.rs","size":71}
+Unknown model "qwen3-coder:30b", using default pricing
+[16:24:57] [32mINFO[0m [artisan] artisan agent completed {"duration":11365,"tokensUsed":655,"cost":0.0006550000000000001}
+[16:24:57] [32mINFO[0m   Artisan: Code generated based on objective
+[16:24:57] [32mINFO[0m   Change:  [object Object]
+[16:24:57] [32mINFO[0m Simple Mode: Running tests...
+[16:24:57] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short"}
+[16:24:57] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo check --message-format=short","detectedFramework":"cargo"}
+[16:24:57] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo check --message-format=short"}
+[16:25:01] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:3:9: error[E0432]: unresolved import `models::ChunkRef`: no `ChunkRef` in `dayflow::models`\nsrc/dayflow/mod.rs:4:9: error[E0432]: unresolved import `models::DayflowMode`: no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 4 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:3:9: error[E0432]: unresolved import `models::ChunkRef`: no `ChunkRef` in `dayflow::models`\nsrc/dayflow/mod.rs:4:9: error[E0432]: unresolved import `models::DayflowMode`: no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 4 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[16:25:01] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[16:25:01] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[16:25:01] [32mINFO[0m       │ Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[16:25:01] [32mINFO[0m       │ src/dayflow/mod.rs:3:9: error[E0432]: unresolved import `models::ChunkRef`: no `ChunkRef` in `dayflow::models`
+[16:25:01] [32mINFO[0m       │ src/dayflow/mod.rs:4:9: error[E0432]: unresolved import `models::DayflowMode`: no `DayflowMode` in `dayflow::models`
+[16:25:01] [32mINFO[0m       │ src/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:01] [32mINFO[0m       │ src/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:01] [32mINFO[0m       │ error: could not compile `gentle-eye` (lib) due to 4 previous errors
+[16:25:01] [32mINFO[0m   Cost:  $0.0007 this iteration
+[16:25:01] [32mINFO[0m [librarian] librarian agent cleaning up
+[16:25:01] [32mINFO[0m [artisan] artisan agent cleaning up
+[16:25:01] [32mINFO[0m [critic] critic agent cleaning up
+[16:25:01] [32mINFO[0m Context reset complete
+[16:25:01] [32mINFO[0m 
+[Simple 2/5]
+[16:25:01] [32mINFO[0m Simple Mode: Artisan generating code...
+[16:25:01] [32mINFO[0m [artisan] artisan agent initialized {"session":"f996d497-8e27-4ca0-ade4-2b5595e3b9cb","iteration":{"iteration":2,"maxIterations":3,"objective":"Fix `src/dayflow/mod.rs`: it has compile errors that block `src/dayflow/models.rs`. Make `src/dayflow/mod.rs` compile and satisfy how `src/dayflow/models.rs` uses it. Errors: unresolved imports `models::ChunkRef`, `models::DayflowMode`","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[16:25:01] [32mINFO[0m [artisan] artisan agent executing
+[16:25:04] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/mod.rs","size":164}
+Unknown model "qwen3-coder:30b", using default pricing
+[16:25:04] [32mINFO[0m [artisan] artisan agent completed {"duration":2673,"tokensUsed":840,"cost":0.00084}
+[16:25:04] [32mINFO[0m   Artisan: Code generated based on objective
+[16:25:04] [32mINFO[0m   Change:  [object Object]
+[16:25:04] [32mINFO[0m Simple Mode: Running tests...
+[16:25:04] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short"}
+[16:25:04] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo check --message-format=short","detectedFramework":"cargo"}
+[16:25:04] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo check --message-format=short"}
+[16:25:07] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:6:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:6:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[16:25:07] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[16:25:07] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[16:25:07] [32mINFO[0m       │ Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[16:25:07] [32mINFO[0m       │ src/dayflow/mod.rs:6:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`
+[16:25:07] [32mINFO[0m       │ src/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:07] [32mINFO[0m       │ src/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:07] [32mINFO[0m       │ error: could not compile `gentle-eye` (lib) due to 3 previous errors
+[16:25:07] [32mINFO[0m   Cost:  $0.0008 this iteration
+[16:25:07] [32mINFO[0m [librarian] librarian agent cleaning up
+[16:25:07] [32mINFO[0m [artisan] artisan agent cleaning up
+[16:25:07] [32mINFO[0m [critic] critic agent cleaning up
+[16:25:07] [32mINFO[0m Context reset complete
+[16:25:07] [32mINFO[0m 
+[Simple 3/5]
+[16:25:07] [32mINFO[0m Simple Mode: Artisan generating code...
+[16:25:07] [32mINFO[0m [artisan] artisan agent initialized {"session":"f996d497-8e27-4ca0-ade4-2b5595e3b9cb","iteration":{"iteration":3,"maxIterations":3,"objective":"Fix `src/dayflow/mod.rs`: it has compile errors that block `src/dayflow/models.rs`. Make `src/dayflow/mod.rs` compile and satisfy how `src/dayflow/models.rs` uses it. Errors: unresolved imports `models::ChunkRef`, `models::DayflowMode`","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[16:25:07] [32mINFO[0m [artisan] artisan agent executing
+[16:25:10] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/mod.rs","size":202}
+Unknown model "qwen3-coder:30b", using default pricing
+[16:25:10] [32mINFO[0m [artisan] artisan agent completed {"duration":2813,"tokensUsed":853,"cost":0.000853}
+[16:25:10] [32mINFO[0m   Artisan: Code generated based on objective
+[16:25:10] [32mINFO[0m   Change:  [object Object]
+[16:25:10] [32mINFO[0m Simple Mode: Running tests...
+[16:25:10] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short"}
+[16:25:10] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo check --message-format=short","detectedFramework":"cargo"}
+[16:25:10] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo check --message-format=short"}
+[16:25:14] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:6:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:6:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[16:25:14] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[16:25:14] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[16:25:14] [32mINFO[0m       │ Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[16:25:14] [32mINFO[0m       │ src/dayflow/mod.rs:6:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`
+[16:25:14] [32mINFO[0m       │ src/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:14] [32mINFO[0m       │ src/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:14] [32mINFO[0m       │ error: could not compile `gentle-eye` (lib) due to 3 previous errors
+[16:25:14] [32mINFO[0m   Cost:  $0.0009 this iteration
+[16:25:14] [32mINFO[0m [librarian] librarian agent cleaning up
+[16:25:14] [32mINFO[0m [artisan] artisan agent cleaning up
+[16:25:14] [32mINFO[0m [critic] critic agent cleaning up
+[16:25:14] [32mINFO[0m Context reset complete
+[16:25:14] [32mINFO[0m 
+[Simple 4/5]
+[16:25:14] [32mINFO[0m Simple Mode: Artisan generating code...
+[16:25:14] [32mINFO[0m [artisan] artisan agent initialized {"session":"f996d497-8e27-4ca0-ade4-2b5595e3b9cb","iteration":{"iteration":4,"maxIterations":3,"objective":"Fix `src/dayflow/mod.rs`: it has compile errors that block `src/dayflow/models.rs`. Make `src/dayflow/mod.rs` compile and satisfy how `src/dayflow/models.rs` uses it. Errors: unresolved imports `models::ChunkRef`, `models::DayflowMode`","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[16:25:14] [32mINFO[0m [artisan] artisan agent executing
+[16:25:16] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/mod.rs","size":57}
+Unknown model "qwen3-coder:30b", using default pricing
+[16:25:16] [32mINFO[0m [artisan] artisan agent completed {"duration":2563,"tokensUsed":845,"cost":0.0008449999999999999}
+[16:25:16] [32mINFO[0m   Artisan: Code generated based on objective
+[16:25:16] [32mINFO[0m   Change:  [object Object]
+[16:25:16] [32mINFO[0m Simple Mode: Running tests...
+[16:25:16] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short"}
+[16:25:16] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo check --message-format=short","detectedFramework":"cargo"}
+[16:25:16] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo check --message-format=short"}
+[16:25:20] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:3:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:3:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[16:25:20] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[16:25:20] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[16:25:20] [32mINFO[0m       │ Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[16:25:20] [32mINFO[0m       │ src/dayflow/mod.rs:3:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`
+[16:25:20] [32mINFO[0m       │ src/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:20] [32mINFO[0m       │ src/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:20] [32mINFO[0m       │ error: could not compile `gentle-eye` (lib) due to 3 previous errors
+[16:25:20] [32mINFO[0m   Cost:  $0.0008 this iteration
+[16:25:20] [32mINFO[0m [librarian] librarian agent cleaning up
+[16:25:20] [32mINFO[0m [artisan] artisan agent cleaning up
+[16:25:20] [32mINFO[0m [critic] critic agent cleaning up
+[16:25:20] [32mINFO[0m Context reset complete
+[16:25:20] [32mINFO[0m 
+[Simple 5/5]
+[16:25:20] [32mINFO[0m Simple Mode: Artisan generating code...
+[16:25:20] [32mINFO[0m [artisan] artisan agent initialized {"session":"f996d497-8e27-4ca0-ade4-2b5595e3b9cb","iteration":{"iteration":5,"maxIterations":3,"objective":"Fix `src/dayflow/mod.rs`: it has compile errors that block `src/dayflow/models.rs`. Make `src/dayflow/mod.rs` compile and satisfy how `src/dayflow/models.rs` uses it. Errors: unresolved imports `models::ChunkRef`, `models::DayflowMode`","currentPhase":"generation","previousAttempts":0,"entropy":{}}}
+[16:25:20] [32mINFO[0m [artisan] artisan agent executing
+[16:25:22] [32mINFO[0m [artisan] Code written {"file":"src/dayflow/mod.rs","size":57}
+Unknown model "qwen3-coder:30b", using default pricing
+[16:25:22] [32mINFO[0m [artisan] artisan agent completed {"duration":2576,"tokensUsed":835,"cost":0.000835}
+[16:25:22] [32mINFO[0m   Artisan: Code generated based on objective
+[16:25:22] [32mINFO[0m   Change:  [object Object]
+[16:25:22] [32mINFO[0m Simple Mode: Running tests...
+[16:25:22] [32mINFO[0m Starting test execution {"workingDirectory":"/home/gyasis/Documents/code/gentle-eye","testCommand":"./.tooling/bin/cargo check --message-format=short"}
+[16:25:22] [32mINFO[0m Using provided test command {"command":"./.tooling/bin/cargo check --message-format=short","detectedFramework":"cargo"}
+[16:25:22] [32mINFO[0m Executing test command {"command":"./.tooling/bin/cargo check --message-format=short"}
+[16:25:25] [31mERROR[0m Test execution failed {"name":"Error","message":"Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:3:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n","stack":"Error: Command failed: ./.tooling/bin/cargo check --message-format=short\n    Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)\nsrc/dayflow/mod.rs:3:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`\nsrc/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nsrc/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`\nerror: could not compile `gentle-eye` (lib) due to 3 previous errors\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)"}
+[16:25:25] [32mINFO[0m   Tests: ✗ 1 failed / 0 total
+[16:25:25] [32mINFO[0m     ✗ Compile / command failure (non-zero exit)
+[16:25:25] [32mINFO[0m       │ Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+[16:25:25] [32mINFO[0m       │ src/dayflow/mod.rs:3:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`
+[16:25:25] [32mINFO[0m       │ src/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:25] [32mINFO[0m       │ src/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+[16:25:25] [32mINFO[0m       │ error: could not compile `gentle-eye` (lib) due to 3 previous errors
+[16:25:25] [32mINFO[0m   Cost:  $0.0008 this iteration
+[16:25:25] [32mINFO[0m [librarian] librarian agent cleaning up
+[16:25:25] [32mINFO[0m [artisan] artisan agent cleaning up
+[16:25:25] [32mINFO[0m [critic] critic agent cleaning up
+[16:25:25] [32mINFO[0m Context reset complete
+[16:25:25] [32mINFO[0m 
+============================================================
+[16:25:25] [32mINFO[0m Escalating to Full Mode after 5 simple iteration(s)
+[16:25:25] [32mINFO[0m    Summary: SIMPLE MODE HISTORY (5 iterations, all failed):
+
+Iteration 1: Code generated based on objective. Tests: Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+src/dayflow/mod.rs:3:9: erro...
+[16:25:25] [32mINFO[0m    Remaining budget: $1.996
+[16:25:25] [32mINFO[0m ============================================================
+[16:25:25] [32mINFO[0m 
+============================================================
+[16:25:25] [32mINFO[0m Micro Agent Complete
+[16:25:25] [32mINFO[0m ============================================================
+[16:25:25] [32mINFO[0m Status:     FAILED
+[16:25:25] [32mINFO[0m Mode:       Full only
+[16:25:25] [32mINFO[0m Iterations: 5 simple / 0 full / 5 total
+[16:25:25] [32mINFO[0m Cost:       $0.004 simple / $0.000 full / $0.004 total
+[16:25:25] [32mINFO[0m Duration:   167.3s
+[16:25:25] [32mINFO[0m 
+Simple mode errors:
+[16:25:25] [32mINFO[0m   - "Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+src/dayflow/mod.rs:3:9: error[E0432]: unresolved import `models::ChunkRef`: no `ChunkRef` in `dayflow::models`
+src/dayflow/mod.rs:4:9: error[E0432]: unresolved import `models::DayflowMode`: no `DayflowMode` in `dayflow::models`
+src/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+src/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+error: could not compile `gentle-eye` (lib) due to 4 previous errors"
+[16:25:25] [32mINFO[0m   - "Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+src/dayflow/mod.rs:6:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`
+src/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+src/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+error: could not compile `gentle-eye` (lib) due to 3 previous errors"
+[16:25:25] [32mINFO[0m   - "Checking gentle-eye v0.1.0 (/home/gyasis/Documents/code/gentle-eye)
+src/dayflow/mod.rs:3:18: error[E0432]: unresolved imports `models::ChunkRef`, `models::DayflowMode`: no `ChunkRef` in `dayflow::models`, no `DayflowMode` in `dayflow::models`
+src/dayflow/models.rs:20:23: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+src/dayflow/models.rs:48:21: error[E0277]: the trait bound `Uuid: JsonSchema` is not satisfied: the trait `JsonSchema` is not implemented for `Uuid`
+error: could not compile `gentle-eye` (lib) due to 3 previous errors"

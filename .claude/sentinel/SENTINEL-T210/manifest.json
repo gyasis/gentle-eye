@@ -1,0 +1,55 @@
+{
+  "task_id": "T210",
+  "sentinel_id": "SENTINEL-T210",
+  "result": "PASS",
+  "timestamp": "2026-05-29T06:25:30.513592+00:00",
+  "tier_used": 0,
+  "tiers": {
+    "tier1": {
+      "attempted": true,
+      "skipped": false,
+      "model": "ollama/qwen3-coder:30b",
+      "ollama_url": null,
+      "iterations": 1,
+      "cost_usd": 0.0012,
+      "duration_sec": 22.2,
+      "final_status": "PASS",
+      "error_messages": []
+    },
+    "tier2": {
+      "attempted": false,
+      "skipped": false,
+      "model": null,
+      "ollama_url": null,
+      "iterations": 0,
+      "cost_usd": 0.0,
+      "duration_sec": 0.0,
+      "final_status": null,
+      "error_messages": []
+    }
+  },
+  "placeholder_violations": [],
+  "files_changed": [
+    {
+      "path": "capture/frame_rate.rs",
+      "lines_added": 0,
+      "lines_removed": 0
+    },
+    {
+      "path": "docs/FPS_AND_DAYFLOW.md",
+      "lines_added": 0,
+      "lines_removed": 0
+    }
+  ],
+  "interface_changes": {
+    "breaking": [],
+    "non_breaking": [],
+    "is_breaking": false
+  },
+  "tests_fixed": [],
+  "tests_still_failing": [],
+  "fix_reason": "",
+  "cascade_triggered": true,
+  "cascade_tasks_annotated": [],
+  "radius": {}
+}
