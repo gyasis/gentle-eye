@@ -7,9 +7,12 @@ analysis**. Two front-ends share one library:
 - **CLI** (`gentle-eye <subcommand>`) — prints JSON to stdout for shelling out.
 
 > **Platform status (2026-05-30):** developed and validated on **Linux (X11)**.
-> The code is cross-platform (capture via `scrap`; memory monitor via `sysinfo`;
-> vision over HTTP), so it **should** run on **macOS**, but the macOS path is
-> **not yet verified** — see the macOS notes + caveats below.
+> **macOS (Apple Silicon, Sequoia): build + full unit-test suite verified** on a
+> Mac Studio — the whole crate compiles, all 182 unit tests pass (incl. the
+> `sysinfo` memory monitor), the arm64 binary builds, and the `target` CLI works.
+> **Not yet verified at runtime on macOS:** live screen capture (needs a GUI
+> session + Screen Recording permission) and the ffmpeg paths (needs `ffmpeg`
+> installed). See the macOS notes + caveats below.
 
 ---
 
@@ -47,7 +50,7 @@ gentle-eye displays                       # list displays
 gentle-eye read-text --image /path/to.png # OCR a PNG → JSON
 ```
 
-## 2. macOS (Apple Silicon / Intel) — should work, **unverified**
+## 2. macOS (Apple Silicon / Intel) — build + unit tests **verified**; runtime pending
 
 ```bash
 # deps
