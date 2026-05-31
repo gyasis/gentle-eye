@@ -41,6 +41,7 @@ USAGE:
   gentle-eye preview [FILE] [--loop once|forever] [--seconds N]   Preview a capture (default: most recent); ffplay/OS-open
   gentle-eye preview --gallery [--port N]             Serve a media gallery (browser; Range video) until idle
   gentle-eye preview --live                           Live preview of the active target via ffplay (default off)
+  gentle-eye screenshot --out FILE.png [--display IDX] [--region x,y,w,h | --target NAME]   One-shot screen grab → PNG (optional crop)
   gentle-eye provider-info [--provider gemini|ollama]
   gentle-eye help
 
@@ -70,6 +71,7 @@ async fn main() -> ExitCode {
         "label" => run_label(rest).await,
         "target" => run_target(rest).await,
         "preview" => run_preview(rest).await,
+        "screenshot" => run_screenshot(rest).await,
         "help" | "-h" | "--help" => {
             println!("{HELP}");
             Ok(())
@@ -424,6 +426,64 @@ async fn run_target(args: &[String]) -> Result<()> {
         }
         other => return Err(anyhow!("unknown target subcommand '{other}' (add|use|list)")),
     }
+    Ok(())
+}
+
+/// One-shot screen grab → PNG (the direct ScreenCapturer→crop→write_bgra_png path,
+/// reusing the `target` chain — no video/ffmpeg round-trip). Optional crop via a
+/// `--region x,y,w,h` (normalized 0-1) or a named `--target`. Works on Linux (X11)
+/// and on macOS with Screen Recording permission; fails over headless SSH (TCC).
+async fn run_screenshot(args: &[String]) -> Result<()> {
+    use gentle_eye::capture::screen::ScreenCapturer;
+    use gentle_eye::capture::stream::write_bgra_png;
+    use gentle_eye::target::crop::crop_bgra;
+    use gentle_eye::target::geometry::norm_to_pixel;
+    use gentle_eye::target::model::PixelRect;
+    use gentle_eye::target::store::TargetStore;
+
+    let out = flag(args, "--out").ok_or_else(|| anyhow!("--out FILE.png is required"))?;
+    let display: usize = match flag(args, "--display") {
+        Some(s) => s.parse().context("--display must be an integer index")?,
+        None => 0,
+    };
+
+    let mut cap =
+        ScreenCapturer::new(display).map_err(|e| anyhow!("screen capture unavailable: {e}"))?;
+    let (fw, fh) = (cap.width(), cap.height());
+    let buf = cap
+        .capture_frame(Duration::from_secs(2))
+        .map_err(|e| anyhow!("capture failed: {e}"))?;
+    let stride = buf.len().checked_div(fh).unwrap_or(fw * 4);
+
+    // Crop rect: --region (normalized) > --target NAME > full frame.
+    let rect = if let Some(r) = flag(args, "--region") {
+        let region = parse_region(r)?;
+        if !region.is_valid() {
+            return Err(anyhow!("--region must lie within 0-1 with positive area"));
+        }
+        norm_to_pixel(region, (fw as u32, fh as u32), (0, 0))
+    } else if let Some(name) = flag(args, "--target") {
+        let store = TargetStore::load().map_err(|e| anyhow!("{e}"))?;
+        let t = store
+            .list()
+            .iter()
+            .find(|t| t.name == name)
+            .cloned()
+            .ok_or_else(|| anyhow!("no target named '{name}'"))?;
+        norm_to_pixel(t.region, (fw as u32, fh as u32), (0, 0))
+    } else {
+        PixelRect { x: 0, y: 0, w: fw as u32, h: fh as u32 }
+    };
+
+    let (bytes, w, h) =
+        crop_bgra(&buf, fw, fh, stride, rect).map_err(|e| anyhow!("crop: {e}"))?;
+    write_bgra_png(&bytes, w, h, Path::new(out)).map_err(|e| anyhow!("png write: {e}"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "screenshot": out, "width": w, "height": h, "display": display
+        }))?
+    );
     Ok(())
 }
 
