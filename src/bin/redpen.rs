@@ -16,6 +16,22 @@ use gentle_eye::target::store::TargetStore;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn main() -> eframe::Result {
+    // `redpen --list` / `--displays`: print the monitor catalogue and exit (no GUI).
+    // Use it to find which index is your real screen on a multi-monitor setup.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.iter().any(|a| a == "--list" || a == "--displays") {
+        match gentle_eye::capture::display::DisplayManager::list_available() {
+            Ok(ds) => {
+                println!("redpen — pick a display index with `--display IDX`:");
+                for d in &ds {
+                    println!("  {}", d.auto_name);
+                }
+            }
+            Err(e) => eprintln!("redpen: list displays: {e}"),
+        }
+        return Ok(());
+    }
+
     let (rgba, w, h) = match load_image() {
         Ok(v) => v,
         Err(e) => {
@@ -44,7 +60,6 @@ struct RedpenApp {
     boxes: Vec<NamedBox>,
     drag_start: Option<Pos2>, // image-pixel space
     status: String,
-    quit: bool,
 }
 
 impl RedpenApp {
@@ -57,7 +72,6 @@ impl RedpenApp {
             boxes: Vec::new(),
             drag_start: None,
             status: format!("{iw}×{ih} — drag to draw a box, name it, then Save (Enter). Esc cancels."),
-            quit: false,
         }
     }
 
@@ -149,42 +163,40 @@ impl RedpenApp {
             .unwrap_or_default(),
         );
 
-        self.status = format!("saved {} target(s) → {}", self.boxes.len(), png_path.display());
-        self.quit = true;
+        // Files are flushed; exit the process to close the window reliably.
+        // (ViewportCommand::Close was not honored on the root viewport here.)
+        eprintln!("saved {} target(s) → {}", self.boxes.len(), png_path.display());
+        std::process::exit(0);
     }
 }
 
 impl eframe::App for RedpenApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.quit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
         // Texture (once).
         if self.texture.is_none() {
             let ci = egui::ColorImage::from_rgba_unmultiplied([self.iw, self.ih], &self.rgba);
             self.texture = Some(ctx.load_texture("shot", ci, egui::TextureOptions::default()));
         }
 
-        // Keyboard: Enter = save+quit, Esc = cancel.
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::Escape) {
-                self.quit = true;
-            }
-        });
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            self.save();
+        // Esc = cancel: quit immediately, nothing saved.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            std::process::exit(0);
         }
+        // Enter = save+quit. Captured here (canvas focused) AND per name-field
+        // below — a focused text edit consumes Enter, so we check both so it
+        // works regardless of where focus is.
+        let mut save_now = ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
         egui::TopBottomPanel::bottom("bar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Save & Quit (Enter)").clicked() {
-                    self.save();
+                    save_now = true;
                 }
                 if ui.button("Undo last box").clicked() {
                     self.boxes.pop();
                 }
                 if ui.button("Cancel (Esc)").clicked() {
-                    self.quit = true;
+                    std::process::exit(0);
                 }
                 ui.separator();
                 ui.label(&self.status);
@@ -192,7 +204,10 @@ impl eframe::App for RedpenApp {
             for b in &mut self.boxes {
                 ui.horizontal(|ui| {
                     ui.label("target:");
-                    ui.text_edit_singleline(&mut b.name);
+                    let r = ui.text_edit_singleline(&mut b.name);
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        save_now = true;
+                    }
                 });
             }
         });
@@ -248,10 +263,20 @@ impl eframe::App for RedpenApp {
                 painter.rect_stroke(sr, egui::Rounding::ZERO, red);
             }
         });
+
+        // Save after the panels so we don't alias `self` inside the closures.
+        // save() writes the artifacts then exits the process (= closes window).
+        if save_now {
+            self.save();
+        }
     }
 }
 
-/// Capture-on-launch (display 0) unless `--input PATH` is given (load that image).
+/// Capture-on-launch unless `--input PATH` is given (load that image).
+///
+/// `--display IDX` selects which monitor to grab (default 0). On a multi-monitor
+/// setup a blank/unused screen can be index 0 — use `redpen --list` to see the
+/// catalogue and pick the index whose geometry matches your working screen.
 fn load_image() -> Result<(Vec<u8>, usize, usize), String> {
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--input") {
@@ -260,9 +285,16 @@ fn load_image() -> Result<(Vec<u8>, usize, usize), String> {
         let (w, h) = (img.width() as usize, img.height() as usize);
         return Ok((img.into_raw(), w, h));
     }
-    // capture display 0
     use gentle_eye::capture::screen::ScreenCapturer;
-    let mut cap = ScreenCapturer::new(0).map_err(|e| format!("screen capture unavailable: {e}"))?;
+    // --display IDX (default 0). Mirrors `gentle-eye screenshot --display`.
+    let display: usize = args
+        .iter()
+        .position(|a| a == "--display")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let mut cap =
+        ScreenCapturer::new(display).map_err(|e| format!("screen capture unavailable: {e}"))?;
     let (w, h) = (cap.width(), cap.height());
     let buf = cap
         .capture_frame(Duration::from_secs(2))
@@ -270,12 +302,15 @@ fn load_image() -> Result<(Vec<u8>, usize, usize), String> {
     let stride = buf.len().checked_div(h).unwrap_or(w * 4);
     let rect = PixelRect { x: 0, y: 0, w: w as u32, h: h as u32 };
     let (bgra, _, _) = crop_bgra(&buf, w, h, stride, rect).map_err(|e| format!("repack: {e}"))?;
+    // BGRA → RGBA, forcing alpha opaque: X11 root-window capture leaves alpha=0,
+    // which egui's `from_rgba_unmultiplied` would render as fully transparent (a
+    // black canvas). A screenshot has no transparency, so pin A=255.
     let mut rgba = vec![0u8; w * h * 4];
     for i in 0..(w * h) {
-        rgba[i * 4] = bgra[i * 4 + 2]; // R <- B-position byte... BGRA: [B,G,R,A] → RGBA [R,G,B,A]
+        rgba[i * 4] = bgra[i * 4 + 2]; // R <- B-position byte (BGRA → RGBA)
         rgba[i * 4 + 1] = bgra[i * 4 + 1];
         rgba[i * 4 + 2] = bgra[i * 4];
-        rgba[i * 4 + 3] = bgra[i * 4 + 3];
+        rgba[i * 4 + 3] = 255;
     }
     Ok((rgba, w, h))
 }
