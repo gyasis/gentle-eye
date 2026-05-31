@@ -68,6 +68,10 @@ opencv = { version = "0.94", optional = true }
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
 
+# Native visual annotator GUI ("redpen") only — optional + behind the `ui`
+# feature so the default MCP-server/CLI build never pulls the egui/wgpu stack.
+eframe = { version = "0.29", optional = true }
+
 [features]
 # Opt-in real-time region tracking (Phase 3). Off by default — enable with
 # `--features tracking`, which requires `libopencv-dev` to be installed.
@@ -75,6 +79,9 @@ tracking = ["dep:opencv"]
 # Opt-in pure-Rust preview window for the live preview. Off by default — enable
 # with `--features richwindow` (pulls winit+softbuffer, ~75 crates).
 richwindow = ["dep:winit", "dep:softbuffer"]
+# Native "redpen" visual annotator binary. Off by default — build with
+# `cargo build --features ui --bin redpen` (pulls eframe/egui).
+ui = ["dep:eframe"]
 
 [dev-dependencies]
 mockall = "0.12"
@@ -83,3 +90,10 @@ tempfile = "3"
 [[bin]]
 name = "gentle-eye"
 path = "src/bin/gentle-eye.rs"
+
+# The native annotator GUI — only built with `--features ui` (keeps egui out of
+# the default `gentle-eye` build).
+[[bin]]
+name = "redpen"
+path = "src/bin/redpen.rs"
+required-features = ["ui"]

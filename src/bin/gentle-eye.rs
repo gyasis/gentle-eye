@@ -42,6 +42,7 @@ USAGE:
   gentle-eye preview --gallery [--port N]             Serve a media gallery (browser; Range video) until idle
   gentle-eye preview --live                           Live preview of the active target via ffplay (default off)
   gentle-eye screenshot --out FILE.png [--display IDX] [--region x,y,w,h | --target NAME]   One-shot screen grab → PNG (optional crop)
+  gentle-eye redpen-list [--limit N]                  List redpen annotation captures (newest first) for the agent to ingest
   gentle-eye provider-info [--provider gemini|ollama]
   gentle-eye help
 
@@ -72,6 +73,7 @@ async fn main() -> ExitCode {
         "target" => run_target(rest).await,
         "preview" => run_preview(rest).await,
         "screenshot" => run_screenshot(rest).await,
+        "redpen-list" => run_redpen_list(rest).await,
         "help" | "-h" | "--help" => {
             println!("{HELP}");
             Ok(())
@@ -482,6 +484,57 @@ async fn run_screenshot(args: &[String]) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "screenshot": out, "width": w, "height": h, "display": display
+        }))?
+    );
+    Ok(())
+}
+
+/// List redpen annotation captures (newest first) from `~/.gentle-eye/redpen/`.
+///
+/// Read-only discovery surface: the `redpen` GUI writes a `<ts>.png` + `<ts>.json`
+/// sidecar per session; the agent reads this to find the latest artifact, then
+/// closes the loop with `gentle-eye analyze --image <png> --prompt … --provider gemini`.
+async fn run_redpen_list(args: &[String]) -> Result<()> {
+    let limit: usize = flag(args, "--limit").and_then(|s| s.parse().ok()).unwrap_or(20);
+    let dir = Path::new(&std::env::var("HOME").unwrap_or_default()).join(".gentle-eye/redpen");
+
+    let mut sidecars: Vec<(u64, PathBuf)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("json") {
+                let mtime = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                sidecars.push((mtime, p));
+            }
+        }
+    }
+    sidecars.sort_by_key(|(t, _)| std::cmp::Reverse(*t)); // newest first
+
+    let captures: Vec<serde_json::Value> = sidecars
+        .into_iter()
+        .take(limit)
+        .filter_map(|(_, p)| {
+            let raw = std::fs::read_to_string(&p).ok()?;
+            let mut v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("sidecar".into(), serde_json::json!(p.to_string_lossy()));
+            }
+            Some(v)
+        })
+        .collect();
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "dir": dir.to_string_lossy(),
+            "count": captures.len(),
+            "captures": captures,
         }))?
     );
     Ok(())
