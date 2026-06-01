@@ -1,10 +1,17 @@
 # redpen — native visual annotator
 
 `redpen` is gentle-eye's native, low-friction channel for giving the coding agent
-*visual* context: capture what's on screen, draw a box around what matters, name
-it, and round-trip a marked-up artifact the agent (or Gemini) can act on. The box
-you draw is a real gentle-eye **target** — drawing a rectangle replaces typing
-`target add … --region 0.25,0,0.5,1`.
+*visual* context: capture what's on screen, **mark it up** to communicate intent
+("move this here", circle what's broken, point at what matters), and round-trip a
+marked-up artifact the agent (or Gemini) can act on.
+
+It is a **markup tool, not a crop-picker** — three tools in a small color palette:
+
+| Tool | Use |
+|---|---|
+| **Pen** (P) | freehand — circle, underline, sketch, scribble a note |
+| **Arrow** (A) | click-drag a directed arrow — "move this *here*", point at something |
+| **Box** (B) | outline a region |
 
 It is a **separate binary behind the `ui` feature**, so the default
 `gentle-eye` MCP/CLI build never pulls the egui/wgpu GUI stack.
@@ -16,43 +23,44 @@ It is a **separate binary behind the `ui` feature**, so the default
 cargo build --release --features ui --bin redpen
 
 # Capture the screen on launch, then annotate:
-redpen
-
-# Or re-annotate an existing image:
-redpen --input /path/to/shot.png
+redpen                       # captures display 0
+redpen --display 1           # pick a monitor (see `redpen --list`)
+redpen --input /path/to.png  # re-annotate an existing image instead of capturing
+redpen --list                # print the monitor catalogue and exit
 ```
 
 | Action | Key / mouse |
 |---|---|
-| Draw a box | click-drag on the image |
-| Re-name a box | edit its `target:` field in the bottom bar |
-| Undo last box | **Undo last box** button |
+| Pick tool | **P** pen · **A** arrow · **B** box (or the toolbar) |
+| Pick color | **1** red · **2** blue · **3** green · **4** yellow (or the swatches) |
+| Draw | click-drag on the image |
+| Undo last mark | **Undo (last)** button |
 | Save + quit | **Enter** (or the button) |
 | Cancel | **Esc** |
 
 ## What a save produces
 
-Each drawn box becomes a normalized `NormRect` (0–1) target via
-`target::geometry::pixel_to_norm` and is appended to the shared `TargetStore`
-(the same store `gentle-eye target list` reads; the last box stays active).
-
+redpen is pure visual markup — it does **not** create gentle-eye crop targets.
 Two artifacts land in `~/.gentle-eye/redpen/`:
 
-- `<ts>.png` — the flattened image with the red boxes drawn in.
-- `<ts>.json` — the sidecar the LLM reads:
+- `<ts>.png` — the flattened image with every stroke burned in (what the model sees).
+- `<ts>.json` — the sidecar: each annotation in normalized 0–1 coords, with color:
 
 ```json
 {
   "image": "/home/you/.gentle-eye/redpen/1717157000.png",
   "size": [3440, 1440],
-  "targets": [
-    { "label": "broken nav", "rect": [0.12, 0.04, 0.30, 0.08] }
+  "annotations": [
+    { "type": "arrow", "color": "green", "from": [0.20, 0.50], "to": [0.65, 0.30] },
+    { "type": "pen",   "color": "red",   "points": [[0.12,0.04],[0.13,0.05], "…"] },
+    { "type": "box",   "color": "blue",  "rect": [0.10, 0.10, 0.25, 0.15] }
   ]
 }
 ```
 
 The sidecar turns a multi-megapixel image into a few lines of spatial text —
-the agent gets exact box coordinates, not just "vision."
+the agent gets the marks as geometry (an arrow's direction, a stroke's region),
+not just "vision."
 
 ## Closing the loop (agent side)
 
@@ -72,12 +80,12 @@ gentle-eye redpen-analyze --image ~/.gentle-eye/redpen/<ts>.png \
   --prompt "What should change in the marked region?" --provider gemini
 ```
 
-`redpen-analyze` reads the sidecar and prepends each box as text, e.g.
-`- "broken nav": normalized [0.12, 0.04, 0.30, 0.08] ≈ pixels (412, 57) 1032×115`,
-so the model reasons about the exact region instead of hunting for the red
-rectangle. Requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) for the default
-gemini provider. The raw `analyze --image …` command is still available if you
-want full manual control.
+`redpen-analyze` reads the sidecar and prepends each annotation as text, e.g.
+`- green ARROW from (688, 720) to (2236, 432) — points toward / indicates moving
+something to the arrow's head`, so the model reasons about direction and region
+instead of only hunting for the colored marks. Requires `GEMINI_API_KEY` (or
+`GOOGLE_API_KEY`) for the default gemini provider. The raw `analyze --image …`
+command is still available if you want full manual control.
 
 ## Roadmap (deferred — see the PRD)
 
