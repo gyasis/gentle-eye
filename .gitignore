@@ -50,3 +50,15 @@ dev-kid.yml
 ralph.config.yaml
 ralph-tiers.json
 ralph-tiers.full-13.bak.json
+
+# agent-state / transcript dirs — transient runtime state + secret-leak surface
+# (previously only partially ignored, so runtime state leaked into the repo)
+.specstory/
+.memory/
+.claude/
+.devkid/
+.dk/
+.cursor/
+.windsurf/
+.aider*
+.history/

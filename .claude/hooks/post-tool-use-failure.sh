@@ -1,1 +1,0 @@
-/home/gyasis/.dev-kid/templates/.claude/hooks/post-tool-use-failure.sh
