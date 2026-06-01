@@ -42,6 +42,7 @@ USAGE:
   gentle-eye preview --gallery [--port N]             Serve a media gallery (browser; Range video) until idle
   gentle-eye preview --live                           Live preview of the active target via ffplay (default off)
   gentle-eye screenshot --out FILE.png [--display IDX] [--region x,y,w,h | --target NAME]   One-shot screen grab → PNG (optional crop)
+  gentle-eye annotate --image IN.png --out OUT.png --box x,y,w,h [--label TEXT] [--box ... --label ...] [--color r,g,b]   Draw boxes+labels on an image (headless; agent-driven)
   gentle-eye redpen-list [--limit N]                  List redpen annotation captures (newest first) for the agent to ingest
   gentle-eye redpen-analyze [--image PATH] [--prompt TEXT] [--provider gemini|ollama]   Send a redpen capture (default: latest) + its boxes to vision AI
   gentle-eye provider-info [--provider gemini|ollama]
@@ -74,6 +75,7 @@ async fn main() -> ExitCode {
         "target" => run_target(rest).await,
         "preview" => run_preview(rest).await,
         "screenshot" => run_screenshot(rest).await,
+        "annotate" => run_annotate(rest).await,
         "redpen-list" => run_redpen_list(rest).await,
         "redpen-analyze" => run_redpen_analyze(rest).await,
         "help" | "-h" | "--help" => {
@@ -486,6 +488,120 @@ async fn run_screenshot(args: &[String]) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "screenshot": out, "width": w, "height": h, "display": display
+        }))?
+    );
+    Ok(())
+}
+
+/// Draw boxes + labels onto an image, headless — the agent-driven annotation
+/// verb that closes the capture→identify→annotate loop without the redpen GUI.
+///
+/// Boxes are pixel coords `x,y,w,h`; each `--box` may be immediately followed by
+/// an optional `--label TEXT`. Reuses `image`/`imageproc`/`ab_glyph` (already in
+/// the dep tree) — no GUI, runs under Xvfb or anywhere.
+async fn run_annotate(args: &[String]) -> Result<()> {
+    use ab_glyph::{FontVec, PxScale};
+    use image::Rgba;
+    use imageproc::drawing::{draw_filled_rect_mut, draw_hollow_rect_mut, draw_text_mut};
+    use imageproc::rect::Rect;
+
+    let input = flag(args, "--image").ok_or_else(|| anyhow!("--image IN.png is required"))?;
+    let out = flag(args, "--out").ok_or_else(|| anyhow!("--out OUT.png is required"))?;
+
+    // Collect boxes; pair each with the --label that immediately follows it (if any).
+    let mut boxes: Vec<(i32, i32, u32, u32)> = Vec::new();
+    let mut labels: Vec<Option<String>> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--box" {
+            let v = args.get(i + 1).ok_or_else(|| anyhow!("--box needs x,y,w,h"))?;
+            let p: Vec<i64> = v
+                .split(',')
+                .map(|s| s.trim().parse::<i64>())
+                .collect::<std::result::Result<_, _>>()
+                .map_err(|_| anyhow!("--box must be 4 integers x,y,w,h (got '{v}')"))?;
+            if p.len() != 4 {
+                return Err(anyhow!("--box must be x,y,w,h (got '{v}')"));
+            }
+            boxes.push((p[0] as i32, p[1] as i32, p[2].max(0) as u32, p[3].max(0) as u32));
+            if args.get(i + 2).map(String::as_str) == Some("--label") {
+                labels.push(args.get(i + 3).cloned());
+            } else {
+                labels.push(None);
+            }
+        }
+        i += 1;
+    }
+    if boxes.is_empty() {
+        return Err(anyhow!("at least one --box x,y,w,h is required"));
+    }
+
+    // Box color (default red).
+    let (cr, cg, cb) = match flag(args, "--color") {
+        Some(c) => {
+            let p: Vec<u8> = c
+                .split(',')
+                .map(|s| s.trim().parse::<u8>())
+                .collect::<std::result::Result<_, _>>()
+                .map_err(|_| anyhow!("--color must be r,g,b (0-255)"))?;
+            if p.len() != 3 {
+                return Err(anyhow!("--color must be r,g,b"));
+            }
+            (p[0], p[1], p[2])
+        }
+        None => (255, 0, 0),
+    };
+    let box_color = Rgba([cr, cg, cb, 255]);
+    let text_color = Rgba([255u8, 255, 255, 255]);
+
+    let mut img = image::open(input)
+        .with_context(|| format!("open --image {input}"))?
+        .to_rgba8();
+    let (iw, ih) = (img.width() as i32, img.height() as i32);
+
+    // Label font (best-effort; boxes still draw if the font is missing).
+    let font = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+        .ok()
+        .and_then(|d| FontVec::try_from_vec(d).ok());
+    let scale = PxScale::from(26.0);
+
+    for (idx, (x, y, w, h)) in boxes.iter().enumerate() {
+        for t in 0..3i32 {
+            let rx = (x - t).clamp(0, (iw - 1).max(0));
+            let ry = (y - t).clamp(0, (ih - 1).max(0));
+            let rw = (*w as i32 + 2 * t).max(1) as u32;
+            let rh = (*h as i32 + 2 * t).max(1) as u32;
+            draw_hollow_rect_mut(&mut img, Rect::at(rx, ry).of_size(rw, rh), box_color);
+        }
+        if let (Some(f), Some(text)) = (font.as_ref(), labels[idx].as_deref()) {
+            if !text.is_empty() {
+                let bar_h = 30i32;
+                let bx = (*x).clamp(0, (iw - 1).max(0));
+                let by = if *y - bar_h >= 0 { *y - bar_h } else { *y };
+                let bar_w = (((text.len() as f32) * scale.x * 0.56) as u32 + 10)
+                    .min(((iw - bx).max(1)) as u32);
+                draw_filled_rect_mut(
+                    &mut img,
+                    Rect::at(bx, by.clamp(0, (ih - 1).max(0))).of_size(bar_w.max(1), bar_h as u32),
+                    box_color,
+                );
+                draw_text_mut(&mut img, text_color, bx + 5, by + 3, scale, f, text);
+            }
+        }
+    }
+
+    img.save(out).with_context(|| format!("write --out {out}"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "annotated": out,
+            "source": input,
+            "width": iw,
+            "height": ih,
+            "count": boxes.len(),
+            "boxes": boxes.iter().zip(labels.iter()).map(|((x, y, w, h), l)| serde_json::json!({
+                "x": x, "y": y, "w": w, "h": h, "label": l
+            })).collect::<Vec<_>>(),
         }))?
     );
     Ok(())

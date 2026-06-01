@@ -210,7 +210,7 @@ fn default_provider() -> String {
 
 /// Default Gemini model name.
 fn default_gemini_model() -> String {
-    "gemini-2.0-flash".into()
+    "gemini-3.5-flash".into()
 }
 
 /// Default Ollama host address.

@@ -22,6 +22,9 @@ scrap = "0.5"
 # behind the optional `tracking` feature). Pinned per the dep discipline.
 image = "0.25"
 imageproc = "0.25"
+# Font rasterization for the `annotate` verb (label text). Already present in the
+# tree via imageproc; declared directly so the bin can construct a FontVec.
+ab_glyph = "0.2"
 
 # Storage
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -32,7 +35,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 sysinfo = "0.39"
 
 # Vision Providers
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 schemars = { version = "0.8", features = ["chrono"] }
 
 # Serialization
