@@ -31,6 +31,11 @@ Optional: `opencv` is **only** needed for the deferred `tracking` feature
 
 ## 1. Linux (X11) — the validated path
 
+> **On WSL2?** This native path works, but WSLg's `:0` can't be root-captured and
+> the redpen GUI needs a specific display split. See
+> [`WSL_CAPTURE_ANNOTATE_REVIEW.md`](WSL_CAPTURE_ANNOTATE_REVIEW.md) for the WSL-only
+> setup (Xvfb/Xephyr, `usermod render,video`, capture→annotate→review recipe).
+
 ```bash
 # deps
 sudo apt-get install -y ffmpeg            # ffmpeg + ffprobe
