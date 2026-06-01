@@ -43,6 +43,7 @@ USAGE:
   gentle-eye preview --live                           Live preview of the active target via ffplay (default off)
   gentle-eye screenshot --out FILE.png [--display IDX] [--region x,y,w,h | --target NAME]   One-shot screen grab → PNG (optional crop)
   gentle-eye redpen-list [--limit N]                  List redpen annotation captures (newest first) for the agent to ingest
+  gentle-eye redpen-analyze [--image PATH] [--prompt TEXT] [--provider gemini|ollama]   Send a redpen capture (default: latest) + its boxes to vision AI
   gentle-eye provider-info [--provider gemini|ollama]
   gentle-eye help
 
@@ -74,6 +75,7 @@ async fn main() -> ExitCode {
         "preview" => run_preview(rest).await,
         "screenshot" => run_screenshot(rest).await,
         "redpen-list" => run_redpen_list(rest).await,
+        "redpen-analyze" => run_redpen_analyze(rest).await,
         "help" | "-h" | "--help" => {
             println!("{HELP}");
             Ok(())
@@ -538,6 +540,119 @@ async fn run_redpen_list(args: &[String]) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+/// Close the redpen loop: feed a capture (default: the latest) + the boxes the
+/// user drew to a vision provider, so the agent acts on exactly what was marked.
+///
+/// The PNG already has the boxes burned in (Gemini sees them); we ALSO inject
+/// each box's label + normalized/pixel region as text, so the model reasons
+/// spatially instead of hunting for the red rectangles.
+async fn run_redpen_analyze(args: &[String]) -> Result<()> {
+    // Provider: default to gemini for this command (the loop-close target).
+    let provider = flag(args, "--provider").unwrap_or("gemini");
+    std::env::set_var("GENTLE_EYE_PROVIDER", provider);
+
+    // Resolve the image: --image PATH, else the newest *.png in the inbox.
+    let dir = Path::new(&std::env::var("HOME").unwrap_or_default()).join(".gentle-eye/redpen");
+    let image: PathBuf = match flag(args, "--image") {
+        Some(p) => PathBuf::from(p),
+        None => latest_redpen_png(&dir)
+            .ok_or_else(|| anyhow!("no redpen captures in {} — run `redpen` first", dir.display()))?,
+    };
+    if !image.exists() {
+        return Err(anyhow!("image not found: {}", image.display()));
+    }
+
+    // Load the sidecar (same stem, .json) for the box context, if present.
+    let sidecar = image.with_extension("json");
+    let box_context = sidecar
+        .exists()
+        .then(|| std::fs::read_to_string(&sidecar).ok())
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .map(|v| describe_boxes(&v))
+        .unwrap_or_default();
+
+    // Compose the prompt: box context (if any) + the user's question (or a default).
+    let user_q = flag(args, "--prompt").unwrap_or(
+        "Describe what is inside each marked region, and flag any issues, bugs, or improvements you see.",
+    );
+    let prompt = if box_context.is_empty() {
+        user_q.to_string()
+    } else {
+        format!("{box_context}\n{user_q}")
+    };
+
+    let server = GentleEyeServer::new().await?;
+    let result = server.vision().analyze_image(&image, &prompt).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "image": image.to_string_lossy(),
+            "prompt": prompt,
+            "analysis": result,
+        }))?
+    );
+    Ok(())
+}
+
+/// Newest `*.png` in the redpen inbox (by mtime).
+fn latest_redpen_png(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("png"))
+        .max_by_key(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        })
+        .map(|e| e.path())
+}
+
+/// Turn a redpen sidecar JSON into a human-readable box description for the prompt.
+fn describe_boxes(v: &serde_json::Value) -> String {
+    let targets = match v.get("targets").and_then(|t| t.as_array()) {
+        Some(t) if !t.is_empty() => t,
+        _ => return String::new(),
+    };
+    let (sw, sh) = v
+        .get("size")
+        .and_then(|s| s.as_array())
+        .and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)))
+        .unwrap_or((0.0, 0.0));
+
+    let mut out = format!(
+        "This screenshot has {} annotation box(es) drawn in red. Focus on these marked regions:\n",
+        targets.len()
+    );
+    for t in targets {
+        let label = t.get("label").and_then(|l| l.as_str()).unwrap_or("box");
+        let r = t.get("rect").and_then(|r| r.as_array());
+        if let Some(r) = r {
+            let n: Vec<f64> = r.iter().filter_map(|x| x.as_f64()).collect();
+            if n.len() == 4 {
+                if sw > 0.0 && sh > 0.0 {
+                    out.push_str(&format!(
+                        "- \"{label}\": normalized [{:.3}, {:.3}, {:.3}, {:.3}] ≈ pixels ({}, {}) {}×{}\n",
+                        n[0], n[1], n[2], n[3],
+                        (n[0] * sw).round() as i64, (n[1] * sh).round() as i64,
+                        (n[2] * sw).round() as i64, (n[3] * sh).round() as i64,
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "- \"{label}\": normalized [{:.3}, {:.3}, {:.3}, {:.3}]\n",
+                        n[0], n[1], n[2], n[3]
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Parse a `x,y,w,h` normalized-coordinate string into a `NormRect`.
