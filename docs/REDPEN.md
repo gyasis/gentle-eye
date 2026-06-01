@@ -63,10 +63,21 @@ them to Gemini:
 # Newest-first list of captures (the discovery surface):
 gentle-eye redpen-list [--limit N]
 
-# Then ingest the marked-up image (Gemini also ingests video natively):
-gentle-eye analyze --image ~/.gentle-eye/redpen/<ts>.png \
-  --prompt "The red box marks <X>. What should change?" --provider gemini
+# Close the loop in one step — picks the latest capture, injects the box
+# labels + coordinates into the prompt, and sends it to Gemini:
+gentle-eye redpen-analyze [--prompt "your question"]
+
+# Or target a specific capture / provider:
+gentle-eye redpen-analyze --image ~/.gentle-eye/redpen/<ts>.png \
+  --prompt "What should change in the marked region?" --provider gemini
 ```
+
+`redpen-analyze` reads the sidecar and prepends each box as text, e.g.
+`- "broken nav": normalized [0.12, 0.04, 0.30, 0.08] ≈ pixels (412, 57) 1032×115`,
+so the model reasons about the exact region instead of hunting for the red
+rectangle. Requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) for the default
+gemini provider. The raw `analyze --image …` command is still available if you
+want full manual control.
 
 ## Roadmap (deferred — see the PRD)
 
