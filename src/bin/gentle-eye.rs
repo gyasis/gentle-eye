@@ -614,41 +614,113 @@ fn latest_redpen_png(dir: &Path) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
-/// Turn a redpen sidecar JSON into a human-readable box description for the prompt.
+/// Turn a redpen sidecar JSON into a human-readable annotation description for
+/// the prompt. Handles the markup schema (pen/arrow/box, with colors) and falls
+/// back to the legacy `targets` (named boxes) schema.
 fn describe_boxes(v: &serde_json::Value) -> String {
-    let targets = match v.get("targets").and_then(|t| t.as_array()) {
-        Some(t) if !t.is_empty() => t,
-        _ => return String::new(),
-    };
     let (sw, sh) = v
         .get("size")
         .and_then(|s| s.as_array())
         .and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)))
         .unwrap_or((0.0, 0.0));
+    // px(): normalized [x,y] → "(px, py)" if size known, else "(x.xxx, y.yyy)".
+    let px = |p: &[f64]| -> String {
+        if p.len() < 2 {
+            return "(?)".into();
+        }
+        if sw > 0.0 && sh > 0.0 {
+            format!("({}, {})", (p[0] * sw).round() as i64, (p[1] * sh).round() as i64)
+        } else {
+            format!("({:.3}, {:.3})", p[0], p[1])
+        }
+    };
+    let pt = |val: Option<&serde_json::Value>| -> Vec<f64> {
+        val.and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
+            .unwrap_or_default()
+    };
 
+    // Markup schema (pen / arrow / box).
+    if let Some(arr) = v.get("annotations").and_then(|a| a.as_array()) {
+        if arr.is_empty() {
+            return String::new();
+        }
+        let mut out = format!(
+            "The user drew {} annotation(s) on this screenshot. Read them as visual direction (where to look, what to change, what to move):\n",
+            arr.len()
+        );
+        for a in arr {
+            let ty = a.get("type").and_then(|t| t.as_str()).unwrap_or("mark");
+            let color = a.get("color").and_then(|c| c.as_str()).unwrap_or("red");
+            match ty {
+                "arrow" => {
+                    let f = pt(a.get("from"));
+                    let t = pt(a.get("to"));
+                    out.push_str(&format!(
+                        "- {color} ARROW from {} to {} — points toward / indicates moving something to the arrow's head.\n",
+                        px(&f), px(&t)
+                    ));
+                }
+                "box" => {
+                    let r = pt(a.get("rect"));
+                    if r.len() == 4 && sw > 0.0 && sh > 0.0 {
+                        out.push_str(&format!(
+                            "- {color} BOX at pixels ({}, {}) {}×{} — a marked region.\n",
+                            (r[0] * sw).round() as i64, (r[1] * sh).round() as i64,
+                            (r[2] * sw).round() as i64, (r[3] * sh).round() as i64,
+                        ));
+                    } else {
+                        out.push_str(&format!("- {color} BOX (normalized {r:?}).\n"));
+                    }
+                }
+                "pen" => {
+                    let pts = a.get("points").and_then(|p| p.as_array());
+                    let n = pts.map(|p| p.len()).unwrap_or(0);
+                    // Bounding box of the stroke gives the model a region anchor.
+                    if let Some(pts) = pts {
+                        let xs: Vec<f64> = pts.iter().filter_map(|p| p.as_array()?.first()?.as_f64()).collect();
+                        let ys: Vec<f64> = pts.iter().filter_map(|p| p.as_array()?.get(1)?.as_f64()).collect();
+                        if let (Some(&x0), Some(&y0)) = (xs.iter().min_by(|a, b| a.total_cmp(b)), ys.iter().min_by(|a, b| a.total_cmp(b))) {
+                            out.push_str(&format!(
+                                "- {color} freehand PEN mark ({n} pts) around {}.\n",
+                                px(&[x0, y0])
+                            ));
+                            continue;
+                        }
+                    }
+                    out.push_str(&format!("- {color} freehand PEN mark ({n} pts).\n"));
+                }
+                other => out.push_str(&format!("- {color} {other} annotation.\n")),
+            }
+        }
+        return out;
+    }
+
+    // Legacy schema: named target boxes.
+    let targets = match v.get("targets").and_then(|t| t.as_array()) {
+        Some(t) if !t.is_empty() => t,
+        _ => return String::new(),
+    };
     let mut out = format!(
         "This screenshot has {} annotation box(es) drawn in red. Focus on these marked regions:\n",
         targets.len()
     );
     for t in targets {
         let label = t.get("label").and_then(|l| l.as_str()).unwrap_or("box");
-        let r = t.get("rect").and_then(|r| r.as_array());
-        if let Some(r) = r {
-            let n: Vec<f64> = r.iter().filter_map(|x| x.as_f64()).collect();
-            if n.len() == 4 {
-                if sw > 0.0 && sh > 0.0 {
-                    out.push_str(&format!(
-                        "- \"{label}\": normalized [{:.3}, {:.3}, {:.3}, {:.3}] ≈ pixels ({}, {}) {}×{}\n",
-                        n[0], n[1], n[2], n[3],
-                        (n[0] * sw).round() as i64, (n[1] * sh).round() as i64,
-                        (n[2] * sw).round() as i64, (n[3] * sh).round() as i64,
-                    ));
-                } else {
-                    out.push_str(&format!(
-                        "- \"{label}\": normalized [{:.3}, {:.3}, {:.3}, {:.3}]\n",
-                        n[0], n[1], n[2], n[3]
-                    ));
-                }
+        let n = pt(t.get("rect"));
+        if n.len() == 4 {
+            if sw > 0.0 && sh > 0.0 {
+                out.push_str(&format!(
+                    "- \"{label}\": normalized [{:.3}, {:.3}, {:.3}, {:.3}] ≈ pixels ({}, {}) {}×{}\n",
+                    n[0], n[1], n[2], n[3],
+                    (n[0] * sw).round() as i64, (n[1] * sh).round() as i64,
+                    (n[2] * sw).round() as i64, (n[3] * sh).round() as i64,
+                ));
+            } else {
+                out.push_str(&format!(
+                    "- \"{label}\": normalized [{:.3}, {:.3}, {:.3}, {:.3}]\n",
+                    n[0], n[1], n[2], n[3]
+                ));
             }
         }
     }
