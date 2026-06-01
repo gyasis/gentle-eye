@@ -4,8 +4,9 @@ What an agent can do with gentle-eye. Two surfaces over one library:
 **MCP tools** (in-agent) and **CLI subcommands** (shell out, JSON on stdout).
 
 > Regenerated 2026-05-30 from the live `tool_catalog()` (`src/mcp/server.rs`) and
-> the CLI `HELP` (`src/bin/gentle-eye.rs`). The previous TOOLS.md was a stale
-> session dump missing 6 of the 12 tools.
+> the CLI `HELP` (`src/bin/gentle-eye.rs`); updated 2026-06-01 with the
+> `screenshot` + `redpen-list` / `redpen-analyze` CLI commands and the redpen
+> visual-direction loop. The 12 MCP tools are unchanged (redpen is CLI-only).
 
 ---
 
@@ -21,6 +22,8 @@ What an agent can do with gentle-eye. Two surfaces over one library:
 | Focus capture on a sub-region (crop) | `define_target` / `focus_target` | `target add` / `target use` / `target list` |
 | Preview a capture (image/video) or live feed | — | `preview [FILE]` / `preview --gallery` / `preview --live` (see [PREVIEW.md](PREVIEW.md)) |
 | Snap a rough region to real edges / find a red marker | `measure_target` | — |
+| One-shot screenshot → PNG (optional crop) | — | `screenshot --out FILE.png` |
+| **Human marks up a screen to direct the agent** (pen/arrow/box) | — | `redpen` (GUI, user-launched) → `redpen-list` / `redpen-analyze` (see [REDPEN.md](REDPEN.md)) |
 | Inspect the configured vision provider | `get_vision_provider_info` | `provider-info` |
 | List / label displays | — | `displays` / `label` |
 
@@ -56,6 +59,25 @@ The server (`gentle-eye serve`) exposes these over stdio; an agent sees them via
 `source` is `{"kind":"display","index":0}` or `{"kind":"stream","url":"rtsp://…"}`.
 See [`TARGET.md`](TARGET.md) for the full design.
 
+### The "redpen" visual-direction loop (human → agent)
+
+When the user wants to *show* you something — point where a thing should move,
+circle what's broken, sketch a layout — they run the **`redpen`** GUI (a native
+markup tool: freehand pen / arrow / box in a color palette). They draw, press
+Enter, and an artifact lands in `~/.gentle-eye/redpen/`. **You never launch the
+GUI; you discover what they drew:**
+
+1. `gentle-eye redpen-list [--limit N]` — newest-first list of captures. Each
+   entry has the PNG path + its annotations (type, color, normalized coords).
+2. `gentle-eye redpen-analyze [--prompt "…"]` — picks the latest capture (or
+   `--image PATH`), injects the marks as text (e.g. *"green ARROW from (x,y) to
+   (x,y) — points toward…"*), and sends the marked-up PNG to the VLM (default
+   gemini). The image has the strokes burned in **and** you get the geometry.
+
+This is the human-side mirror of the `target` loop: targets are *you* cropping a
+region; redpen is the *user* drawing direction onto a screen. See
+[`REDPEN.md`](REDPEN.md).
+
 ---
 
 ## CLI subcommands
@@ -76,9 +98,15 @@ gentle-eye target list
 gentle-eye preview [FILE] [--loop once|forever] [--seconds N]   Preview a capture (default: most recent)
 gentle-eye preview --gallery [--port N]   Browser media gallery (Range video) until idle
 gentle-eye preview --live                 Live preview of the active target (default off)
+gentle-eye screenshot --out FILE.png [--display IDX] [--region x,y,w,h | --target NAME]   One-shot grab → PNG
+gentle-eye redpen-list [--limit N]        List redpen annotation captures (newest first) — the discovery surface
+gentle-eye redpen-analyze [--image PATH] [--prompt TEXT] [--provider gemini|ollama]   Send a capture + its marks to a VLM
 gentle-eye provider-info [--provider gemini|ollama]
 gentle-eye help
 ```
+
+(The `redpen` GUI itself is a separate binary built with `--features ui`; the
+agent never launches it — the user does. See the loop below.)
 
 All CLI subcommands print JSON to stdout (logs go to stderr).
 
