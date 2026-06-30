@@ -42,6 +42,7 @@ USAGE:
   gentle-eye preview --gallery [--port N]             Serve a media gallery (browser; Range video) until idle
   gentle-eye preview --live                           Live preview of the active target via ffplay (default off)
   gentle-eye screenshot --out FILE.png [--display IDX] [--region x,y,w,h | --target NAME]   One-shot screen grab → PNG (optional crop)
+  gentle-eye segment --display IDX [--read] [--provider gemini|ollama]   Detect terminal/editor PANELS (column-activity divider analysis); --read reads each via the vision provider
   gentle-eye redpen-list [--limit N]                  List redpen annotation captures (newest first) for the agent to ingest
   gentle-eye redpen-analyze [--image PATH] [--prompt TEXT] [--provider gemini|ollama]   Send a redpen capture (default: latest) + its boxes to vision AI
   gentle-eye provider-info [--provider gemini|ollama]
@@ -74,6 +75,7 @@ async fn main() -> ExitCode {
         "target" => run_target(rest).await,
         "preview" => run_preview(rest).await,
         "screenshot" => run_screenshot(rest).await,
+        "segment" => run_segment(rest).await,
         "redpen-list" => run_redpen_list(rest).await,
         "redpen-analyze" => run_redpen_analyze(rest).await,
         "help" | "-h" | "--help" => {
@@ -442,13 +444,35 @@ async fn run_screenshot(args: &[String]) -> Result<()> {
     use gentle_eye::capture::stream::write_bgra_png;
     use gentle_eye::target::crop::crop_bgra;
     use gentle_eye::target::geometry::norm_to_pixel;
-    use gentle_eye::target::model::PixelRect;
+    use gentle_eye::target::model::{PixelRect, TargetSource};
     use gentle_eye::target::store::TargetStore;
 
     let out = flag(args, "--out").ok_or_else(|| anyhow!("--out FILE.png is required"))?;
+
+    // If --target names a target, load it up front: a display-bound target ALSO selects which
+    // display to capture (unless --display is given explicitly). Without this, `--target` grabbed
+    // the target's region off display 0 regardless of which monitor the target lives on.
+    let target = match flag(args, "--target") {
+        Some(name) => {
+            let store = TargetStore::load().map_err(|e| anyhow!("{e}"))?;
+            Some(
+                store
+                    .list()
+                    .iter()
+                    .find(|t| t.name == name)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("no target named '{name}'"))?,
+            )
+        }
+        None => None,
+    };
+
     let display: usize = match flag(args, "--display") {
         Some(s) => s.parse().context("--display must be an integer index")?,
-        None => 0,
+        None => match target.as_ref().map(|t| &t.source) {
+            Some(TargetSource::Display { index }) => *index,
+            _ => 0,
+        },
     };
 
     let mut cap =
@@ -459,21 +483,14 @@ async fn run_screenshot(args: &[String]) -> Result<()> {
         .map_err(|e| anyhow!("capture failed: {e}"))?;
     let stride = buf.len().checked_div(fh).unwrap_or(fw * 4);
 
-    // Crop rect: --region (normalized) > --target NAME > full frame.
+    // Crop rect: --region (normalized) > --target region > full frame.
     let rect = if let Some(r) = flag(args, "--region") {
         let region = parse_region(r)?;
         if !region.is_valid() {
             return Err(anyhow!("--region must lie within 0-1 with positive area"));
         }
         norm_to_pixel(region, (fw as u32, fh as u32), (0, 0))
-    } else if let Some(name) = flag(args, "--target") {
-        let store = TargetStore::load().map_err(|e| anyhow!("{e}"))?;
-        let t = store
-            .list()
-            .iter()
-            .find(|t| t.name == name)
-            .cloned()
-            .ok_or_else(|| anyhow!("no target named '{name}'"))?;
+    } else if let Some(t) = target.as_ref() {
         norm_to_pixel(t.region, (fw as u32, fh as u32), (0, 0))
     } else {
         PixelRect { x: 0, y: 0, w: fw as u32, h: fh as u32 }
@@ -489,6 +506,136 @@ async fn run_screenshot(args: &[String]) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+/// Detect terminal/editor PANELS on a display via column-activity divider analysis, then
+/// (optionally) read each through the vision provider. Native port of `panel_segment.py`:
+/// capture → find low-activity vertical gutters → per-panel crop → analyze.
+async fn run_segment(args: &[String]) -> Result<()> {
+    use gentle_eye::capture::screen::ScreenCapturer;
+    use gentle_eye::capture::stream::write_bgra_png;
+    use gentle_eye::target::crop::crop_bgra;
+    use gentle_eye::target::model::PixelRect;
+
+    if let Some(p) = flag(args, "--provider") {
+        std::env::set_var("GENTLE_EYE_PROVIDER", p);
+    }
+    let display: usize = match flag(args, "--display") {
+        Some(s) => s.parse().context("--display must be an integer index")?,
+        None => 0,
+    };
+    let do_read = args.iter().any(|a| a == "--read");
+
+    let mut cap =
+        ScreenCapturer::new(display).map_err(|e| anyhow!("screen capture unavailable: {e}"))?;
+    let (fw, fh) = (cap.width(), cap.height());
+    // First frame from a fresh X11 capturer is often blank/stale; warm up then grab the real one.
+    let _ = cap.capture_frame(Duration::from_secs(2));
+    std::thread::sleep(Duration::from_millis(120));
+    let buf = cap
+        .capture_frame(Duration::from_secs(2))
+        .map_err(|e| anyhow!("capture failed: {e}"))?;
+    let stride = buf.len().checked_div(fh).unwrap_or(fw * 4);
+
+    let panels = detect_panels_bgra(&buf, fw, fh, stride);
+    let server = if do_read { Some(GentleEyeServer::new().await?) } else { None };
+
+    let mut regions = Vec::new();
+    for (i, &(x0, x1)) in panels.iter().enumerate() {
+        let rect = PixelRect { x: x0 as u32, y: 0, w: (x1 - x0) as u32, h: fh as u32 };
+        let (bytes, w, h) =
+            crop_bgra(&buf, fw, fh, stride, rect).map_err(|e| anyhow!("crop: {e}"))?;
+        let png = std::env::temp_dir()
+            .join(format!("ge_segment_{}_{}.png", std::process::id(), i + 1));
+        write_bgra_png(&bytes, w, h, &png).map_err(|e| anyhow!("png write: {e}"))?;
+        let mut entry = serde_json::json!({
+            "index": i + 1, "x": x0, "w": x1 - x0, "h": fh, "png": png.to_string_lossy()
+        });
+        if let Some(srv) = &server {
+            let res = srv
+                .vision()
+                .analyze_image(
+                    png.as_path(),
+                    "Transcribe the visible code/text in this single terminal panel briefly, \
+                     then one phrase on what it is doing.",
+                )
+                .await;
+            entry["analysis"] = match res {
+                Ok(r) => serde_json::to_value(r).unwrap_or(serde_json::Value::Null),
+                Err(e) => serde_json::json!({ "error": e.to_string() }),
+            };
+        }
+        regions.push(entry);
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "display": display, "width": fw, "height": fh, "panels": regions.len(), "regions": regions
+        }))?
+    );
+    Ok(())
+}
+
+/// Column-activity panel divider detection over a BGRA frame. Gutters between panels are
+/// low-activity vertical bands; returns panel x-ranges `[(x0, x1), ...]`.
+fn detect_panels_bgra(buf: &[u8], w: usize, h: usize, stride: usize) -> Vec<(usize, usize)> {
+    if w == 0 || h == 0 {
+        return vec![(0, w)];
+    }
+    let mut act = vec![0f64; w];
+    for x in 0..w {
+        let (mut sum, mut sq) = (0f64, 0f64);
+        for y in 0..h {
+            let o = y * stride + x * 4;
+            if o + 2 >= buf.len() {
+                break;
+            }
+            let g = (buf[o] as f64 + buf[o + 1] as f64 + buf[o + 2] as f64) / 3.0;
+            sum += g;
+            sq += g * g;
+        }
+        let n = h as f64;
+        let mean = sum / n;
+        act[x] = (sq / n - mean * mean).max(0.0).sqrt();
+    }
+    let half = 10usize; // smoothing window ~21
+    let mut sm = vec![0f64; w];
+    for x in 0..w {
+        let a = x.saturating_sub(half);
+        let b = (x + half + 1).min(w);
+        sm[x] = act[a..b].iter().sum::<f64>() / (b - a) as f64;
+    }
+    let mut sorted = sm.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let thr = sorted[((sorted.len() as f64) * 0.12) as usize];
+    let mut div: Vec<usize> = Vec::new();
+    let mut i = 0usize;
+    while i < w {
+        if sm[i] < thr {
+            let start = i;
+            while i < w && sm[i] < thr {
+                i += 1;
+            }
+            if i - start >= 10 && start > 100 && i < w.saturating_sub(100) {
+                div.push((start + i) / 2);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let mut bounds = vec![0usize];
+    bounds.extend(div);
+    bounds.push(w);
+    let mut panels = Vec::new();
+    for t in 0..bounds.len() - 1 {
+        if bounds[t + 1] - bounds[t] > 250 {
+            panels.push((bounds[t], bounds[t + 1]));
+        }
+    }
+    if panels.is_empty() {
+        panels.push((0, w));
+    }
+    panels
 }
 
 /// List redpen annotation captures (newest first) from `~/.gentle-eye/redpen/`.
