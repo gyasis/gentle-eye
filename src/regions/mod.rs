@@ -188,7 +188,157 @@ pub fn detect(depth: Granularity) -> Vec<Region> {
     if depth >= Granularity::Pane {
         all.extend(AtSpiProvider.regions(&root));
     }
-    fuse(all, 0.7)
+    let mut out = fuse(all, 0.7);
+    assign_parents(&mut out);
+    out
+}
+
+// ── cascade resolution (E4) ──────────────────────────────────────────────────
+
+fn contains(outer: &crate::target::model::PixelRect, inner: &crate::target::model::PixelRect) -> bool {
+    outer.x <= inner.x
+        && outer.y <= inner.y
+        && outer.x + outer.w >= inner.x + inner.w
+        && outer.y + outer.h >= inner.y + inner.h
+}
+fn same_box(a: &crate::target::model::PixelRect, b: &crate::target::model::PixelRect) -> bool {
+    a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h
+}
+
+/// Link each region to its tightest container (a coarser-or-equal region that
+/// strictly contains it) via `parent` = the container's index in `regions`. This
+/// turns the flat fused list into the trickle-down hierarchy (window → pane →
+/// element) consumers drill through.
+pub fn assign_parents(regions: &mut [Region]) {
+    let n = regions.len();
+    let boxes: Vec<_> = regions.iter().map(|r| r.bbox).collect();
+    let gran: Vec<_> = regions.iter().map(|r| r.granularity).collect();
+    for i in 0..n {
+        let mut best: Option<usize> = None;
+        let mut best_area = u64::MAX;
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            if gran[j] <= gran[i] && contains(&boxes[j], &boxes[i]) && !same_box(&boxes[j], &boxes[i]) {
+                let area = boxes[j].w as u64 * boxes[j].h as u64;
+                if area < best_area {
+                    best_area = area;
+                    best = Some(j);
+                }
+            }
+        }
+        regions[i].parent = best.map(|j| j as u64);
+    }
+}
+
+/// Resolve a natural-language target to a region index — **structural + geometric,
+/// no VLM**. Handles ordinals ("second pane"), position ("left/right/top/bottom/
+/// middle"), and label/role match ("the terminal", "Cancel button"). Returns the
+/// best-matching region's index, or `None`. (Pixel/VLM escalation is E7–E10;
+/// this is the `gentle-eye locate` primitive over the structural region set.)
+pub fn locate(query: &str, regions: &[Region]) -> Option<usize> {
+    if regions.is_empty() {
+        return None;
+    }
+    let low = query.to_lowercase();
+    // Narrow the candidate pool by an explicit noun, if the query names one.
+    let want: Option<Granularity> = if low.contains("window") {
+        Some(Granularity::Window)
+    } else if low.contains("pane") || low.contains("panel") {
+        Some(Granularity::Pane)
+    } else if low.contains("button") || low.contains("icon") || low.contains("menu") {
+        Some(Granularity::Element)
+    } else if low.contains("label") || low.contains(" text") {
+        Some(Granularity::Text)
+    } else {
+        None
+    };
+    let filtered: Vec<usize> = (0..regions.len())
+        .filter(|&i| want.map_or(true, |g| regions[i].granularity == g))
+        .collect();
+    let pool = if filtered.is_empty() {
+        (0..regions.len()).collect::<Vec<_>>()
+    } else {
+        filtered
+    };
+    // 1) ordinal / positional geometric pick, then 2) label/role match.
+    spatial_pick(&low, regions, &pool).or_else(|| label_match(&low, regions, &pool))
+}
+
+fn spatial_pick(low: &str, regions: &[Region], pool: &[usize]) -> Option<usize> {
+    let vertical = ["top", "bottom", "upper", "lower"].iter().any(|k| low.contains(k));
+    let mut order = pool.to_vec();
+    if vertical {
+        order.sort_by_key(|&i| (regions[i].bbox.y, regions[i].bbox.x));
+    } else {
+        order.sort_by_key(|&i| (regions[i].bbox.x, regions[i].bbox.y));
+    }
+    let n = order.len();
+    if n == 0 {
+        return None;
+    }
+    let hit = |ks: &[&str]| ks.iter().any(|k| low.contains(k));
+    let p = if let Some(k) = ordinal_position(low) {
+        k.saturating_sub(1).min(n - 1)
+    } else if hit(&["last", "final", "rightmost", "far right", "right side", "the right"]) {
+        n - 1
+    } else if hit(&["leftmost", "far left", "left side", "the left"]) {
+        0
+    } else if hit(&["middle", "center", "centre", "central"]) {
+        n / 2
+    } else if vertical && hit(&["top", "upper"]) {
+        0
+    } else if vertical && hit(&["bottom", "lower"]) {
+        n - 1
+    } else {
+        return None;
+    };
+    Some(order[p])
+}
+
+fn label_match(low: &str, regions: &[Region], pool: &[usize]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_score = 0usize;
+    for &i in pool {
+        let label = regions[i].label.as_deref().unwrap_or("").to_lowercase();
+        let role = regions[i].role.as_deref().unwrap_or("").to_lowercase();
+        let hay = format!("{label} {role}");
+        if hay.trim().is_empty() {
+            continue;
+        }
+        let tokens = low.split_whitespace().filter(|w| w.len() > 2 && hay.contains(*w)).count();
+        let contained = !label.is_empty() && (low.contains(&label) || label.contains(low.trim()));
+        let score = tokens + if contained { 3 } else { 0 };
+        if score > best_score {
+            best_score = score;
+            best = Some(i);
+        }
+    }
+    (best_score > 0).then_some(best).flatten()
+}
+
+/// Parse a 1-based ordinal/cardinal position ("second" / "2nd" / "pane 2" / "#3").
+fn ordinal_position(low: &str) -> Option<usize> {
+    const WORDS: &[(&str, usize)] = &[
+        ("first", 1), ("1st", 1), ("second", 2), ("2nd", 2), ("third", 3), ("3rd", 3),
+        ("fourth", 4), ("4th", 4), ("fifth", 5), ("5th", 5), ("sixth", 6), ("6th", 6),
+        ("seventh", 7), ("7th", 7), ("eighth", 8), ("8th", 8), ("ninth", 9), ("9th", 9),
+        ("tenth", 10), ("10th", 10),
+    ];
+    for (w, k) in WORDS {
+        if low.contains(w) {
+            return Some(*k);
+        }
+    }
+    for tok in low.split(|c: char| !c.is_ascii_digit()) {
+        if let Ok(k) = tok.parse::<usize>() {
+            if (1..=12).contains(&k) {
+                return Some(k);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -233,5 +383,31 @@ mod tests {
         assert_eq!(r.role.as_deref(), Some("button"));
         assert_eq!(r.label.as_deref(), Some("Submit"));
         assert_eq!(r.provenance, vec![Source::AtSpi]);
+    }
+
+    #[test]
+    fn locate_ordinal_positional_and_label() {
+        let regions = vec![
+            Region::new(PixelRect { x: 0, y: 0, w: 100, h: 500 }, Source::AtSpi, Granularity::Pane, 0.9),
+            Region::new(PixelRect { x: 200, y: 0, w: 100, h: 500 }, Source::AtSpi, Granularity::Pane, 0.9),
+            Region::new(PixelRect { x: 400, y: 0, w: 100, h: 500 }, Source::AtSpi, Granularity::Pane, 0.9),
+            Region::new(PixelRect { x: 50, y: 50, w: 60, h: 20 }, Source::AtSpi, Granularity::Element, 0.9)
+                .with_role("push button")
+                .with_label("Cancel"),
+        ];
+        assert_eq!(locate("focus on the second pane", &regions), Some(1)); // ordinal
+        assert_eq!(locate("the rightmost pane", &regions), Some(2)); // positional
+        assert_eq!(locate("the Cancel button", &regions), Some(3)); // label/role
+    }
+
+    #[test]
+    fn assign_parents_nests_by_containment() {
+        let mut regions = vec![
+            Region::new(PixelRect { x: 0, y: 0, w: 1000, h: 1000 }, Source::Wm, Granularity::Window, 0.98),
+            Region::new(PixelRect { x: 100, y: 100, w: 200, h: 200 }, Source::AtSpi, Granularity::Element, 0.9),
+        ];
+        assign_parents(&mut regions);
+        assert_eq!(regions[1].parent, Some(0), "element nests under the window");
+        assert_eq!(regions[0].parent, None, "window has no container");
     }
 }

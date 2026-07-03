@@ -953,7 +953,7 @@ async fn run_displays(_args: &[String]) -> Result<()> {
 ///   `--depth pane|element|text`   also walk the AT-SPI tree (default: element)
 /// Every region carries `source` + `trust` + (structural) `role`/`label`.
 async fn run_regions(args: &[String]) -> Result<()> {
-    use gentle_eye::regions::{detect, Granularity};
+    use gentle_eye::regions::{detect, locate, Granularity};
     let depth = if args.iter().any(|a| a == "--window") {
         Granularity::Window
     } else {
@@ -964,15 +964,17 @@ async fn run_regions(args: &[String]) -> Result<()> {
             _ => Granularity::Element, // default: WM + AT-SPI structural tree
         }
     };
+    let query = flag(args, "--match").map(str::to_string);
     // detect() does blocking work (x11 + a spawned AT-SPI runtime) — keep it off the async thread.
     let regions = tokio::task::spawn_blocking(move || detect(depth)).await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "count": regions.len(),
-            "regions": regions,
-        }))?
-    );
+    let json = if let Some(q) = query {
+        // `--match "<nl>"` → resolve to the single best region (ordinal/position/label, no VLM).
+        let matched = locate(&q, &regions).map(|i| &regions[i]);
+        serde_json::json!({ "query": q, "matched": matched })
+    } else {
+        serde_json::json!({ "count": regions.len(), "regions": regions })
+    };
+    println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
 }
 
