@@ -954,6 +954,19 @@ async fn run_displays(_args: &[String]) -> Result<()> {
 /// Every region carries `source` + `trust` + (structural) `role`/`label`.
 async fn run_regions(args: &[String]) -> Result<()> {
     use gentle_eye::regions::{detect, locate, Granularity};
+    // `--contrast [--display N]` → the salient high-contrast content region (pixel fallback for
+    // windowless / AT-SPI-less content). Separate from the structural union.
+    if args.iter().any(|a| a == "--contrast") {
+        use gentle_eye::regions::providers::contrast::ContrastProvider;
+        let display: usize = flag(args, "--display").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let region =
+            tokio::task::spawn_blocking(move || ContrastProvider::salient_region(display).ok().flatten()).await?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "contrast_display": display, "region": region }))?
+        );
+        return Ok(());
+    }
     let depth = if args.iter().any(|a| a == "--window") {
         Granularity::Window
     } else {

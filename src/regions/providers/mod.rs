@@ -5,4 +5,5 @@
 //! - (later) `atspi`, `segment`, `contrast`, `ocr`, `yolo`, `vlm`.
 
 pub mod atspi;
+pub mod contrast;
 pub mod wm;
