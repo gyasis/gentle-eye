@@ -76,6 +76,7 @@ async fn main() -> ExitCode {
         "preview" => run_preview(rest).await,
         "screenshot" => run_screenshot(rest).await,
         "segment" => run_segment(rest).await,
+        "regions" => run_regions(rest).await,
         "redpen-list" => run_redpen_list(rest).await,
         "redpen-analyze" => run_redpen_analyze(rest).await,
         "help" | "-h" | "--help" => {
@@ -944,6 +945,34 @@ async fn run_read_text(args: &[String]) -> Result<()> {
 async fn run_displays(_args: &[String]) -> Result<()> {
     let displays = DisplayManager::list_available()?;
     println!("{}", serde_json::to_string_pretty(&displays)?);
+    Ok(())
+}
+
+/// `regions` — the Region engine (E5): fused window/element regions as JSON.
+///   `--window`            window-level only (WM / EWMH), fastest
+///   `--depth pane|element|text`   also walk the AT-SPI tree (default: element)
+/// Every region carries `source` + `trust` + (structural) `role`/`label`.
+async fn run_regions(args: &[String]) -> Result<()> {
+    use gentle_eye::regions::{detect, Granularity};
+    let depth = if args.iter().any(|a| a == "--window") {
+        Granularity::Window
+    } else {
+        match flag(args, "--depth") {
+            Some("window") => Granularity::Window,
+            Some("pane") => Granularity::Pane,
+            Some("text") => Granularity::Text,
+            _ => Granularity::Element, // default: WM + AT-SPI structural tree
+        }
+    };
+    // detect() does blocking work (x11 + a spawned AT-SPI runtime) — keep it off the async thread.
+    let regions = tokio::task::spawn_blocking(move || detect(depth)).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "count": regions.len(),
+            "regions": regions,
+        }))?
+    );
     Ok(())
 }
 

@@ -44,6 +44,7 @@ pub mod startup;
 pub mod storage;
 pub mod preview;
 pub mod target;
+pub mod regions;
 
 // Convenience re-exports for library consumers — the one-call facade plus the
 // types those calls return/accept, so `use gentle_eye::{record, VisionConfig};`
