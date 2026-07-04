@@ -88,7 +88,7 @@ impl ContrastProvider {
             while let Some(c) = stack.pop() {
                 comp.push(c);
                 let (cx, cy) = (c % GRID_X, c / GRID_X);
-                let mut push = |nx: usize, ny: usize, stack: &mut Vec<usize>, visited: &mut [bool]| {
+                let push = |nx: usize, ny: usize, stack: &mut Vec<usize>, visited: &mut [bool]| {
                     let nc = ny * GRID_X + nx;
                     if content[nc] && !visited[nc] {
                         visited[nc] = true;
