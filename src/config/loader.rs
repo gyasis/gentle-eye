@@ -63,9 +63,23 @@ fn apply_env_overrides(config: &mut AppConfig) {
         }
     }
 
-    // OLLAMA_HOST -> vision.ollama_host
-    if let Ok(host) = std::env::var("OLLAMA_HOST") {
-        config.vision.ollama_host = host;
+    // OLLAMA_HOST -> vision.ollama_host (+ port). Accepts a bare host, "host:port", or a full
+    // URL ("http://host:port[/]") and normalizes it so the downstream `http://{host}:{port}`
+    // formatter never doubles the scheme/port. (fix 2026-06-27: env held a full URL -> doubled.)
+    if let Ok(raw) = std::env::var("OLLAMA_HOST") {
+        let s = raw.trim();
+        let s = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")).unwrap_or(s);
+        let s = s.split('/').next().unwrap_or(s); // drop any path / trailing slash
+        match s.rsplit_once(':') {
+            Some((h, p)) if !h.is_empty() => {
+                config.vision.ollama_host = h.to_string();
+                if let Ok(port) = p.parse::<u16>() {
+                    config.vision.ollama_port = port;
+                }
+            }
+            _ if !s.is_empty() => config.vision.ollama_host = s.to_string(),
+            _ => {}
+        }
     }
 
     // OLLAMA_PORT -> vision.ollama_port
