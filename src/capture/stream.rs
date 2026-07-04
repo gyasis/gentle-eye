@@ -111,9 +111,14 @@ fn build_ffmpeg_args(stream_url: &str, out: &Path, crop: Option<PixelRect>) -> V
     args
 }
 
-/// Encode a tightly-packed BGRA buffer to a PNG via ffmpeg's `rawvideo`
-/// demuxer — no `image`-crate dependency (Phase-1 dep discipline). Used for the
-/// `define_target` confirmation image of a display crop.
+/// Encode a tightly-packed BGRA buffer to a PNG via ffmpeg's `rawvideo` demuxer.
+///
+/// IMPORTANT — input is `-pix_fmt bgr0`, NOT `bgra`: scrap's captured frames carry an
+/// UNRELIABLE alpha channel (frequently all-zero / transparent on X11). Feeding `bgra`
+/// makes ffmpeg emit a fully-transparent RGBA PNG that renders BLANK/white even though the
+/// RGB is present (the file is full-size — it just composites away to nothing). `bgr0`
+/// treats the 4th byte as padding, so output is always OPAQUE. Root-caused 2026-06-27:
+/// `gentle-eye segment` per-panel crops came out blank/white solely because of this.
 pub fn write_bgra_png(
     bgra: &[u8],
     width: u32,
@@ -133,7 +138,7 @@ pub fn write_bgra_png(
             "-f",
             "rawvideo",
             "-pix_fmt",
-            "bgra",
+            "bgr0", // NOT bgra — scrap alpha is unreliable (0 on X11) → transparent/blank PNG
             "-s",
             &format!("{width}x{height}"),
             "-i",
