@@ -266,6 +266,57 @@ pub fn locate(query: &str, regions: &[Region]) -> Option<usize> {
     spatial_pick(&low, regions, &pool).or_else(|| label_match(&low, regions, &pool))
 }
 
+/// OCR fallback for `locate` (Phase-3-lite): when the structural pick fails, crop the FRAME to each
+/// region and pick the region whose on-screen TEXT best matches the query's content words. Enables
+/// content-named focus ("the youtube panel") in no-a11y apps where WM titles / AT-SPI don't carry
+/// the word. `frame_png` is the caller's screenshot of the watched display (display-local pixels);
+/// `origin` is that display's screen origin, so screen-absolute region bboxes map to frame-local
+/// crops. Returns the best-scoring region index, or `None` if nothing matches.
+pub fn locate_ocr(query: &str, regions: &[Region], frame_png: &str, origin: (i64, i64)) -> Option<usize> {
+    let words = content_words(query);
+    if words.is_empty() || regions.is_empty() {
+        return None;
+    }
+    let img = image::open(frame_png).ok()?;
+    let (fw, fh) = (img.width() as i64, img.height() as i64);
+    let mut best: Option<(usize, usize)> = None; // (region index, match score)
+    for (i, r) in regions.iter().enumerate() {
+        let x = (r.bbox.x as i64 - origin.0).clamp(0, fw - 1);
+        let y = (r.bbox.y as i64 - origin.1).clamp(0, fh - 1);
+        let w = (r.bbox.w as i64).min(fw - x).max(1);
+        let h = (r.bbox.h as i64).min(fh - y).max(1);
+        let crop = img.crop_imm(x as u32, y as u32, w as u32, h as u32);
+        let tmp = std::env::temp_dir().join(format!("ge-locate-ocr-{i}.png"));
+        if crop.save(&tmp).is_err() {
+            continue;
+        }
+        let text = crate::analysis::ocr::ocr_image(&tmp).unwrap_or_default().to_lowercase();
+        let _ = std::fs::remove_file(&tmp);
+        let score = words.iter().filter(|w| text.contains(w.as_str())).count();
+        if score > 0 && best.map_or(true, |(_, bs)| score > bs) {
+            best = Some((i, score));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Query words minus focus-verbs + generic region nouns → the meaningful CONTENT words to match
+/// against on-screen text (so "focus on the youtube panel" → `["youtube"]`).
+fn content_words(query: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "focus", "the", "please", "show", "watch", "look", "into", "that", "this", "onto", "lock",
+        "grab", "zoom", "capture", "panel", "pane", "window", "region", "screen", "view", "part",
+        "section", "area", "thing", "side", "left", "right", "top", "bottom", "middle", "center",
+        "centre", "upper", "lower", "first", "second", "third", "fourth", "fifth",
+    ];
+    query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2 && !STOP.contains(w))
+        .map(|w| w.to_string())
+        .collect()
+}
+
 fn spatial_pick(low: &str, regions: &[Region], pool: &[usize]) -> Option<usize> {
     let vertical = ["top", "bottom", "upper", "lower"].iter().any(|k| low.contains(k));
     let mut order = pool.to_vec();
