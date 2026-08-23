@@ -40,7 +40,7 @@ Verified on `main` 2026-08-23: ~581 lines, 7 passing tests. Listed as a table, d
 
 ## Phase 1: Setup
 
-- [ ] T001 Mirror this file to `.dk/tasks.md` and verify the parse with dev-kid's own regexes — assert wave count and order, zero `<NO-ID>` tasks, zero phantom waves. `.dk/tasks.md` currently holds an unrelated preview-pane plan from 2026-05-30; dev-kid lite reads ONLY `.dk/tasks.md`, so an unmirrored run silently executes the wrong feature.
+- [x] T001 Mirror this file to `.dk/tasks.md` and verify the parse with dev-kid's own regexes — assert wave count and order, zero `<NO-ID>` tasks, zero phantom waves. `.dk/tasks.md` currently holds an unrelated preview-pane plan from 2026-05-30; dev-kid lite reads ONLY `.dk/tasks.md`, so an unmirrored run silently executes the wrong feature.
       `> DONE:` `.dk/tasks.md` matches this file; a parse dump prints the expected wave→task mapping with 0 missing ids.
 - [ ] T002 [P] Enable the `screensaver` feature on the pinned `x11rb` dependency in `Cargo.toml`, with a comment stating it backs Dayflow idle detection (research R2). No new crates.
       `> DONE:` `cargo check` green; the feature addition carries its justifying comment.

@@ -50,3 +50,8 @@ dev-kid.yml
 ralph.config.yaml
 ralph-tiers.json
 ralph-tiers.full-13.bak.json
+
+# dev-kid generated wave plan — regenerate with `dev-kid orchestrate`.
+# NOT tracked: a stale plan for a different feature was committed once and would
+# have silently executed the wrong waves (task ids collide across features).
+execution_plan.json
