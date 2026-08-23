@@ -530,7 +530,16 @@ fn build_vision_provider(
         max_video_size_bytes: 0, // 0 => provider default
     };
     let provider: Arc<dyn VisionProvider> = if cfg.provider == "ollama" {
-        let url = format!("http://{}:{}", cfg.ollama_host, cfg.ollama_port);
+        // A full URL in `ollama_host` (scheme, and possibly a path such as the
+        // Atelier governor's /llm/ollama lane) is used verbatim; a bare host still
+        // gets the host:port treatment.
+        let url = if cfg.ollama_host.starts_with("http://")
+            || cfg.ollama_host.starts_with("https://")
+        {
+            cfg.ollama_host.clone()
+        } else {
+            format!("http://{}:{}", cfg.ollama_host, cfg.ollama_port)
+        };
         Arc::new(OllamaProvider::with_url(&vision_config, url)?)
     } else {
         Arc::new(GeminiProvider::new(&vision_config)?)
