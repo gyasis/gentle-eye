@@ -42,9 +42,9 @@ Verified on `main` 2026-08-23: ~581 lines, 7 passing tests. Listed as a table, d
 
 - [x] T001 Mirror this file to `.dk/tasks.md` and verify the parse with dev-kid's own regexes — assert wave count and order, zero `<NO-ID>` tasks, zero phantom waves. `.dk/tasks.md` currently holds an unrelated preview-pane plan from 2026-05-30; dev-kid lite reads ONLY `.dk/tasks.md`, so an unmirrored run silently executes the wrong feature.
       `> DONE:` `.dk/tasks.md` matches this file; a parse dump prints the expected wave→task mapping with 0 missing ids.
-- [ ] T002 [P] Enable the `screensaver` feature on the pinned `x11rb` dependency in `Cargo.toml`, with a comment stating it backs Dayflow idle detection (research R2). No new crates.
+- [x] T002 [P] Enable the `screensaver` feature on the pinned `x11rb` dependency in `Cargo.toml`, with a comment stating it backs Dayflow idle detection (research R2). No new crates.
       `> DONE:` `cargo check` green; the feature addition carries its justifying comment.
-- [ ] T003 [P] Extend `DayflowConfig` in `src/config/mod.rs` — `segment_seconds` (replacing the assumption that `chunk_minutes` is uniform), `displays`, `idle` (threshold + hysteresis + enable), `perception` (text tier, reason tier, residency policy), `max_regions_per_segment`, `disk_budget_bytes`. Serde defaults for every field.
+- [x] T003 [P] Extend `DayflowConfig` in `src/config/mod.rs` — `segment_seconds` (replacing the assumption that `chunk_minutes` is uniform), `displays`, `idle` (threshold + hysteresis + enable), `perception` (text tier, reason tier, residency policy), `max_regions_per_segment`, `disk_budget_bytes`. Serde defaults for every field.
       `> DONE:` `DayflowConfig::default()` round-trips through the config loader; existing config files still parse.
 - [x] T004 [S] Prove the ffmpeg segment muxer at fractional fps in `tests/dayflow_segmentation.rs` — the schedule-critical UNVERIFIED item from research R1. A short live capture at a ~10-second interval must produce sequential files with the expected durations and one manifest line per boundary.
       `> DONE:` the probe passes and the exact working argument vector is recorded in `research.md`; if `-force_key_frames expr:` does not hold at 0.2–0.5 fps, STOP and record the fallback before building on it.

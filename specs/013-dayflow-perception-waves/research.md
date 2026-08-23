@@ -432,3 +432,37 @@ shape the design rather than the tests:
 2. **A deliberate pause is not degraded.** With idle-pause and manual off/on, "no segments
    recently" has three distinct causes: paused, switched off, and broken. Status must name
    which. Collapsing them is what makes a liveness signal useless in practice.
+
+
+---
+
+## R10 — Environment trap: `ar` is hijacked on this machine (found at T003)
+
+**Symptom**: `cargo check` passes, `cargo test` fails with
+`could not find native static library 'sqlite3', perhaps an -L flag is missing?`, and the build
+log is full of PromptChain Python logging that has no business in a C compile.
+
+**Cause**: `~/.local/bin/ar` is **not** GNU `ar`. It is a symlink to
+`~/Documents/code/dataengineer/autoresearch/bin/ar` — the "autoresearch" tool — and
+`~/.local/bin` precedes `/usr/bin` in `PATH` (positions 21 vs 26).
+
+The failure chain is deliberately confusing:
+
+1. the `cc` crate compiles `sqlite3.c` → `sqlite3.o` **successfully** (the `.o` is on disk);
+2. it then invokes `ar` to archive the object into `libsqlite3.a`;
+3. the autoresearch tool runs instead, prints PromptChain logs, and creates **no archive**;
+4. the build script still emits `cargo:rustc-link-lib=static=sqlite3`;
+5. rustc fails much later with a *linker* error naming a *library*, pointing nowhere near `ar`.
+
+**Blast radius is machine-wide, not project-local**: any Rust crate using the `cc` crate's
+`.compile()` (i.e. anything vendoring C) breaks the same way. The gentle-eye main checkout is
+unaffected only because it was built in May and the symlink is dated 21 June.
+
+**Applied fix (machine-local, scoped)**: `.tooling/bin/cargo` now exports
+`AR="${AR:-/usr/bin/ar}"` when `/usr/bin/ar` exists. Deliberately NOT in `.cargo/config.toml`
+— that file is committed and this repo also builds on macOS, where `/usr/bin/ar` is a
+different tool.
+
+**Real fix, which is the user's to make**: rename `~/.local/bin/ar`. Shadowing a core binutils
+name is a landmine for every C-building toolchain on the box, and the next victim will get an
+error just as far from the cause as this one was.

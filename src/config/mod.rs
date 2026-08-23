@@ -294,6 +294,54 @@ pub trait ConfigProvider: Send + Sync {
 // Dayflow configuration
 // ----------------------------------------------------------------------------
 
+fn default_segment_seconds() -> u32 {
+    900 // 15 minutes
+}
+
+fn default_idle_enabled() -> bool {
+    true
+}
+
+fn default_idle_threshold_seconds() -> u32 {
+    300 // 5 minutes
+}
+
+fn default_idle_hysteresis_seconds() -> u32 {
+    30
+}
+
+/// Neutral placeholder. The real governed-lane host is machine-local and is
+/// supplied by config file or environment — never committed here.
+fn default_perception_endpoint() -> String {
+    "http://127.0.0.1:11434".to_string()
+}
+
+/// `/api/generate`, NOT `/api/chat` — see [`PerceptionConfig`].
+fn default_perception_api_path() -> String {
+    "/api/generate".to_string()
+}
+
+fn default_text_model() -> String {
+    "deepseek-ocr:latest".to_string()
+}
+
+/// Pinned. Verbose variants collapse the model — see [`PerceptionConfig`].
+fn default_text_prompt() -> String {
+    "Free OCR.".to_string()
+}
+
+fn default_grounding_prompt() -> String {
+    "<image>\n<|grounding|>Convert the document to markdown.".to_string()
+}
+
+fn default_reason_model() -> String {
+    "ornith-1.5-9b:latest".to_string()
+}
+
+fn default_max_regions_per_segment() -> u32 {
+    12
+}
+
 fn default_chunk_minutes() -> u32 {
     15
 }
@@ -341,18 +389,191 @@ impl Default for RetentionConfig {
     }
 }
 
+/// Which displays dayflow captures.
+///
+/// Default is [`DisplaySelection::All`]: every attached display is captured and
+/// merged into ONE timeline, with each entry identifying its source display
+/// (FR-029). Decided 2026-08-23.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplaySelection {
+    /// Capture every attached display.
+    All,
+    /// Capture only these display indices.
+    Only(Vec<u32>),
+}
+
+impl Default for DisplaySelection {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+/// Idle-pause policy.
+///
+/// Capture PAUSES when the user goes idle and resumes on activity (FR-030/031);
+/// a paused interval is an explicit gap, never a degraded reading (FR-032).
+///
+/// Idle comes from the X11 MIT-SCREEN-SAVER idle counter, verified monotonic
+/// (T005). Lock detection is deliberately NOT part of this: the X saver `state`
+/// field is unusable under GNOME (reports 3, outside the documented 0/1/2
+/// range), and lock-based pausing was descoped 2026-08-23 — the idle threshold
+/// is the primary and sufficient trigger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdleConfig {
+    /// Pause capture while the user is idle.
+    #[serde(default = "default_idle_enabled")]
+    pub enabled: bool,
+    /// Idle seconds before capture pauses.
+    #[serde(default = "default_idle_threshold_seconds")]
+    pub threshold_seconds: u32,
+    /// Dwell applied to BOTH transitions so brief inactivity cannot thrash the
+    /// recorder into a burst of tiny segments.
+    #[serde(default = "default_idle_hysteresis_seconds")]
+    pub hysteresis_seconds: u32,
+}
+
+impl Default for IdleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_idle_enabled(),
+            threshold_seconds: default_idle_threshold_seconds(),
+            hysteresis_seconds: default_idle_hysteresis_seconds(),
+        }
+    }
+}
+
+/// Whether the text tier is held resident while a recording is active.
+///
+/// UNSETTLED — decided at T029, not here. Two measured facts pull opposite ways:
+/// the lane reported a model resident with an expiry hours out (suggesting the
+/// keep-alive is long and a pinger is pointless), yet a probe in the same
+/// session paid a 43.9 s cold load because a 32 GB tenant had evicted the OCR
+/// model, against 0.5–3.2 s warm. Default is [`ResidencyPolicy::OnDemand`]
+/// because it builds nothing and holds nothing until the question is settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidencyPolicy {
+    /// Keep the text tier warm for the duration of an active recording.
+    Resident,
+    /// Accept the reload cost; hold nothing between segments.
+    OnDemand,
+    /// Do not manage residency at all.
+    Off,
+}
+
+impl Default for ResidencyPolicy {
+    fn default() -> Self {
+        Self::OnDemand
+    }
+}
+
+/// Two-tier perception: cheap local text extraction, escalating to a vision
+/// model only for meaning (D6/D7).
+///
+/// # The endpoint is load-bearing
+///
+/// `api_path` defaults to `/api/generate`, **not** `/api/chat`. The text tier is
+/// an OCR specialist, not a chat model: routing it through the chat endpoint
+/// wraps the prompt in a chat template and the template bleeds into the output
+/// as `>user` / `>system` / `<|im_end|>` markers. Measured 2026-08-23 — same
+/// image and prompt, `/api/generate` returns clean verbatim text.
+///
+/// # The prompt is load-bearing
+///
+/// `text_prompt` is pinned. A verbose "transcribe verbatim, do not reformat"
+/// instruction does not degrade the answer, it destroys it: 42.9 s and 7366
+/// tokens of a degenerate repetition loop, returned with a 200 and no error.
+/// `Free OCR.` returned perfect text in 0.5 s warm.
+///
+/// # No host here
+///
+/// `endpoint` deliberately defaults to a neutral loopback address. The real
+/// governed-lane host is machine-local and supplied by config file or
+/// environment — never committed to this repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerceptionConfig {
+    /// Base URL of the governed model lane. Supply the real host via config or
+    /// environment; the default is a neutral placeholder.
+    #[serde(default = "default_perception_endpoint")]
+    pub endpoint: String,
+    /// Generation path. MUST be `/api/generate` for the text tier — see the
+    /// type-level docs.
+    #[serde(default = "default_perception_api_path")]
+    pub api_path: String,
+    /// Text tier: the cheap OCR specialist that handles nearly all volume.
+    #[serde(default = "default_text_model")]
+    pub text_model: String,
+    /// Pinned text-extraction prompt. Do not make this verbose.
+    #[serde(default = "default_text_prompt")]
+    pub text_prompt: String,
+    /// Prompt that additionally returns per-block bounding boxes, at roughly 6x
+    /// the latency of `text_prompt`. Used deliberately when intra-region layout
+    /// is wanted, never as the default path.
+    #[serde(default = "default_grounding_prompt")]
+    pub grounding_prompt: String,
+    /// Reason tier: spent only on semantic or relational questions.
+    #[serde(default = "default_reason_model")]
+    pub reason_model: String,
+    /// Whether the text tier is held resident during a recording.
+    #[serde(default)]
+    pub residency: ResidencyPolicy,
+    /// Hard cap on regions perceived per segment per display. Bounds work at the
+    /// source so the rate-limit budget is a safety net rather than the shaper.
+    #[serde(default = "default_max_regions_per_segment")]
+    pub max_regions_per_segment: u32,
+}
+
+impl Default for PerceptionConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: default_perception_endpoint(),
+            api_path: default_perception_api_path(),
+            text_model: default_text_model(),
+            text_prompt: default_text_prompt(),
+            grounding_prompt: default_grounding_prompt(),
+            reason_model: default_reason_model(),
+            residency: ResidencyPolicy::default(),
+            max_regions_per_segment: default_max_regions_per_segment(),
+        }
+    }
+}
+
 /// Dayflow-mode settings (continuous recording → chunk summarization → timeline).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DayflowConfig {
-    /// On-the-fly chunk length in minutes (matches Gemini ~1fps native sampling math).
+    /// Segment length in SECONDS — the authoritative interval (FR-034).
+    ///
+    /// User-configurable to any value and changeable mid-day; a change takes
+    /// effect at the next boundary and never re-times an existing entry
+    /// (FR-035). Seconds rather than minutes so short intervals are expressible
+    /// for tests and smoke runs.
+    ///
+    /// A day may therefore contain segments of DIFFERENT lengths. Nothing
+    /// downstream may derive a duration by multiplying a count by this value —
+    /// always read the segment's own recorded start and end.
+    #[serde(default = "default_segment_seconds")]
+    pub segment_seconds: u32,
+    /// Legacy interval in minutes, retained so existing config files keep
+    /// parsing. [`DayflowConfig::segment_duration`] is the accessor to use;
+    /// `segment_seconds` wins.
     #[serde(default = "default_chunk_minutes")]
     pub chunk_minutes: u32,
     /// Low capture fps for dayflow (timelapse tier).
     #[serde(default = "default_record_fps")]
     pub record_fps: f32,
-    /// Default summarization provider: "gemini" (cloud, default) or "ollama" (local).
+    /// Default summarization provider: "gemini" (cloud, opt-in) or "ollama" (local).
     #[serde(default = "default_dayflow_provider")]
     pub default_provider: String,
+    /// Which displays are captured (FR-029).
+    #[serde(default)]
+    pub displays: DisplaySelection,
+    /// Idle-pause policy (FR-030/031/032).
+    #[serde(default)]
+    pub idle: IdleConfig,
+    /// Two-tier perception configuration (D6/D7/D8).
+    #[serde(default)]
+    pub perception: PerceptionConfig,
     /// Retention / shrink / evict policy.
     #[serde(default)]
     pub retention: RetentionConfig,
@@ -361,11 +582,40 @@ pub struct DayflowConfig {
 impl Default for DayflowConfig {
     fn default() -> Self {
         Self {
+            segment_seconds: default_segment_seconds(),
             chunk_minutes: default_chunk_minutes(),
             record_fps: default_record_fps(),
             default_provider: default_dayflow_provider(),
+            displays: DisplaySelection::default(),
+            idle: IdleConfig::default(),
+            perception: PerceptionConfig::default(),
             retention: RetentionConfig::default(),
         }
+    }
+}
+
+impl DayflowConfig {
+    /// The configured segment length.
+    ///
+    /// `segment_seconds` is authoritative; `chunk_minutes` is consulted only
+    /// when `segment_seconds` is zero, so a legacy config file that sets only
+    /// the old key still behaves as its author intended.
+    pub fn segment_duration(&self) -> std::time::Duration {
+        let secs = if self.segment_seconds > 0 {
+            u64::from(self.segment_seconds)
+        } else {
+            u64::from(self.chunk_minutes) * 60
+        };
+        std::time::Duration::from_secs(secs)
+    }
+
+    /// Full URL the perception tiers post to.
+    pub fn perception_url(&self) -> String {
+        format!(
+            "{}{}",
+            self.perception.endpoint.trim_end_matches('/'),
+            &self.perception.api_path
+        )
     }
 }
 
@@ -576,6 +826,81 @@ mod tests {
     fn test_validate_valid_config() {
         let config = AppConfig::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn dayflow_default_round_trips_through_toml() {
+        let cfg = DayflowConfig::default();
+        let text = toml::to_string(&cfg).expect("serialize");
+        let back: DayflowConfig = toml::from_str(&text).expect("deserialize");
+        assert_eq!(back.segment_seconds, cfg.segment_seconds);
+        assert_eq!(back.perception.api_path, cfg.perception.api_path);
+        assert_eq!(back.perception.text_model, cfg.perception.text_model);
+        assert_eq!(back.idle.threshold_seconds, cfg.idle.threshold_seconds);
+        assert_eq!(back.displays, cfg.displays);
+    }
+
+    #[test]
+    fn legacy_config_with_only_chunk_minutes_still_parses() {
+        // A config file written before `segment_seconds` existed must keep working
+        // and must keep meaning what its author intended (FR-035 back-compat).
+        let cfg: DayflowConfig =
+            toml::from_str("chunk_minutes = 30\nsegment_seconds = 0\n").expect("legacy parse");
+        assert_eq!(cfg.chunk_minutes, 30);
+        assert_eq!(cfg.segment_duration().as_secs(), 30 * 60);
+    }
+
+    #[test]
+    fn segment_seconds_wins_over_legacy_chunk_minutes() {
+        let cfg: DayflowConfig =
+            toml::from_str("chunk_minutes = 15\nsegment_seconds = 1800\n").expect("parse");
+        assert_eq!(cfg.segment_duration().as_secs(), 1800);
+    }
+
+    #[test]
+    fn perception_uses_generate_not_chat() {
+        // Measured 2026-08-23: the text tier is an OCR specialist, not a chat
+        // model. /api/chat wraps the prompt in a chat template and the template
+        // bleeds into the output as >user / >system / <|im_end|> markers.
+        let cfg = DayflowConfig::default();
+        assert_eq!(cfg.perception.api_path, "/api/generate");
+        assert!(!cfg.perception.api_path.contains("chat"));
+        assert!(cfg.perception_url().ends_with("/api/generate"));
+    }
+
+    #[test]
+    fn text_prompt_stays_terse() {
+        // A verbose instruction does not degrade this model, it destroys it:
+        // 42.9s and 7366 tokens of a degenerate repetition loop, returned with a
+        // 200 and no error. Guard the pinned prompt against well-meaning edits.
+        let cfg = DayflowConfig::default();
+        assert!(
+            cfg.perception.text_prompt.len() < 40,
+            "text prompt must stay terse, got {} chars: {:?}",
+            cfg.perception.text_prompt.len(),
+            cfg.perception.text_prompt
+        );
+        assert!(!cfg.perception.text_prompt.to_lowercase().contains("do not"));
+    }
+
+    #[test]
+    fn perception_endpoint_leaks_no_private_host() {
+        // This repository is public. The governed-lane host is machine-local and
+        // must never be committed (see the crate's dependency/infra hygiene).
+        let cfg = DayflowConfig::default();
+        let ep = &cfg.perception.endpoint;
+        assert!(
+            ep.contains("127.0.0.1") || ep.contains("localhost"),
+            "default perception endpoint must be neutral loopback, got {ep:?}"
+        );
+        for leak in ["192.168.", "10.", "172.16.", ".local"] {
+            assert!(!ep.contains(leak), "endpoint leaks a private host: {ep:?}");
+        }
+    }
+
+    #[test]
+    fn dayflow_captures_all_displays_by_default() {
+        assert_eq!(DayflowConfig::default().displays, DisplaySelection::All);
     }
 
     #[test]
