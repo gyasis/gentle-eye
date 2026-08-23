@@ -245,6 +245,37 @@ fn build_ollama_request(model: &str, prompt: &str, images: &[String]) -> Value {
 }
 
 /// Extract the response text + `eval_count` token estimate from an Ollama reply.
+/// Strip a reasoning ("thinking") preamble from a model response.
+///
+/// Thinking-capable vision models (`ornith-1.5-*`, `qwen3-vl:*`, `gemma4:*`) emit their
+/// chain-of-thought before the answer, terminated by `</think>`. Ollama's `/api/generate`
+/// returns that inline in `response`, so without this the caller receives the model's
+/// deliberation prepended to — and often far longer than — the actual answer.
+/// Measured 2026-08-23 against `ornith-1.5-9b` through the Atelier governor: roughly 60%
+/// of `analysis_text` was reasoning noise ("Let me carefully transcribe… Actually, let me
+/// re-read…") ahead of the real transcription.
+///
+/// Deliberately conservative:
+/// - only acts when a close tag is actually present (non-thinking models are untouched),
+/// - splits on the LAST `</think>` so nested/repeated blocks collapse correctly,
+/// - never returns empty — a response that is *entirely* reasoning is passed through
+///   as-is rather than silently becoming "", since a wrong-but-present answer is far
+///   easier to debug than a blank one.
+fn strip_reasoning(text: &str) -> String {
+    const CLOSE: &str = "</think>";
+    match text.rfind(CLOSE) {
+        Some(i) => {
+            let tail = text[i + CLOSE.len()..].trim();
+            if tail.is_empty() {
+                text.trim().to_string()
+            } else {
+                tail.to_string()
+            }
+        }
+        None => text.trim().to_string(),
+    }
+}
+
 fn parse_ollama_response(body: &str) -> Result<(String, Option<u32>), VisionError> {
     let v: Value = serde_json::from_str(body).map_err(|e| VisionError::ApiError {
         message: format!("invalid JSON from Ollama: {e}"),
@@ -256,14 +287,12 @@ fn parse_ollama_response(body: &str) -> Result<(String, Option<u32>), VisionErro
             status_code: None,
         });
     }
-    let text = v
-        .get("response")
-        .and_then(Value::as_str)
-        .ok_or_else(|| VisionError::ApiError {
+    let text = strip_reasoning(v.get("response").and_then(Value::as_str).ok_or_else(|| {
+        VisionError::ApiError {
             message: "Ollama response contained no 'response' field".to_string(),
             status_code: None,
-        })?
-        .to_string();
+        }
+    })?);
     let token_count = v.get("eval_count").and_then(Value::as_u64).map(|t| t as u32);
     Ok((text, token_count))
 }
@@ -446,5 +475,29 @@ mod tests {
     fn validates_inputs() {
         assert!(validate_prompt("  ").is_err());
         assert!(validate_timeframe(&TimeRange { start_seconds: 2.0, end_seconds: 1.0 }).is_err());
+    }
+
+    #[test]
+    fn strip_reasoning_removes_think_preamble() {
+        let raw = "Let me look carefully.\nActually, re-reading.\n</think>\n\nTwo things I did not do";
+        assert_eq!(strip_reasoning(raw), "Two things I did not do");
+    }
+
+    #[test]
+    fn strip_reasoning_leaves_plain_text_untouched() {
+        assert_eq!(strip_reasoning("  a plain answer  "), "a plain answer");
+    }
+
+    #[test]
+    fn strip_reasoning_never_returns_empty() {
+        // entirely reasoning, no answer after the close tag -> pass through, never ""
+        let raw = "thinking hard</think>   ";
+        assert_eq!(strip_reasoning(raw), "thinking hard</think>");
+    }
+
+    #[test]
+    fn strip_reasoning_splits_on_last_close_tag() {
+        let raw = "a</think>b</think>final";
+        assert_eq!(strip_reasoning(raw), "final");
     }
 }
