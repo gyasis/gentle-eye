@@ -458,11 +458,35 @@ The failure chain is deliberately confusing:
 `.compile()` (i.e. anything vendoring C) breaks the same way. The gentle-eye main checkout is
 unaffected only because it was built in May and the symlink is dated 21 June.
 
-**Applied fix (machine-local, scoped)**: `.tooling/bin/cargo` now exports
-`AR="${AR:-/usr/bin/ar}"` when `/usr/bin/ar` exists. Deliberately NOT in `.cargo/config.toml`
-— that file is committed and this repo also builds on macOS, where `/usr/bin/ar` is a
-different tool.
+**RESOLVED AT THE ROOT 2026-08-23** — not worked around.
 
-**Real fix, which is the user's to make**: rename `~/.local/bin/ar`. Shadowing a core binutils
-name is a landmine for every C-building toolchain on the box, and the next victim will get an
-error just as far from the cause as this one was.
+An audit of `~/.local/bin` found six entries shadowing system binaries; only `ar` was
+toolchain-critical (`ab`, `gh`, `claude`, `mako-render`, `wsdump` are benign or intentional).
+
+Fix applied, in this order so the tool was never unreachable:
+
+1. added `~/.local/bin/ares` and `~/.local/bin/autoresearch`, both → the same entrypoint;
+2. verified `ares` runs the tool;
+3. removed `~/.local/bin/ar`;
+4. confirmed `ar` now resolves to `/usr/bin/ar`, **GNU ar 2.38**;
+5. the nine `ar-*` siblings were left untouched — none of them shadow anything.
+
+**Verified the root fix stands on its own**: the local `AR` workaround was *disabled*,
+`libsqlite3-sys` was cleaned (29 files, 29.2 MiB removed) and rebuilt from scratch. This time
+`out/libsqlite3.a` **was produced** and the suite returned 50/50 green. The workaround was then
+deleted rather than left to rot — a stopgap for a fixed bug is future confusion.
+
+`~/.claude/skills/autoresearch/SKILL.md` was updated too (11 references `ar` → `ares`, backed
+up first). It is the agent-facing instruction surface, so leaving it would have told a future
+agent to feed a research brief to GNU ar.
+
+**Still stale, not touched** (the user's repo, offered rather than edited): docs under
+`~/Documents/code/dataengineer/autoresearch/` — `README.md`, `briefs/README.md`,
+`docs/ENGINE.md` — still document `ar run …`. Functionally harmless, but they now name a
+command that is binutils.
+
+**The transferable lesson**: a PATH shadow does not fail where it is installed. It fails inside
+whatever tool happens to invoke the shadowed name, one or two layers down, with an error that
+describes the *symptom* (`could not find native static library`) and never the *cause*. When a
+build fails with output from an unrelated program in it — here, PromptChain logging inside a C
+compile — suspect a PATH shadow before suspecting the build.
