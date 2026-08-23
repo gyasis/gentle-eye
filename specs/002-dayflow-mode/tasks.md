@@ -75,6 +75,19 @@ Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
 - [x] T233 [S] Map-Reduce end-to-end (stub provider) — 3 chunks → 3 structured entries with threaded context + 1 digest.
       `> DONE:` integration test green; `cargo check` + clippy `-D warnings` = 0.
 
+## Wave 3A — Two-tier perception ladder: OCR base + VLM escalation (Amendment A · supersedes D2) `[S]`
+
+Measured 2026-08-23 on a live 1920x1080 ATEM frame through the Atelier governor.
+Dayflow is an OCR-THROUGHPUT problem, not a vision-understanding problem: at 0.5 fps
+all day, a general VLM per chunk cannot keep up. Spend the vision model only on meaning.
+
+- [ ] T300 [P] `analysis/` — add an OCR-tier provider over `deepseek-ocr:3.3b` (governed lane, no `think` tag). Text extraction ONLY; must not be routed through the VLM path.
+      `> DONE:` a frame returns text in under 5s warm; unit test with a stub provider; `cargo check` green.
+- [ ] T301 [P] Region-crop BEFORE OCR — feed the OCR tier full-res crops from the region cascade (`regions/`), never a downscaled full frame. Reuse `target` / `measure_target`; no new detection code (see `docs/REGION_ENGINE.md` §0).
+      `> DONE:` a two-pane frame yields per-pane text in correct reading order; a test asserts the full-frame column-scramble does NOT occur.
+- [ ] T302 [S] Tier router — OCR tier answers text queries; escalate to the VLM tier (`ornith-1.5-9b`) only for semantic/relational questions (category, "what was happening"). Escalation must be explicit and logged, never implicit.
+      `> DONE:` a text query resolves without loading a VLM; a semantic query escalates once; both paths covered by tests; `cargo check` + clippy `-D warnings` = 0.
+
 ## Wave 4 — Timeline store + real-time scheduler (PRD P3 · D4) `[S]`
 
 - [x] T240 `storage/database.rs` migration — `timeline_entries` table matching `TimelineEntry` columns EXACTLY (idempotent runner, `init_in_memory` for tests).
@@ -86,6 +99,18 @@ Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
 - [ ] T243 [S] `ask_day(question) -> String` — grounds Q&A on `query_range` entries (timeline as context to the provider).
       `> DONE:` `ask_day` over seeded entries returns a grounded answer (stub provider); `cargo check` + tests green.
 
+## Wave 4A — Structural timeline: regions carry the layout, OCR carries the text (Amendment A) `[S]`
+
+Cropping gives correct text but discards layout. Structure must come from the region
+cascade (`Region.parent` + `bbox` IS the layout tree), NOT from the OCR model. The
+schema is the expensive thing to reverse, so it carries geometry from day one even
+while only text is populated.
+
+- [ ] T310 `storage/database.rs` — additive migration extending `timeline_entries` with `region_id`, `bbox` (x,y,w,h), `parent_region_id`, all nullable. Idempotent; must not rewrite the T240 migration.
+      `> DONE:` migration is additive and re-runnable; existing rows survive; in-memory insert+select round-trips the new columns.
+- [ ] T311 [S] Join OCR text to the region tree on `RegionId` — reading order COMPUTED from bbox geometry, never requested from the model. `TimelineEntry` gains its region provenance.
+      `> DONE:` a two-pane capture yields entries whose parent/bbox reconstruct the on-screen layout; ordering test is deterministic; `cargo check` + tests green.
+
 ## Wave 5 — Both record models: session + daemon (PRD P4 · D3) `[S]`
 
 - [ ] T250 `src/dayflow/engine.rs` — `DayflowEngine` trait + impl: `start_session(opts)` / `stop_session(id)` / `status()`. Session mode honors a max duration (2h/5h/etc, capped per config).
@@ -94,6 +119,18 @@ Pure declarations to clear `E0583`/`E0433` so later waves compile incrementally.
       `> DONE:` daemon starts, auto-segments continuously, reports status, stops cleanly; test with a short interval.
 - [ ] T252 [S] Both modes share one pipeline — session + daemon both feed chunk→summarize→timeline.
       `> DONE:` parametrized test runs the pipeline in both modes; `cargo check` + tests green.
+
+## Wave 5A — Daemon liveness must be provable, not reported (Amendment A) `[S]`
+
+A long-lived capture daemon is the textbook false-green failure: it reports "started,
+healthy" while writing nothing, and a whole day of empty timeline looks fine until the
+next morning. See `~/.claude/antipatterns/background-jobs.md` (AP-BG2): verify the
+ARTIFACT, never the exit code or the status flag.
+
+- [ ] T330 Daemon status must carry evidence — `chunks_written`, `last_chunk_at`, `last_summary_at`. "Alive" and "alive but producing nothing" MUST be distinguishable by a caller.
+      `> DONE:` a daemon that captures zero chunks reports a distinguishable degraded status; test asserts the healthy path advances `chunks_written`.
+- [ ] T331 [S] Model residency vs governor idle-unload — cold load measured at 10.3s vs 2.6s warm, so a 15-min chunk cadence will always hit cold. Either keep the OCR tier resident or budget the reload; the choice must be explicit and configured.
+      `> DONE:` a multi-chunk run records per-chunk latency incl. any reload; config knob documented; `cargo check` + tests green.
 
 ## Wave 6 — Tiered retention: save → shrink → archive + disk guard (D5) `[S]`
 
@@ -150,6 +187,54 @@ escalation is the fallback only if you choose to invoke it on a stuck file.
   don't mangle the target), then re-check.
 - **Halt-and-fix:** any dev-kid / sentinel / ma-loop bug encountered = the valued
   finding. Stop, capture, fix the TOOL, resume. (This is the whole point of the dogfood.)
+
+
+---
+
+## Amendment A (2026-08-23) — measured perception ladder, structural timeline, daemon liveness
+
+Authored mid-build after the governor/vision work landed on `fix/ollama-governor-base-url`
+(commits `6b256ab`, `d2f5192`). Originals above are untouched and remain the audit trail;
+`T2xx` handles are permanent. New work uses the `T3xx` range.
+
+### A.1 — Evidence (measured, same live ATEM frame, via the Atelier governor)
+
+| path | warm latency | tokens | outcome |
+|---|---|---|---|
+| tesseract (`read-text`) | ~instant | n/a | garbled; roughly half unusable on dark-theme terminal text |
+| `deepseek-ocr:3.3b`, FULL frame | 2.6s (cold 10.3s) | 444 | near-verbatim BUT columns scrambled across panes; `CLI` misread as `CI` |
+| `deepseek-ocr:3.3b`, CROPPED pane | **1.6s** | **231** | correct order, `CLI` correct — faster, cheaper AND more accurate |
+| `ornith-1.5-9b` (VLM) | 39s | 787 | verbatim, but ~15x the cost of the OCR tier |
+
+Cropping won on every axis at once. This independently reproduces the
+`sparse-delta-perception` (Lookout) finding of 2026-06-27 — whole-screen single reads
+lose text to downscaling; a locked full-res region is more accurate AND cheaper. It also
+settled a disputed digit three ways (`18m 47s`), where the downscaled full-frame read
+was wrong.
+
+### A.2 — Decision amendments
+
+| # | Original | Amended | Why |
+|---|---|---|---|
+| D2 | Default vision provider = **Gemini**; Ollama = privacy fallback | **Two tiers.** Base = `deepseek-ocr:3.3b` (text). Escalation = `ornith-1.5-9b` (meaning). Cloud is opt-in, not default. | D2 predates the governed fleet (22 vision-capable models). Dayflow records the screen ALL DAY, making it the most privacy-sensitive surface in the toolkit — a cloud default is a decision, not an inheritance. |
+| D6 | *(new)* | **Low-compute first.** Never spend a vision model on a job OCR can do. | Streaming throughput, not intelligence, is the binding constraint. |
+| D7 | *(new)* | **Structure comes from the region cascade, text from OCR, joined on `RegionId`.** Reading order is computed from geometry. | Cropping alone discards layout. `Region.parent` + `bbox` already model it (`docs/REGION_ENGINE.md`), and it is far cheaper than asking any model. |
+| D8 | *(new)* | **All model calls route through the Atelier governor** (`:8799/llm/ollama`), never raw `:11434`. | Admission + auto-unload; raw access risks the unified-memory swap-death. Enabled by `6b256ab`; thinking-model output cleaned by `d2f5192`. |
+
+### A.3 — Sequencing (unchanged tasks, corrected expectations)
+
+`T220` (ffmpeg segment muxer) and `T242` (real-time scheduler) are **still open** despite
+their waves reading as complete — 13 of 32 boxes are ticked overall. Nothing in Wave 5 is
+testable until `T220` emits real chunk files, so run the waves in file order rather than
+jumping to Wave 5.
+
+### A.4 — Open, deliberately not decided here
+
+Whether `deepseek-ocr` can emit structured output directly (markdown / grounding
+bboxes) is **untested**; if it can, part of T311 may collapse into T300. `marker` was
+considered and set aside: its one advantage over the OCR tier is reading order, which
+T301 already solves with a bounding box, and it would add a multi-model Python pipeline
+inside a Rust daemon.
 
 ## Dev-kid LITE wiring prerequisites (do BEFORE `/devkid.orchestrate`)
 
