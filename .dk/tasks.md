@@ -48,8 +48,8 @@ Verified on `main` 2026-08-23: ~581 lines, 7 passing tests. Listed as a table, d
       `> DONE:` `DayflowConfig::default()` round-trips through the config loader; existing config files still parse.
 - [x] T004 [S] Prove the ffmpeg segment muxer at fractional fps in `tests/dayflow_segmentation.rs` — the schedule-critical UNVERIFIED item from research R1. A short live capture at a ~10-second interval must produce sequential files with the expected durations and one manifest line per boundary.
       `> DONE:` the probe passes and the exact working argument vector is recorded in `research.md`; if `-force_key_frames expr:` does not hold at 0.2–0.5 fps, STOP and record the fallback before building on it.
-- [ ] T005 [P] Prove the idle signal — a probe reading X11 screensaver idle-ms and blank state, run both locked and unlocked, confirming the two are distinguishable (research R2).
-      `> DONE:` probe output shows distinct locked vs unlocked readings; if unavailable, the detector's no-backend fallback is "never idle", never a permanent pause.
+- [x] T005 [P] Prove the idle signal — a probe reading X11 screensaver idle-ms and blank state, run both locked and unlocked, confirming the two are distinguishable (research R2).
+      `> DONE:` idle counter verified monotonic (+2000ms/2s). LOCK DETECTION DESCOPED 2026-08-23 (user: "we don't really lock the screen anyway") — idle threshold is the primary and sufficient trigger. The X saver `state` field is unusable here regardless (reports 3); if lock is ever wanted, use org.gnome.ScreenSaver D-Bus or logind LockedHint, never the X field. No-backend fallback stays "never idle", never a permanent pause.
 - [ ] T006 [P] Prove concurrent multi-display capture and read the governed lane's real idle-unload window (research R3, R5).
       `> DONE:` two concurrent capturers open without contention, or the round-robin fallback is recorded; the measured unload window is written into `research.md` rather than guessed.
 

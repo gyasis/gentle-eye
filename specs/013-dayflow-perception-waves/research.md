@@ -216,6 +216,41 @@ unusable. It must not become the text tier by default. Nothing in this feature s
 it, and it is not a fallback for the text tier: a silently-wrong transcript is worse than a
 missing one.
 
+**PROBED END-TO-END 2026-08-23 (pre-T026)** — the text tier works through the governor, and
+the prompt turns out to be load-bearing. Dark-theme image, DejaVuSansMono 34px, via
+`POST :8799/llm/ollama/api/chat` with `images:[<b64>]`:
+
+| prompt | latency / tokens | outcome |
+|---|---|---|
+| `<image>\n<\|grounding\|>Convert the document to markdown.` | 3.1s / 37 | **correct text, markdown headings, NO artifacts — use this** |
+| `<image>\nFree OCR.` (canonical) | 3.4s / 40 | correct text, leaks a `>user` role marker |
+| `Free OCR.` | 3.1s / 40 | correct text, leaks `>user` |
+| `Transcribe all text in this image exactly.` | 3.1s / 45 | correct text, interleaved `>user` / `>system` markers |
+| "Output the exact characters… do not summarise, do not reformat…" | 3.1s / 19 | **CATASTROPHIC** — ignored the image, returned `You are a helpful assistant. Ask me anything I can.` + a raw `<\|im_end\|>` token |
+
+**Three consequences, all binding on T026/T027:**
+
+1. **Pin the prompt.** `deepseek-ocr` is an OCR-specialist, NOT a general instruction-following
+   VLM. A verbose instruction does not degrade the answer — it *replaces* it with assistant
+   boilerplate, and **does not error while doing so**. For a grounded timeline that is the worst
+   possible failure shape: confident prose with no relationship to the screen. The prompt is
+   configuration-pinned and covered by a test that asserts the output is not boilerplate.
+2. **Extend the output sanitizer.** Every prompt except the grounding one leaks chat-template
+   role markers (`>user`, `>system`, `<|im_end|>`). This is the same class as the thinking-model
+   preamble stripped in `d2f5192` — that strip must grow to cover role/template artifacts.
+3. **Legibility is a fidelity cliff, and it is silent.** An identical first probe using PIL's
+   default ~11px bitmap font lost `cargo check --` from a line, returning
+   `## <message format="short">` — plausible, structured, and missing the command. At 34px every
+   prompt recovered the line perfectly. Nothing in the response signals the loss. This is an
+   independent confirmation of **T027 (crop at full resolution, never downscale)** from a
+   completely different direction than the original measurement.
+
+**A.4 OPEN QUESTION ANSWERED**: yes — `deepseek-ocr` emits structured markdown directly via the
+`<|grounding|>` prompt. Whether it also emits grounding *bounding boxes* is still untested, and
+is the only part of A.4 still open. Even if it does, **T034 keeps computing reading order from
+region geometry** (D7): a deterministic geometric sort is testable and repeatable, and a model's
+box output is neither.
+
 **Governor routing (D8)** is already enabled by commit `6b256ab` (path-prefixed base URL) with
 thinking-model preamble stripping from `d2f5192`. Both tiers therefore address
 `<governor>/llm/ollama`, never a raw model port. Nothing further is required in the provider.
