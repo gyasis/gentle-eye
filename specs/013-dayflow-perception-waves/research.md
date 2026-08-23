@@ -216,40 +216,73 @@ unusable. It must not become the text tier by default. Nothing in this feature s
 it, and it is not a fallback for the text tier: a silently-wrong transcript is worse than a
 missing one.
 
-**PROBED END-TO-END 2026-08-23 (pre-T026)** — the text tier works through the governor, and
-the prompt turns out to be load-bearing. Dark-theme image, DejaVuSansMono 34px, via
-`POST :8799/llm/ollama/api/chat` with `images:[<b64>]`:
+**PROBED END-TO-END 2026-08-23 (pre-T026). NOTE: an earlier version of this section was
+WRONG — corrected below after the user pointed to the prior working call.**
 
-| prompt | latency / tokens | outcome |
-|---|---|---|
-| `<image>\n<\|grounding\|>Convert the document to markdown.` | 3.1s / 37 | **correct text, markdown headings, NO artifacts — use this** |
-| `<image>\nFree OCR.` (canonical) | 3.4s / 40 | correct text, leaks a `>user` role marker |
-| `Free OCR.` | 3.1s / 40 | correct text, leaks `>user` |
-| `Transcribe all text in this image exactly.` | 3.1s / 45 | correct text, interleaved `>user` / `>system` markers |
-| "Output the exact characters… do not summarise, do not reformat…" | 3.1s / 19 | **CATASTROPHIC** — ignored the image, returned `You are a helpful assistant. Ask me anything I can.` + a raw `<\|im_end\|>` token |
+**The endpoint is the whole story: use `/api/generate`, NEVER `/api/chat`.**
 
-**Three consequences, all binding on T026/T027:**
+`deepseek-ocr` is not a chat model. Sending it through `/api/chat` wraps the prompt in a chat
+template, and the template bleeds into the output. Identical image, identical prompt
+(`Extract all text from this image verbatim.`):
 
-1. **Pin the prompt.** `deepseek-ocr` is an OCR-specialist, NOT a general instruction-following
-   VLM. A verbose instruction does not degrade the answer — it *replaces* it with assistant
-   boilerplate, and **does not error while doing so**. For a grounded timeline that is the worst
-   possible failure shape: confident prose with no relationship to the screen. The prompt is
-   configuration-pinned and covered by a test that asserts the output is not boilerplate.
-2. **Extend the output sanitizer.** Every prompt except the grounding one leaks chat-template
-   role markers (`>user`, `>system`, `<|im_end|>`). This is the same class as the thinking-model
-   preamble stripped in `d2f5192` — that strip must grow to cover role/template artifacts.
-3. **Legibility is a fidelity cliff, and it is silent.** An identical first probe using PIL's
-   default ~11px bitmap font lost `cargo check --` from a line, returning
-   `## <message format="short">` — plausible, structured, and missing the command. At 34px every
-   prompt recovered the line perfectly. Nothing in the response signals the loss. This is an
-   independent confirmation of **T027 (crop at full resolution, never downscale)** from a
-   completely different direction than the original measurement.
+| endpoint | output |
+|---|---|
+| **`/api/generate`** + top-level `prompt` + `images` | `DAYFLOW-PROBE-7742` / `cargo check --message-format=short` / `segment_time 900 fps 0.5 chunk_0003.mp4` — **clean, verbatim, zero artifacts** |
+| `/api/chat` + `messages[].images` | the same text interleaved with `>user` and `>system` role markers |
 
-**A.4 OPEN QUESTION ANSWERED**: yes — `deepseek-ocr` emits structured markdown directly via the
-`<|grounding|>` prompt. Whether it also emits grounding *bounding boxes* is still untested, and
-is the only part of A.4 still open. Even if it does, **T034 keeps computing reading order from
-region geometry** (D7): a deterministic geometric sort is testable and repeatable, and a model's
-box output is neither.
+An earlier draft of this section reported "chat-template artifacts leak, so extend the
+sanitizer." **That was a misdiagnosis of my own bad call.** There is nothing to sanitize —
+there is an endpoint to get right. Prior art already had it right (session `a490673b`), which
+is where the corrected shape comes from:
+
+```python
+POST http://<governor>:8799/llm/ollama/api/generate
+{"model": "deepseek-ocr:latest", "prompt": "<prompt>", "images": ["<b64>"], "stream": false}
+```
+
+**Prompt shape IS load-bearing — confirmed on the correct endpoint** (warm, `load=0.2s`):
+
+| prompt | latency | tokens | outcome |
+|---|---|---|---|
+| `Free OCR.` | **0.5s** | 36 | perfect verbatim text, no artifacts — **the text-tier default** |
+| `<image>\n<\|grounding\|>Convert the document to markdown.` | 3.2s | 90 | text **plus bounding boxes** — see below |
+| "Output the exact characters… do not summarise, do not reformat…" | 42.9s | **7366** | **degenerate repetition loop**, echoing "Do not add extra spaces between lines." indefinitely |
+
+The verbose-prompt failure is real and endpoint-independent — it just fails *differently* on
+each (`/api/chat` returned assistant boilerplate; `/api/generate` loops). Either way it burns
+~43s and ~7.4k tokens and returns nothing usable, **without erroring**. So the prompt stays
+pinned in config and test-guarded: a test asserts the response is neither boilerplate nor a
+repetition loop (e.g. no single sentence repeated more than twice).
+
+**A.4 OPEN QUESTION — FULLY ANSWERED. `deepseek-ocr` DOES emit grounding bounding boxes:**
+
+```
+text[[19, 60, 287, 151]]
+DAYFLOW-PROBE-7742
+
+text[[21, 255, 522, 366]]
+cargo check --message-format=short
+
+text[[21, 450, 623, 558]]
+segment_time 900 fps 0.5 chunk_0003.mp4
+```
+
+Box-and-text pairs, per block, in 3.2s. **This does NOT collapse T311 into T300, and D7 still
+stands** — the region cascade supplies *window and pane* structure from the WM, which no OCR
+model can know, and geometric reading order stays computed because a deterministic sort is
+testable and a model's box output is not. What the grounding mode DOES add is **sub-region
+text geometry**: where each line sits *inside* a pane, which the cascade cannot provide. That
+makes it a genuine complement for T035, at a 6× latency cost over `Free OCR.` — so it is used
+deliberately when intra-region layout is wanted, never as the default text path.
+
+**Residency (R5) — evidence FOR, not against.** One call in this session took **43.9s with a
+cold load** because `qwen3-coder:30b` (32.2 GB) had been resident and evicted the OCR model.
+Warm calls in the same session ran 0.5–3.2s. So eviction under memory pressure from *other*
+tenants is real and observed, which strengthens the residency case rather than the ~6h
+keep-alive reading weakening it. Settle it at T029 with both facts in hand.
+
+**Still to measure**: `Free OCR.` at 0.5s was a small synthetic image; the prior real-frame
+measurement was 1.6s on a cropped pane. Use the real-frame numbers for capacity planning.
 
 **Governor routing (D8)** is already enabled by commit `6b256ab` (path-prefixed base URL) with
 thinking-model preamble stripping from `d2f5192`. Both tiers therefore address
