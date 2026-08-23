@@ -46,7 +46,7 @@ Verified on `main` 2026-08-23: ~581 lines, 7 passing tests. Listed as a table, d
       `> DONE:` `cargo check` green; the feature addition carries its justifying comment.
 - [ ] T003 [P] Extend `DayflowConfig` in `src/config/mod.rs` — `segment_seconds` (replacing the assumption that `chunk_minutes` is uniform), `displays`, `idle` (threshold + hysteresis + enable), `perception` (text tier, reason tier, residency policy), `max_regions_per_segment`, `disk_budget_bytes`. Serde defaults for every field.
       `> DONE:` `DayflowConfig::default()` round-trips through the config loader; existing config files still parse.
-- [ ] T004 [S] Prove the ffmpeg segment muxer at fractional fps in `tests/dayflow_segmentation.rs` — the schedule-critical UNVERIFIED item from research R1. A short live capture at a ~10-second interval must produce sequential files with the expected durations and one manifest line per boundary.
+- [x] T004 [S] Prove the ffmpeg segment muxer at fractional fps in `tests/dayflow_segmentation.rs` — the schedule-critical UNVERIFIED item from research R1. A short live capture at a ~10-second interval must produce sequential files with the expected durations and one manifest line per boundary.
       `> DONE:` the probe passes and the exact working argument vector is recorded in `research.md`; if `-force_key_frames expr:` does not hold at 0.2–0.5 fps, STOP and record the fallback before building on it.
 - [ ] T005 [P] Prove the idle signal — a probe reading X11 screensaver idle-ms and blank state, run both locked and unlocked, confirming the two are distinguishable (research R2).
       `> DONE:` probe output shows distinct locked vs unlocked readings; if unavailable, the detector's no-backend fallback is "never idle", never a permanent pause.

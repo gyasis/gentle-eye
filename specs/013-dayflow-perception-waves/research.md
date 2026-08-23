@@ -41,11 +41,36 @@ Each restart begins a new `chunk_%04d` run, which is why segment identity must b
 - *One long file, split afterwards*. Rejected outright: it defeats real-time summarization
   (D4/FR-014) and means a crash loses the whole day.
 
-**UNVERIFIED**: that `-force_key_frames` with an `expr:` argument behaves as expected against
-a `rawvideo` stdin input at fractional fps (0.2–0.5). **Check owed**: a short live capture at
-a 10-second interval asserting segment durations and that the manifest gains one line per
-boundary. This is the first thing the implementation must prove, before anything is built on
-top of it.
+**VERIFIED 2026-08-23 (T004)** — was the schedule-critical unknown; it holds. Probed with raw
+BGRA on stdin, exactly mirroring `PipeEncoder`, at both ends of the dayflow fps range and at
+real capture resolution:
+
+| config | segments | durations | manifest |
+|---|---|---|---|
+| 0.2 fps, 640×360, 10s | 3 | `10.000000` ×3 | one line per segment, contiguous |
+| 0.5 fps, 640×360, 10s | 3 | `10.000000` ×3 | one line per segment, contiguous |
+| **0.5 fps, 1920×1080, 10s** | 3 | `10.000000` ×3 | one line per segment, contiguous |
+
+Boundaries are exact, not approximate — `duration` is `10.000000`, not `9.97`. The manifest
+carries `name,start,end` per segment, which is the liveness artifact FR-006 reads.
+
+**The working argument vector** (ffmpeg 4.4.2), to be reproduced in `build_ffmpeg_args`:
+
+```
+-f rawvideo -pix_fmt bgra -s <W>x<H> -framerate <fps> -i -
+-c:v libx264 -preset ultrafast -pix_fmt yuv420p
+-force_key_frames "expr:gte(t,n_forced*<seg_seconds>)"
+-f segment -segment_time <seg_seconds> -reset_timestamps 1
+-segment_list <manifest.csv> -segment_list_type csv
+<dir>/chunk_%04d.mp4
+```
+
+`-force_key_frames` is what makes the boundary exact; without it `-segment_time` cuts at the
+next keyframe and the wall-clock ranges become approximations. Keep both.
+
+**Still to measure at build time, not blocking**: real segment BYTES. The probe's synthetic
+low-entropy frames gave ~44 KB per 10s at 1080p; real screen content will be far larger, and
+the disk-budget defaults (R9) must be set from a real capture, not from this number.
 
 ---
 
@@ -74,12 +99,38 @@ triggers with one query.
 **Enabling a feature on a pinned dependency is a dependency change** and must be recorded in
 `Cargo.toml` with a comment saying why, per the house dep discipline.
 
-**UNVERIFIED**: that the screensaver extension is present and reports a usable idle counter on
-this host's X server, and how it behaves under a compositor. **Check owed**: a one-shot probe
-printing idle-ms and saver state, run locked and unlocked, before the pause logic is written.
-Platform note: this is an X11 path. Wayland and macOS need their own probe; the detector must
-be behind a small trait so the absence of a backend degrades to "never idle" (record
-continuously) rather than to a crash or a permanent pause.
+**PROBED 2026-08-23 (T005) — the design above was HALF WRONG. Corrected.**
+
+Host is GNOME on X11 (`XDG_SESSION_TYPE=x11`, `XDG_CURRENT_DESKTOP=ubuntu:GNOME`).
+
+| signal | result | verdict |
+|---|---|---|
+| MIT-SCREEN-SAVER extension present | yes (opcode 144) | ✅ |
+| `XScreenSaverQueryInfo` → `idle` ms | monotonic; +2000 ms per 2 s sleep (226312 → 232314) | ✅ **use this for idle** |
+| `XScreenSaverQueryInfo` → `state` | **3** — outside the documented 0/1/2 range; `since = 0` | ❌ **unusable** |
+| `xset q` saver | `timeout: 0` — the classic X saver is disabled under GNOME | ❌ |
+| locker daemon (xscreensaver/light-locker/…) | none running | ❌ |
+| `org.gnome.ScreenSaver.GetActive` (D-Bus) | `(false,)` — correct, screen is unlocked | ✅ **use this for lock** |
+| `org.freedesktop.ScreenSaver.GetActive` | `NotSupported` | ❌ |
+| `loginctl` `LockedHint` / `IdleHint` / `Active` | `no` / `no` / `yes` — all readable | ✅ **fallback, no session bus needed** |
+
+**Corrected decision**: idle comes from the **X11 idle counter**; lock does **NOT** come from the
+X saver `state` field — it comes from **`org.gnome.ScreenSaver` D-Bus**, with **logind
+`LockedHint`** as the fallback. Building lock detection on the X `state` field, as this section
+originally implied, would have silently never fired on this desktop.
+
+**Open design question for T013** (do not decide by default): reading D-Bus from Rust means
+either a new crate (`zbus`) — which the constitution's dep-minimalism argues against — or
+shelling out to `loginctl` / `gdbus`. `loginctl show-session -p LockedHint` needs no session
+bus and no new dependency. Decide explicitly at T013 and record it.
+
+**Still UNTESTED**: the *locked* reading. Producing it requires actually locking the screen,
+which is disruptive to do unasked. **Check owed** (≈20 s):
+`gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.GetActive`
+must return `(true,)` while locked. Probe kept at `scratchpad/t005/idle_probe.py`.
+
+Platform note unchanged: this is an X11 + GNOME path. The detector stays behind a trait so a
+host with no backend degrades to "never idle" (record continuously), never to a permanent pause.
 
 ---
 
@@ -108,11 +159,32 @@ is a multiplier that the region-count cap (R6) has to bound, not a free win.
   downscaled wide frame that the measured evidence shows scrambles columns and misreads
   digits. Directly contradicts FR-011.
 
-**UNVERIFIED**: whether `scrap` on this host can hold concurrent capturers on multiple
-displays without contention. **Check owed**: enumerate displays and open two capturers before
-building the multi-pipeline supervisor. If concurrent capture is not supported, the fallback is
-round-robin capture across displays within one interval, which is a scheduling change, not a
-redesign.
+**PARTIALLY VERIFIED 2026-08-23 (T006)** — enumeration done, concurrency still owed.
+
+This host has **three displays, and they are wildly heterogeneous**:
+
+| display | geometry | offset | note |
+|---|---|---|---|
+| `eDP-1` | 1920×1080 | +0+0 | laptop panel |
+| `HDMI-1-0` | 3440×1440 | +1920+0 | ultrawide |
+| `DP-1-0` | **1080×2560** | +5360+0 | **portrait (rotated)** |
+
+Virtual desktop: **6440×2560**. This is strong confirmation of the one-encoder-per-display
+decision — a stitched composite would be a 6440×2560 frame, i.e. exactly the extreme
+downscaling that the measured evidence shows scrambles columns and misreads digits.
+
+**NEW GAP this exposes — bbox coordinate space is undefined.** With displays at offsets +0,
++1920 and +5360, a `Region.bbox` of `(100, 100, 400, 300)` is ambiguous: display-local or
+global virtual-desktop coordinates? The portrait monitor makes it worse, since width and height
+swap relative to its neighbours. `data-model.md` must state which space `bbox` is in, and the
+geometric reading order (T034) must sort **within a display** before merging across displays —
+otherwise a top-left region on the portrait screen sorts against a bottom-right region on the
+laptop and the ordering is nonsense. **Owed at T009/T033.**
+
+**Still UNVERIFIED**: whether `scrap` can hold three concurrent capturers without contention.
+**Check owed**: a small Rust probe opening one capturer per display before the multi-pipeline
+supervisor is built. Fallback if it cannot: round-robin capture across displays within one
+interval — a scheduling change, not a redesign.
 
 ---
 
@@ -171,8 +243,28 @@ the box is doing.
 on a shared box; holding a model resident while nothing is recording is exactly the kind of
 unbudgeted occupancy the governed lane exists to prevent.
 
-**UNVERIFIED**: the lane's actual idle-unload window on this host. **Check owed**: read it from
-the lane's own status before choosing the ping interval — do not guess it.
+**MEASURED 2026-08-23 (T006) — and it likely INVERTS this decision.**
+
+`GET /llm/ollama/api/ps` shows `qwen3-coder:30b` resident at 32.2 GB with `expires_at`
+**~6 hours in the future**. If that reflects the lane's standing keep-alive rather than a
+per-request override, a model stays warm for hours — far longer than any segment interval —
+and the cold-load premise behind this whole decision largely evaporates. The keep-warm ping
+would then be solving a problem that does not exist, while holding memory on a shared box.
+
+**Do not implement the keep-warm ping until this is settled.** **Check owed at T029**: load the
+actual text tier through the governor, read *its* `expires_at` from `/api/ps`, and determine
+whether the window is global or per-request. If it is ~6 h, the residency policy default flips
+from `resident` to `on-demand` and T029 shrinks to "measure and document", not "build a pinger".
+
+**Model tags corrected (verified against the live lane, 58 models):**
+
+| tier | tag used in this spec | tag that ACTUALLY EXISTS |
+|---|---|---|
+| text | ~~`deepseek-ocr:3.3b`~~ | **`deepseek-ocr:latest`** |
+| reason | `ornith-1.5-9b` | **`ornith-1.5-9b:latest`** (also `ornith-1.5-35b:latest`) |
+
+`deepseek-ocr:3.3b` does **not exist** on the lane; a call using it would fail at T026. Use the
+verified tags, and read them from config rather than hardcoding either.
 
 ---
 
