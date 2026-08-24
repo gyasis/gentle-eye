@@ -136,6 +136,10 @@ request escalates exactly once, with a logged reason.
       `> DONE:` a text query resolves without a vision model, a semantic query escalates once, both covered by tests; `cargo check` + clippy `-D warnings` = 0.
 - [ ] T032 [P] [US3] Integration coverage in `tests/dayflow_perception.rs`, including an assertion that the demoted tesseract path is never used as the text tier.
       `> DONE:` all US3 acceptance scenarios from `spec.md` are asserted.
+- [ ] T052 [US3] Content intent — rolling OCR aggregation in `src/dayflow/perception.rs`, ported from videolocr's `OCRAggregator` (research R13): a 5-block history, `SequenceMatcher`-style overlap at 0.85, APPENDING to the matched block instead of creating a new one. Runs only when `intent.aggregates_text()`.
+      `> DONE:` a scrolling pane sampled repeatedly yields ONE growing block, not N near-duplicates; under Activity intent the aggregator is never invoked; `cargo check` green.
+- [ ] T053 [S] [US3] Content intent — text diff-merge (research R12): append a block only below 0.95 similarity, treat above 0.3 as comparable, and merge preserving unique lines. Every gate in the ladder FAILS OPEN (research R13) — on any error the sample is KEPT, never dropped, because dayflow cannot re-capture yesterday.
+      `> DONE:` a test proves the union of two overlapping captures is preserved with no duplication; a fault injected into each gate results in the sample being KEPT; both intents covered; `cargo check` + tests green.
 
 ## Phase 6: User Story 4 — Entries that remember the layout (P2)
 

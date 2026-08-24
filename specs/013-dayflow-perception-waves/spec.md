@@ -45,6 +45,7 @@ standup view, and the release gates.
 | D9 | Implied continuous recording, segmented on the fly | **Dayflow SAMPLES; it does not stream video.** Periodic frame snapshots, not a continuously-fed encoder. Video output is **optional and off by default** — gentle-eye already provides video recording; dayflow's artifact is the timeline. |
 | D10 | *(new)* | **Two granularities, matching the two record modes.** All-day (daemon) tracking is the COARSE one — one frame every 3 minutes by default. A bounded focused session ("track my dev work for this hour") is the fine one — one frame a minute. Unattended must be the cheap mode. |
 | D11 | *(new)* | **Delta-skip.** A sample whose regions are unchanged from the previous is not perceived. Reading is most of a working day, so this drives steady-state cost toward zero. |
+| D12 | *(new)* | **Two intents, either/or, BOTH shipped in this feature.** `Activity` (default) answers "what was I doing" — frames are scaffolding, the summary is the artifact. `Content` captures the material on screen verbatim and merged — a lesson, an exam, a reference session — where the collected text IS the deliverable. Neither is a degraded form of the other and neither is deferred. |
 
 D1 (native map-reduce summarizer), D3 (both record models), D4 (real-time summarization)
 and D5 (three-tier retention) are **unchanged and still binding**.
@@ -311,6 +312,21 @@ categorized, time-ranged digest.
   read frames directly and never depend on a video artifact.
 - **FR-001e**: System MUST skip perception for a sample whose regions are unchanged from the
   previous sample (D11), and this MUST be the default.
+
+**Intent — both modes are required capabilities (D12)**
+
+- **FR-036**: System MUST support two run intents, selected when a run starts and mutually
+  exclusive: **Activity** (default) and **Content**. Both MUST be fully implemented; neither may
+  ship as a stub or a flag on the other.
+- **FR-037**: Under **Activity**, perception MUST extract only what is needed to characterize
+  the activity (application, activity, category, summary). It MUST NOT run text aggregation or
+  diff-merge, and stills MAY be discarded once their window is summarized.
+- **FR-038**: Under **Content**, the system MUST preserve extracted text **verbatim**, MUST
+  aggregate it across samples so a scrolling or edited pane reconstructs as one coherent block
+  rather than many near-duplicates, and MUST retain stills until the material has been
+  extracted.
+- **FR-039**: Switching intent MUST NOT alter or re-interpret entries already recorded under the
+  other intent; each entry carries the intent it was captured under.
 - **FR-002**: System MUST record, for every segment, its index, storage location, and
   wall-clock start and end.
 - **FR-003**: System MUST support both an explicit bounded session (with a configurable

@@ -428,6 +428,62 @@ impl Default for RetentionConfig {
     }
 }
 
+/// What a dayflow run is FOR. Either/or, chosen when the run starts.
+///
+/// Both are first-class, both ship, and neither is a degraded version of the
+/// other — they answer different questions and keep different things.
+///
+/// | | [`Activity`](DayflowIntent::Activity) | [`Content`](DayflowIntent::Content) |
+/// |---|---|---|
+/// | question | "what was I doing?" | "what was on screen?" |
+/// | perception | enough to characterize the activity | full OCR, aggregated and merged |
+/// | text kept | the summary | **verbatim**, merged across samples |
+/// | stills | discarded once summarized | kept until the material is extracted |
+/// | cost | cheap enough to run all day | bounded, because the output is the point |
+/// | pairs with | [`DayflowMode::Daemon`] | [`DayflowMode::Session`] |
+///
+/// # Why this is not one mode with a flag
+///
+/// The distinction is not "more detail" — it is a different artifact. Activity
+/// answers a question about the PAST and the frames are scaffolding, so keeping
+/// a verbatim transcript of every pane is paying for something nobody asked for.
+/// Content is capturing MATERIAL — a lesson, an exam, a reference session — where
+/// a one-line summary is worthless and the merged text IS the deliverable.
+///
+/// Running Content all day would be expensive for no benefit; running Activity
+/// over a lesson would throw away the thing you were trying to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DayflowIntent {
+    /// Track what the user was doing. The default, and the all-day mode.
+    #[default]
+    Activity,
+    /// Capture what was on screen, verbatim and merged — a lesson, an exam, a
+    /// reference session. The material is the artifact.
+    Content,
+}
+
+impl DayflowIntent {
+    /// Whether extracted text is preserved verbatim rather than only summarised.
+    pub fn keeps_verbatim_text(self) -> bool {
+        matches!(self, Self::Content)
+    }
+
+    /// Whether the rolling OCR aggregation and text diff-merge run.
+    ///
+    /// These exist to reconstruct MATERIAL across samples (a scrolling pane, an
+    /// edited file). Activity does not need them and should not pay for them.
+    pub fn aggregates_text(self) -> bool {
+        matches!(self, Self::Content)
+    }
+
+    /// Whether a still may be discarded as soon as its window is summarised.
+    /// Content holds them until the material has been extracted.
+    pub fn discards_stills_after_summary(self) -> bool {
+        matches!(self, Self::Activity)
+    }
+}
+
 /// How often dayflow SAMPLES a frame, per tracking granularity.
 ///
 /// # Dayflow samples; it does not record video
@@ -809,6 +865,10 @@ pub struct DayflowConfig {
     /// Default summarization provider: "gemini" (cloud, opt-in) or "ollama" (local).
     #[serde(default = "default_dayflow_provider")]
     pub default_provider: String,
+    /// What a run is FOR — track activity, or capture the material on screen.
+    /// Either/or, defaulting to [`DayflowIntent::Activity`].
+    #[serde(default)]
+    pub intent: DayflowIntent,
     /// How often a frame is SAMPLED, per tracking granularity. Dayflow samples;
     /// it does not stream video.
     #[serde(default)]
@@ -840,6 +900,7 @@ impl Default for DayflowConfig {
             chunk_minutes: default_chunk_minutes(),
             record_fps: default_record_fps(),
             default_provider: default_dayflow_provider(),
+            intent: DayflowIntent::default(),
             sampling: SamplingConfig::default(),
             video: DayflowVideoConfig::default(),
             delta: DeltaConfig::default(),
@@ -1263,6 +1324,58 @@ mod tests {
         let g = DeltaConfig::default();
         assert!(g.gate_width <= 320, "gate must be a cheap downscale, not full res");
         assert!(g.change_threshold > 0.0, "a zero threshold IS pixel-exact matching");
+    }
+
+    #[test]
+    fn activity_is_the_default_intent() {
+        assert_eq!(DayflowConfig::default().intent, DayflowIntent::Activity);
+        assert_eq!(DayflowIntent::default(), DayflowIntent::Activity);
+    }
+
+    #[test]
+    fn both_intents_are_fully_specified_neither_is_a_stub() {
+        // Both use cases ship. Each must have a DEFINITE answer for every
+        // behaviour, and the two must actually differ — a mode that behaves
+        // identically to the default is not a mode, it is dead config.
+        let a = DayflowIntent::Activity;
+        let c = DayflowIntent::Content;
+
+        assert!(!a.keeps_verbatim_text(), "activity keeps the summary, not the transcript");
+        assert!(c.keeps_verbatim_text(), "content keeps the material verbatim");
+
+        assert!(!a.aggregates_text(), "activity must not pay for aggregation it does not use");
+        assert!(c.aggregates_text(), "content reconstructs material across samples");
+
+        assert!(a.discards_stills_after_summary(), "activity frames are scaffolding");
+        assert!(
+            !c.discards_stills_after_summary(),
+            "content holds stills until the material is extracted"
+        );
+    }
+
+    #[test]
+    fn intent_is_either_or_and_round_trips() {
+        // Selected once when a run starts — not a pair of flags that can both be
+        // on, and not a spectrum.
+        for intent in [DayflowIntent::Activity, DayflowIntent::Content] {
+            let mut cfg = DayflowConfig::default();
+            cfg.intent = intent;
+            let back: DayflowConfig =
+                toml::from_str(&toml::to_string(&cfg).expect("ser")).expect("de");
+            assert_eq!(back.intent, intent);
+            assert!(back.validate().is_ok(), "{intent:?} must be a valid configuration");
+        }
+    }
+
+    #[test]
+    fn content_intent_serialises_readably() {
+        let mut cfg = DayflowConfig::default();
+        cfg.intent = DayflowIntent::Content;
+        let text = toml::to_string(&cfg).expect("ser");
+        assert!(
+            text.contains("intent = \"content\""),
+            "intent must be human-readable in a config file, got:\n{text}"
+        );
     }
 
     #[test]
