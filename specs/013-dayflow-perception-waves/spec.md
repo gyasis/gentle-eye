@@ -42,6 +42,9 @@ standup view, and the release gates.
 | D6 | *(new)* | Low-compute first — never spend a visual-reasoning model on a job text extraction can do. |
 | D7 | *(new)* | Structure comes from the region cascade, text from extraction, joined on region identity. Reading order is **computed from geometry**, never requested from a model. |
 | D8 | *(new)* | All model calls route through the governed local lane, never a raw model endpoint. |
+| D9 | Implied continuous recording, segmented on the fly | **Dayflow SAMPLES; it does not stream video.** Periodic frame snapshots, not a continuously-fed encoder. Video output is **optional and off by default** — gentle-eye already provides video recording; dayflow's artifact is the timeline. |
+| D10 | *(new)* | **Two granularities, matching the two record modes.** All-day (daemon) tracking is the COARSE one — one frame every 3 minutes by default. A bounded focused session ("track my dev work for this hour") is the fine one — one frame a minute. Unattended must be the cheap mode. |
+| D11 | *(new)* | **Delta-skip.** A sample whose regions are unchanged from the previous is not perceived. Reading is most of a working day, so this drives steady-state cost toward zero. |
 
 D1 (native map-reduce summarizer), D3 (both record models), D4 (real-time summarization)
 and D5 (three-tier retention) are **unchanged and still binding**.
@@ -291,8 +294,23 @@ categorized, time-ranged digest.
 
 **Capture and segmentation**
 
-- **FR-001**: System MUST record **every attached display** continuously and emit fixed-length
-  segment files on the fly at a configured boundary, rather than a single file closed at the end.
+- **FR-001**: System MUST **sample** a frame from every attached display at a configured
+  interval, and group those samples into fixed-length windows. It MUST NOT stream a
+  continuously-fed encoder for the duration of a recording — dayflow tracks activity, it does
+  not record video (D9).
+- **FR-001a**: The sampling interval MUST differ by record mode (D10): all-day daemon tracking
+  defaults to one frame every 3 minutes; a bounded focused session defaults to one a minute.
+  All-day MUST NOT be configurable finer than focused — the unattended mode has to be the cheap
+  one.
+- **FR-001b**: Sampling MUST NOT be configurable fast enough to constitute video recording; a
+  floor of one frame per 10 seconds applies.
+- **FR-001c**: A window MUST be able to contain at least two samples, so that it can show
+  change. A configuration where it cannot MUST be rejected.
+- **FR-001d**: Video output MUST be optional and default to OFF. When enabled it assembles
+  sampled frames into a timelapse at window close, purely for human review; perception MUST
+  read frames directly and never depend on a video artifact.
+- **FR-001e**: System MUST skip perception for a sample whose regions are unchanged from the
+  previous sample (D11), and this MUST be the default.
 - **FR-002**: System MUST record, for every segment, its index, storage location, and
   wall-clock start and end.
 - **FR-003**: System MUST support both an explicit bounded session (with a configurable
@@ -463,8 +481,15 @@ categorized, time-ranged digest.
   5 minutes to 1 hour; changeable mid-day (FR-034/FR-035). Nothing downstream may assume a
   uniform segment length. The floor is enforced by a Dayflow-scoped validator invoked when a
   session or daemon starts — deliberately NOT by the library-wide config validator (FR-034b).
-- **Capture rate default**: 0.2–0.5 frames per second for all-day-tier durations, per the
-  existing duration-aware heuristic.
+- **Sampling rate**: all-day one frame every 3 minutes; focused session one a minute; floor of
+  one per 10 s; ceiling one per hour. Expressed as an INTERVAL IN SECONDS rather than as fps,
+  because a config reading `0.0056 fps` is unreadable and a typo there costs a factor of sixty.
+  The library's existing duration-aware fps heuristic (0.2–0.5 fps for long recordings) serves
+  general recording and is deliberately NOT reused here — dayflow overrides it with its own
+  much coarser rate.
+- **Cost consequence**: one frame across three displays measured 37.4 MiB of raw BGRA (T006), so
+  the sample COUNT decides affordability. An 8-hour day at the default interval is 160 samples
+  per display, versus 14,400 at 0.5 fps — roughly 90× less, before delta-skip.
 - **Machine-local configuration**: the perception endpoint configuration lives outside the
   repository, so a fresh machine requires it to be recreated before live validation.
 - **Display scope**: every attached display is captured and merged into one timeline

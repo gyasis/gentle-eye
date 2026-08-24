@@ -294,6 +294,22 @@ pub trait ConfigProvider: Send + Sync {
 // Dayflow configuration
 // ----------------------------------------------------------------------------
 
+fn default_day_interval_seconds() -> u32 {
+    180 // one frame every 3 minutes — all-day tracking is the coarse one
+}
+
+fn default_focused_interval_seconds() -> u32 {
+    60 // one frame a minute — a bounded, focused ask
+}
+
+fn default_skip_unchanged() -> bool {
+    true
+}
+
+fn default_video_enabled() -> bool {
+    false // gentle-eye already records video; dayflow's artifact is the timeline
+}
+
 fn default_segment_seconds() -> u32 {
     900 // 15 minutes
 }
@@ -386,6 +402,90 @@ impl Default for RetentionConfig {
             warm_days: default_warm_days(),
             disk_budget_bytes: default_disk_budget_bytes(),
         }
+    }
+}
+
+/// How often dayflow SAMPLES a frame, per tracking granularity.
+///
+/// # Dayflow samples; it does not record video
+///
+/// This is the distinction that governs the feature's cost. gentle-eye already
+/// has real-time video recording; dayflow exists to **track what a user was
+/// doing**, and it does that by taking periodic snapshots — not by streaming an
+/// encoder for eight hours. Sampling once a minute instead of at 0.5 fps is
+/// thirty times less work, and on an idle screen the delta check
+/// ([`SamplingConfig::skip_unchanged`]) drives it toward zero.
+///
+/// # Two granularities
+///
+/// | mode | intent | default |
+/// |---|---|---|
+/// | [`DayflowMode::Daemon`] | all-day background tracking — generalized, fast, cheap | one frame every **3 minutes** |
+/// | [`DayflowMode::Session`] | a bounded, focused ask — "track my dev work for this hour" | one frame every **minute** |
+///
+/// All-day is deliberately the coarser of the two: it runs unattended for hours,
+/// so its interval is what decides whether the feature is cheap or wasteful.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SamplingConfig {
+    /// Seconds between samples during all-day (daemon) tracking.
+    #[serde(default = "default_day_interval_seconds")]
+    pub day_interval_seconds: u32,
+    /// Seconds between samples during a bounded, focused session.
+    #[serde(default = "default_focused_interval_seconds")]
+    pub focused_interval_seconds: u32,
+    /// Skip perception for a sample whose regions are unchanged from the previous
+    /// one. On a static screen this collapses steady-state cost toward zero — the
+    /// single largest saving available, because reading is most of a working day.
+    #[serde(default = "default_skip_unchanged")]
+    pub skip_unchanged: bool,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            day_interval_seconds: default_day_interval_seconds(),
+            focused_interval_seconds: default_focused_interval_seconds(),
+            skip_unchanged: default_skip_unchanged(),
+        }
+    }
+}
+
+impl SamplingConfig {
+    /// Never sample faster than once every 10 s, even in focused mode. Below this
+    /// dayflow stops being an activity tracker and becomes the video recorder it
+    /// is explicitly not.
+    pub const MIN_INTERVAL_SECONDS: u32 = 10;
+    /// Never coarser than once an hour, or a segment can contain no samples.
+    pub const MAX_INTERVAL_SECONDS: u32 = 3600;
+
+    /// The sampling interval for a given mode.
+    pub fn interval_for(&self, mode: crate::dayflow::models::DayflowMode) -> std::time::Duration {
+        use crate::dayflow::models::DayflowMode;
+        let secs = match mode {
+            DayflowMode::Daemon => self.day_interval_seconds,
+            DayflowMode::Session => self.focused_interval_seconds,
+        };
+        std::time::Duration::from_secs(u64::from(secs))
+    }
+}
+
+/// Optional video output.
+///
+/// **Off by default, and that is the point.** gentle-eye already provides video
+/// recording as its own feature; dayflow's artifact is the timeline. When
+/// enabled, sampled frames are assembled into a timelapse at window close as a
+/// convenience for human review — never as an input to perception, which reads
+/// frames directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DayflowVideoConfig {
+    /// Assemble sampled frames into a timelapse artifact per window.
+    #[serde(default = "default_video_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for DayflowVideoConfig {
+    fn default() -> Self {
+        Self { enabled: default_video_enabled() }
     }
 }
 
@@ -570,6 +670,13 @@ pub struct DayflowConfig {
     /// Default summarization provider: "gemini" (cloud, opt-in) or "ollama" (local).
     #[serde(default = "default_dayflow_provider")]
     pub default_provider: String,
+    /// How often a frame is SAMPLED, per tracking granularity. Dayflow samples;
+    /// it does not stream video.
+    #[serde(default)]
+    pub sampling: SamplingConfig,
+    /// Optional timelapse output. Off by default — the timeline is the artifact.
+    #[serde(default)]
+    pub video: DayflowVideoConfig,
     /// Which displays are captured (FR-029).
     #[serde(default)]
     pub displays: DisplaySelection,
@@ -591,6 +698,8 @@ impl Default for DayflowConfig {
             chunk_minutes: default_chunk_minutes(),
             record_fps: default_record_fps(),
             default_provider: default_dayflow_provider(),
+            sampling: SamplingConfig::default(),
+            video: DayflowVideoConfig::default(),
             displays: DisplaySelection::default(),
             idle: IdleConfig::default(),
             perception: PerceptionConfig::default(),
@@ -610,6 +719,11 @@ impl DayflowConfig {
     /// going through a validated config.
     pub const MIN_SEGMENT_SECONDS: u32 = 300;
 
+    /// The segment floor and the sampling interval INTERACT: a segment must be
+    /// able to hold at least two samples, so the 5-minute floor is only reachable
+    /// with a sampling interval of 150 s or finer. The default 3-minute all-day
+    /// interval implies a segment of at least 6 minutes. `validate` enforces it.
+    ///
     /// Sanity ceiling: **1 hour**.
     ///
     /// A longer interval delays BOTH the first timeline entry and the first
@@ -659,6 +773,45 @@ impl DayflowConfig {
                 max: Self::MAX_SEGMENT_SECONDS.to_string(),
             });
         }
+
+        for (field, secs) in [
+            ("dayflow.sampling.day_interval_seconds", self.sampling.day_interval_seconds),
+            ("dayflow.sampling.focused_interval_seconds", self.sampling.focused_interval_seconds),
+        ] {
+            if secs < SamplingConfig::MIN_INTERVAL_SECONDS
+                || secs > SamplingConfig::MAX_INTERVAL_SECONDS
+            {
+                return Err(ConfigError::ValueOutOfRange {
+                    field: field.to_string(),
+                    value: secs.to_string(),
+                    min: SamplingConfig::MIN_INTERVAL_SECONDS.to_string(),
+                    max: SamplingConfig::MAX_INTERVAL_SECONDS.to_string(),
+                });
+            }
+        }
+
+        // All-day tracking must never sample FINER than a focused session — that
+        // inversion is how an unattended recorder quietly becomes the expensive
+        // one, which is the whole thing this design avoids.
+        if self.sampling.day_interval_seconds < self.sampling.focused_interval_seconds {
+            return Err(ConfigError::Invalid(format!(
+                "all-day sampling ({}s) must not be finer than focused sampling ({}s) — \
+                 the unattended mode has to be the cheap one",
+                self.sampling.day_interval_seconds, self.sampling.focused_interval_seconds
+            )));
+        }
+
+        // A segment must be able to contain at least two samples, or it cannot
+        // show change and the timeline entry has nothing to describe.
+        let seg = self.segment_duration().as_secs();
+        let coarsest = u64::from(self.sampling.day_interval_seconds);
+        if seg < coarsest * 2 {
+            return Err(ConfigError::Invalid(format!(
+                "a {seg}s segment cannot hold two samples at a {coarsest}s interval — \
+                 widen the segment or sample more often"
+            )));
+        }
+
         Ok(())
     }
 
@@ -882,6 +1035,83 @@ mod tests {
     }
 
     #[test]
+    fn dayflow_samples_it_does_not_stream_video() {
+        let d = DayflowConfig::default();
+        // video is OFF: gentle-eye already records video; dayflow's artifact is
+        // the timeline. Flipping this default silently reintroduces the cost.
+        assert!(!d.video.enabled, "dayflow video must default to OFF");
+        // all-day is the COARSE one; focused is the fine one
+        assert_eq!(d.sampling.day_interval_seconds, 180);
+        assert_eq!(d.sampling.focused_interval_seconds, 60);
+        assert!(d.sampling.skip_unchanged, "delta-skip is the largest saving; default on");
+    }
+
+    #[test]
+    fn sampling_interval_follows_the_record_mode() {
+        use crate::dayflow::models::DayflowMode;
+        let d = DayflowConfig::default();
+        assert_eq!(d.sampling.interval_for(DayflowMode::Daemon).as_secs(), 180);
+        assert_eq!(d.sampling.interval_for(DayflowMode::Session).as_secs(), 60);
+        assert!(
+            d.sampling.interval_for(DayflowMode::Daemon)
+                > d.sampling.interval_for(DayflowMode::Session),
+            "unattended all-day tracking must be the cheaper of the two"
+        );
+    }
+
+    #[test]
+    fn all_day_sampling_may_not_be_finer_than_focused() {
+        // The inversion that would make the unattended mode the expensive one.
+        let mut d = DayflowConfig::default();
+        d.sampling.day_interval_seconds = 30;
+        d.sampling.focused_interval_seconds = 60;
+        assert!(d.validate().is_err(), "all-day finer than focused must be rejected");
+    }
+
+    #[test]
+    fn sampling_may_not_become_a_video_recorder() {
+        let mut d = DayflowConfig::default();
+        for too_fast in [1, 2, 5, 9] {
+            d.sampling.focused_interval_seconds = too_fast;
+            assert!(
+                d.validate().is_err(),
+                "a {too_fast}s sampling interval is video recording, not activity tracking"
+            );
+        }
+        d.sampling.focused_interval_seconds = SamplingConfig::MIN_INTERVAL_SECONDS;
+        assert!(d.validate().is_ok(), "exactly the floor is allowed");
+    }
+
+    #[test]
+    fn a_segment_must_be_able_to_hold_two_samples() {
+        // One sample per segment cannot show change, so the entry has nothing to
+        // describe; zero samples is a silently empty timeline.
+        let mut d = DayflowConfig::default();
+        d.segment_seconds = 300; // 5 min, the floor
+        d.sampling.day_interval_seconds = 180; // 3 min -> only 1 fits
+        assert!(d.validate().is_err(), "5min segment cannot hold two 3min samples");
+        d.sampling.day_interval_seconds = 150; // 2.5 min -> exactly 2 fit
+        assert!(d.validate().is_ok());
+    }
+
+    #[test]
+    fn default_sampling_is_far_cheaper_than_continuous_capture() {
+        // The measured cost driver. One frame across this machine's three
+        // displays is ~37.4 MiB of raw BGRA (T006), so the sample COUNT is what
+        // decides whether an 8-hour day is affordable.
+        let d = DayflowConfig::default();
+        let workday_secs = 8 * 60 * 60;
+        let samples = workday_secs / d.sampling.day_interval_seconds; // per display
+        let continuous_at_half_fps = workday_secs / 2; // 0.5 fps for comparison
+        assert_eq!(samples, 160, "8h at a 3min interval is 160 samples per display");
+        assert!(
+            continuous_at_half_fps / samples >= 80,
+            "default sampling must be at least 80x cheaper than 0.5fps continuous              capture; got {}x",
+            continuous_at_half_fps / samples
+        );
+    }
+
+    #[test]
     fn dayflow_interval_must_not_gate_the_whole_library() {
         // gentle-eye's core use is real-time / short-clip recording at 1-30 fps.
         // The dayflow 5-minute floor is a FEATURE constraint and must never be
@@ -908,6 +1138,11 @@ mod tests {
         // Dayflow is an all-day recorder. A second-scale "segment" is not a
         // small config choice, it is a different product.
         let mut cfg = DayflowConfig::default();
+        // Sample finely enough that the two-samples-per-segment rule is not what
+        // is under test here — this test is about the segment floor alone. The
+        // interaction between the two knobs has its own test.
+        cfg.sampling.day_interval_seconds = 60;
+        cfg.sampling.focused_interval_seconds = 60;
         for bad in [1, 30, 60, 299] {
             cfg.segment_seconds = bad;
             assert!(
@@ -917,7 +1152,10 @@ mod tests {
             );
         }
         cfg.segment_seconds = DayflowConfig::MIN_SEGMENT_SECONDS;
-        assert!(cfg.validate().is_ok(), "exactly 5 minutes must be accepted");
+        assert!(
+            cfg.validate().is_ok(),
+            "exactly 5 minutes must be accepted when sampling fits inside it"
+        );
     }
 
     #[test]
