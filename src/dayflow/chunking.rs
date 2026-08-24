@@ -43,6 +43,13 @@ pub fn plan_chunks(
             path: PathBuf::from(dir).join(chunk_filename(index)),
             start_wall: start + Duration::seconds(offset),
             end_wall: start + Duration::seconds(offset + dur),
+            // `plan_chunks` is the deterministic single-display planner: it lays
+            // out a timeline on paper, so sequence tracks index here. The live
+            // sampler assigns the durable sequence, which keeps counting across
+            // restarts where `index` resets.
+            display_id: 0,
+            sequence: index as u64,
+            summarized: false,
         });
         offset += dur;
         index += 1;

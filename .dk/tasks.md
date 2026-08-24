@@ -58,11 +58,11 @@ Verified on `main` 2026-08-23: ~581 lines, 7 passing tests. Listed as a table, d
 Blocking prerequisites. Nothing in any user story is testable against real data until this
 completes — every downstream slice consumes segment files.
 
-- [ ] T007 Additive, idempotent migration in `src/storage/database.rs` — `dayflow_segments` and `dayflow_pauses` tables plus the range and eviction indexes per `data-model.md`. Must not rewrite the shipped `T240` migration.
+- [x] T007 Additive, idempotent migration in `src/storage/database.rs` — `dayflow_segments` and `dayflow_pauses` tables plus the range and eviction indexes per `data-model.md`. Must not rewrite the shipped `T240` migration.
       `> DONE:` migration is re-runnable; an in-memory test inserts and selects from both new tables and confirms pre-existing `timeline_entries` rows are untouched.
-- [ ] T008 [P] Extend `ChunkRef` in `src/dayflow/models.rs` with `display_id`, `sequence` (monotonic within the session, across encoder restarts) and `summarized`. Identity becomes `(session_id, display_id, sequence)` — never ffmpeg's per-run `index`.
+- [x] T008 [P] Extend `ChunkRef` in `src/dayflow/models.rs` with `display_id`, `sequence` (monotonic within the session, across encoder restarts) and `summarized`. Identity becomes `(session_id, display_id, sequence)` — never ffmpeg's per-run `index`.
       `> DONE:` types compile; a test asserts `sequence` keeps increasing across a simulated encoder restart while `index` resets.
-- [ ] T009 [P] Add `display_id` to `regions::Region` in `src/regions/mod.rs` and thread it through `detect`/`fuse`/`assign_parents`.
+- [x] T009 [P] Add `display_id` to `regions::Region` in `src/regions/mod.rs` and thread it through `detect`/`fuse`/`assign_parents`.
       `> DONE:` two regions with identical bboxes on different displays are distinguishable; existing region tests stay green.
 - [ ] T010 [S] Frame SAMPLER in `src/dayflow/sampler.rs` (supersedes T220's segment muxer per D9) — grab one frame per display at `sampling.interval_for(mode)`, persist it as a compressed still, and record it in the segment ledger. NO long-lived encoder: dayflow samples, it does not stream video. Delta-skip (D11) marks a sample unchanged rather than perceiving it.
       `> DONE:` a run at a short interval yields the expected number of stills per window with correct wall-clock stamps; an unchanged screen marks samples skipped and performs no perception; no ffmpeg process outlives a single assembly call; `cargo check` green.

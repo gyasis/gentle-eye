@@ -68,10 +68,62 @@ CREATE TABLE IF NOT EXISTS timeline_entries (
     summary         TEXT NOT NULL
 );
 
+-- ── dayflow ledgers ────────────────────────────────────────────────────────
+-- A dayflow "segment" is a WINDOW of sampled frames, not a continuously encoded
+-- video chunk (D9). The window ledger is what liveness and eviction read: both
+-- must be answerable from rows another process wrote, never from a flag the
+-- daemon keeps about itself.
+CREATE TABLE IF NOT EXISTS dayflow_segments (
+    session_id   TEXT    NOT NULL,
+    display_id   INTEGER NOT NULL,
+    sequence     INTEGER NOT NULL,
+    start_wall   TEXT    NOT NULL,
+    end_wall     TEXT    NOT NULL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    summarized   INTEGER NOT NULL DEFAULT 0,
+    tier         TEXT    NOT NULL DEFAULT 'hot',
+    bytes        INTEGER,
+    intent       TEXT    NOT NULL DEFAULT 'activity',
+    PRIMARY KEY (session_id, display_id, sequence)
+);
+
+-- One row per sampled frame, INCLUDING the ones the delta gate skipped. Skips
+-- are recorded rather than omitted: "nothing changed for an hour" and "the
+-- sampler died an hour ago" must be distinguishable, and an absent row cannot
+-- tell them apart.
+CREATE TABLE IF NOT EXISTS dayflow_samples (
+    session_id  TEXT    NOT NULL,
+    display_id  INTEGER NOT NULL,
+    sequence    INTEGER NOT NULL,
+    taken_at    TEXT    NOT NULL,
+    path        TEXT,
+    skipped     INTEGER NOT NULL DEFAULT 0,
+    skip_reason TEXT,
+    perceived   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, display_id, sequence, taken_at)
+);
+
+-- Paused intervals, so a gap is a RECORDED FACT with a cause rather than an
+-- absence of rows. Without this, an idle pause and a crash look identical.
+CREATE TABLE IF NOT EXISTS dayflow_pauses (
+    id         TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    from_ts    TEXT NOT NULL,
+    to_ts      TEXT,
+    cause      TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_recordings_status ON recordings(status);
 CREATE INDEX IF NOT EXISTS idx_recordings_start_time ON recordings(start_time);
 CREATE INDEX IF NOT EXISTS idx_results_request ON analysis_results(request_id);
 CREATE INDEX IF NOT EXISTS idx_timeline_start ON timeline_entries(start_time);
+CREATE INDEX IF NOT EXISTS idx_timeline_range ON timeline_entries(start_time, end_time);
+-- Eviction order is (tier, summarized, age): oldest summarized raw first, then
+-- oldest warm, and NEVER an unsummarized segment.
+CREATE INDEX IF NOT EXISTS idx_segments_evict ON dayflow_segments(tier, summarized, end_wall);
+CREATE INDEX IF NOT EXISTS idx_segments_live ON dayflow_segments(session_id, end_wall);
+CREATE INDEX IF NOT EXISTS idx_samples_window ON dayflow_samples(session_id, display_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_pauses_session ON dayflow_pauses(session_id, from_ts);
 "#;
 
 /// Open (or create) the database at `db_path` and apply the schema.
@@ -133,6 +185,110 @@ mod tests {
         assert!(names.contains(&"recordings".to_string()));
         assert!(names.contains(&"analysis_requests".to_string()));
         assert!(names.contains(&"analysis_results".to_string()));
+    }
+
+    #[test]
+    fn dayflow_ledger_tables_exist() {
+        let conn = init_in_memory().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+            .unwrap();
+        let tables: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for want in ["dayflow_segments", "dayflow_samples", "dayflow_pauses"] {
+            assert!(tables.contains(&want.to_string()), "missing {want} in {tables:?}");
+        }
+    }
+
+    #[test]
+    fn dayflow_migration_preserves_existing_timeline_rows() {
+        // The additive requirement (FR-021): a database written by the earlier
+        // schema must survive this migration with its entries intact. The
+        // timeline is the permanent artifact — a migration that drops a row is
+        // the one unrecoverable bug in this feature.
+        let conn = init_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO timeline_entries (id, recording_id, start_time, end_time, category, app, activity, summary)
+             VALUES ('e1','r1','2026-08-24T09:00:00Z','2026-08-24T09:15:00Z','coding','vscode','edited config','wrote the sampler')",
+            [],
+        )
+        .unwrap();
+
+        // re-run the whole migration, as happens on every open
+        apply_migrations(&conn).unwrap();
+
+        let summary: String = conn
+            .query_row("SELECT summary FROM timeline_entries WHERE id='e1'", [], |r| r.get(0))
+            .expect("the pre-existing entry must still be there");
+        assert_eq!(summary, "wrote the sampler");
+    }
+
+    #[test]
+    fn a_skipped_sample_is_recorded_not_omitted() {
+        // "Nothing changed for an hour" and "the sampler died an hour ago" must
+        // be distinguishable. An absent row cannot tell them apart, so the delta
+        // gate records the skip rather than writing nothing.
+        let conn = init_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO dayflow_samples (session_id, display_id, sequence, taken_at, path, skipped, skip_reason)
+             VALUES ('s1', 0, 1, '2026-08-24T09:01:00Z', NULL, 1, 'unchanged')",
+            [],
+        )
+        .unwrap();
+        let (skipped, reason): (i64, String) = conn
+            .query_row(
+                "SELECT skipped, skip_reason FROM dayflow_samples WHERE session_id='s1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(skipped, 1);
+        assert_eq!(reason, "unchanged");
+    }
+
+    #[test]
+    fn segment_identity_is_session_display_sequence() {
+        // NOT the filename and NOT ffmpeg's per-run counter, which restarts on
+        // every pause, interval change and display change.
+        let conn = init_in_memory().unwrap();
+        let ins = "INSERT INTO dayflow_segments (session_id, display_id, sequence, start_wall, end_wall)
+                   VALUES (?1, ?2, ?3, '2026-08-24T09:00:00Z', '2026-08-24T09:15:00Z')";
+        conn.execute(ins, rusqlite::params!["s1", 0, 1]).unwrap();
+        // same sequence on a DIFFERENT display is a different segment
+        conn.execute(ins, rusqlite::params!["s1", 1, 1]).unwrap();
+        // ...but the same triple collides
+        assert!(
+            conn.execute(ins, rusqlite::params!["s1", 0, 1]).is_err(),
+            "(session, display, sequence) must be unique"
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dayflow_segments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn an_old_database_without_dayflow_tables_is_upgraded() {
+        // A db file created before dayflow existed: CREATE TABLE IF NOT EXISTS
+        // must add the ledgers without disturbing what is already there.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE recordings (id TEXT PRIMARY KEY, status TEXT NOT NULL, start_time TEXT NOT NULL);
+             INSERT INTO recordings (id, status, start_time) VALUES ('r9','completed','2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        apply_migrations(&conn).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dayflow_segments", [], |r| r.get(0))
+            .expect("ledger must exist after upgrade");
+        assert_eq!(n, 0);
+        let status: String = conn
+            .query_row("SELECT status FROM recordings WHERE id='r9'", [], |r| r.get(0))
+            .expect("the pre-existing recording must survive");
+        assert_eq!(status, "completed");
     }
 
     #[test]

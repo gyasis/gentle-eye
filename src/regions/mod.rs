@@ -80,6 +80,19 @@ pub struct Region {
     /// The region this was drilled out of (the cascade edge).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<u64>,
+    /// Which display this region lives on.
+    ///
+    /// Required once more than one display is captured: two regions with
+    /// identical bboxes on different screens are otherwise indistinguishable,
+    /// and reading order must sort WITHIN a display before merging across them
+    /// — a top-left region on a portrait panel is not comparable to a
+    /// bottom-right one on a laptop panel.
+    ///
+    /// `bbox` is DISPLAY-LOCAL, not virtual-desktop global. On a desk whose
+    /// displays sit at x-offsets 0, 1920 and 5360 the global form would make
+    /// every crop and every comparison carry an offset it does not need.
+    #[serde(default)]
+    pub display_id: u32,
     /// Full source chain when fused (seeded to `[source]`).
     pub provenance: Vec<Source>,
 }
@@ -95,9 +108,16 @@ impl Region {
             role: None,
             label: None,
             parent: None,
+            display_id: 0,
             provenance: vec![source],
         }
     }
+    /// Set the display this region lives on.
+    pub fn on_display(mut self, display_id: u32) -> Self {
+        self.display_id = display_id;
+        self
+    }
+
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
@@ -398,6 +418,28 @@ mod tests {
 
     fn win(x: u32, y: u32, w: u32, h: u32, src: Source, t: f32) -> Region {
         Region::new(PixelRect { x, y, w, h }, src, Granularity::Window, t)
+    }
+
+    #[test]
+    fn regions_on_different_displays_are_distinguishable() {
+        // Identical geometry on two screens must not be the same region. Without
+        // a display, a 3-display desk silently conflates them.
+        let bbox = PixelRect { x: 100, y: 100, w: 400, h: 300 };
+        let a = Region::new(bbox, Source::Wm, Granularity::Pane, 0.9).on_display(0);
+        let b = Region::new(bbox, Source::Wm, Granularity::Pane, 0.9).on_display(2);
+        assert_eq!(a.bbox, b.bbox, "same geometry");
+        assert_ne!(a.display_id, b.display_id, "different screens");
+    }
+
+    #[test]
+    fn a_region_defaults_to_the_first_display() {
+        let r = Region::new(
+            PixelRect { x: 0, y: 0, w: 10, h: 10 },
+            Source::Wm,
+            Granularity::Window,
+            1.0,
+        );
+        assert_eq!(r.display_id, 0, "single-display callers need no change");
     }
 
     #[test]
