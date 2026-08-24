@@ -315,9 +315,18 @@ categorized, time-ranged digest.
   at any time. Turning it back on the same day MUST rejoin that day's existing timeline
   rather than starting a parallel one, and the off interval MUST be recorded as a gap in the
   same way as an idle pause (FR-032).
-- **FR-034**: The segment interval MUST be user-configurable — 15 minutes, 30 minutes, or any
-  other value — and MUST NOT be hardcoded. The configured value applies to segmentation,
-  to the summarization cadence, and to the liveness window in FR-006 alike.
+- **FR-034**: The segment interval MUST be user-configurable and MUST NOT be hardcoded. The
+  intended operating range is **10 to 15 minutes**, with a **hard floor of 5 minutes** and a
+  sanity ceiling of 1 hour; the default is 15 minutes. The configured value applies to
+  segmentation, to the summarization cadence, and to the liveness window in FR-006 alike.
+- **FR-034a**: The floor exists because below it the per-segment perception cost (one pass per
+  region per display) cannot keep pace with the cadence, and the timeline fills with fragments
+  too short to describe an activity. Second-scale intervals MUST be rejected for a real
+  recording.
+- **FR-034b**: This interval constraint is **scoped to Dayflow** and MUST NOT gate the wider
+  product. gentle-eye's core use is real-time and short-clip screen recording at 1–30 fps; a
+  stale or nonsensical Dayflow interval MUST NOT be able to fail configuration loading, or
+  block a recording, for a user who is not using Dayflow at all.
 - **FR-035**: Changing the segment interval MUST take effect from the next segment boundary
   without discarding, rewriting or re-timing any timeline entry already recorded under the
   previous value. A day MAY therefore contain segments of differing lengths.
@@ -450,8 +459,10 @@ categorized, time-ranged digest.
 - **Residency default**: the text tier is assumed to be kept resident during an active
   recording, on the measured basis that a 15-minute cadence otherwise pays the cold-load cost
   on every segment.
-- **Segment length**: default 15 minutes; user-configurable to 30 minutes or any other value,
-  changeable mid-day (FR-034/FR-035). Nothing downstream may assume a uniform segment length.
+- **Segment length**: default 15 minutes; intended operating range 10–15 minutes; permitted
+  5 minutes to 1 hour; changeable mid-day (FR-034/FR-035). Nothing downstream may assume a
+  uniform segment length. The floor is enforced by a Dayflow-scoped validator invoked when a
+  session or daemon starts — deliberately NOT by the library-wide config validator (FR-034b).
 - **Capture rate default**: 0.2–0.5 frames per second for all-day-tier durations, per the
   existing duration-aware heuristic.
 - **Machine-local configuration**: the perception endpoint configuration lives outside the

@@ -544,10 +544,15 @@ impl Default for PerceptionConfig {
 pub struct DayflowConfig {
     /// Segment length in SECONDS — the authoritative interval (FR-034).
     ///
-    /// User-configurable to any value and changeable mid-day; a change takes
-    /// effect at the next boundary and never re-times an existing entry
-    /// (FR-035). Seconds rather than minutes so short intervals are expressible
-    /// for tests and smoke runs.
+    /// Intended operating range is **10–15 minutes**; the default is 900 s
+    /// (15 min). Permitted range is [`DayflowConfig::MIN_SEGMENT_SECONDS`]
+    /// (5 min) to [`DayflowConfig::MAX_SEGMENT_SECONDS`] (1 h), enforced by
+    /// `AppConfig::validate`. Changeable mid-day: a change takes effect at the
+    /// next boundary and never re-times an existing entry (FR-035).
+    ///
+    /// Stored in seconds so the value is exact and so 10 vs 15 minutes is a
+    /// plain number, NOT so that second-scale intervals are usable — those are
+    /// rejected by validation.
     ///
     /// A day may therefore contain segments of DIFFERENT lengths. Nothing
     /// downstream may derive a duration by multiplying a count by this value —
@@ -595,6 +600,30 @@ impl Default for DayflowConfig {
 }
 
 impl DayflowConfig {
+    /// Hard floor on a segment: **5 minutes**.
+    ///
+    /// Dayflow is an all-day recorder, not a frame grabber. Below this the
+    /// per-segment perception cost (one pass per region per display) cannot keep
+    /// up with the cadence, the timeline fills with fragments too short to
+    /// describe an activity, and the segment count per day becomes unmanageable.
+    /// Tests that need sub-minimum intervals drive ffmpeg directly rather than
+    /// going through a validated config.
+    pub const MIN_SEGMENT_SECONDS: u32 = 300;
+
+    /// Sanity ceiling: **1 hour**.
+    ///
+    /// A longer interval delays BOTH the first timeline entry and the first
+    /// liveness signal — degraded detection is defined in segment intervals
+    /// (SC-006), so an interval this long already means an hour of silence
+    /// before a fault is visible.
+    pub const MAX_SEGMENT_SECONDS: u32 = 3600;
+
+    /// The intended operating range: **10 to 15 minutes**.
+    ///
+    /// Not enforced — 5 minutes to 1 hour is permitted — but this is the band
+    /// the design is tuned for and the default sits at its top.
+    pub const RECOMMENDED_SEGMENT_SECONDS: std::ops::RangeInclusive<u32> = 600..=900;
+
     /// The configured segment length.
     ///
     /// `segment_seconds` is authoritative; `chunk_minutes` is consulted only
@@ -607,6 +636,30 @@ impl DayflowConfig {
             u64::from(self.chunk_minutes) * 60
         };
         std::time::Duration::from_secs(secs)
+    }
+
+    /// Validate the segment interval. **Dayflow-scoped on purpose.**
+    ///
+    /// This is NOT called from `AppConfig::validate`, and must not be. gentle-eye
+    /// is a general screen-recording library whose core use is real-time and
+    /// short-clip capture at 1–30 fps; the 5-minute floor is a property of the
+    /// dayflow FEATURE, not of the library. Wiring it into the library-wide
+    /// validator would let a stale `dayflow.*` value fail the config load for a
+    /// user who is only recording a ten-second clip.
+    ///
+    /// Call this when a dayflow session or daemon STARTS — the one moment the
+    /// interval actually has to make sense.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let seg = self.segment_duration().as_secs();
+        if seg < u64::from(Self::MIN_SEGMENT_SECONDS) || seg > u64::from(Self::MAX_SEGMENT_SECONDS) {
+            return Err(ConfigError::ValueOutOfRange {
+                field: "dayflow.segment_seconds".to_string(),
+                value: seg.to_string(),
+                min: Self::MIN_SEGMENT_SECONDS.to_string(),
+                max: Self::MAX_SEGMENT_SECONDS.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Full URL the perception tiers post to.
@@ -826,6 +879,80 @@ mod tests {
     fn test_validate_valid_config() {
         let config = AppConfig::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn dayflow_interval_must_not_gate_the_whole_library() {
+        // gentle-eye's core use is real-time / short-clip recording at 1-30 fps.
+        // The dayflow 5-minute floor is a FEATURE constraint and must never be
+        // able to fail the library-wide config load: a user recording a ten
+        // second clip should not be blocked by a stale dayflow value.
+        let mut cfg = AppConfig::default();
+        cfg.recording.fps = 30; // real-time capture
+        cfg.recording.max_duration_seconds = 10; // a short clip
+        cfg.dayflow.segment_seconds = 1; // nonsense FOR DAYFLOW
+        cfg.dayflow.chunk_minutes = 0;
+        assert!(
+            cfg.validate().is_ok(),
+            "a nonsense dayflow interval must NOT block a real-time recording config"
+        );
+        // ...while the dayflow-scoped validator still rejects it.
+        assert!(
+            cfg.dayflow.validate().is_err(),
+            "the dayflow-scoped validator must still enforce its own floor"
+        );
+    }
+
+    #[test]
+    fn segment_interval_floor_is_five_minutes() {
+        // Dayflow is an all-day recorder. A second-scale "segment" is not a
+        // small config choice, it is a different product.
+        let mut cfg = DayflowConfig::default();
+        for bad in [1, 30, 60, 299] {
+            cfg.segment_seconds = bad;
+            assert!(
+                cfg.validate().is_err(),
+                "{bad}s segment must be rejected (floor is {}s)",
+                DayflowConfig::MIN_SEGMENT_SECONDS
+            );
+        }
+        cfg.segment_seconds = DayflowConfig::MIN_SEGMENT_SECONDS;
+        assert!(cfg.validate().is_ok(), "exactly 5 minutes must be accepted");
+    }
+
+    #[test]
+    fn segment_interval_accepts_the_intended_ten_to_fifteen_minutes() {
+        let mut cfg = DayflowConfig::default();
+        for good in [600, 720, 900] {
+            cfg.segment_seconds = good;
+            assert!(cfg.validate().is_ok(), "{good}s is in the intended range");
+        }
+        assert!(DayflowConfig::RECOMMENDED_SEGMENT_SECONDS.contains(&600));
+        assert!(DayflowConfig::RECOMMENDED_SEGMENT_SECONDS.contains(&900));
+        // the default sits at the top of the intended band
+        assert_eq!(AppConfig::default().dayflow.segment_seconds, 900);
+    }
+
+    #[test]
+    fn segment_interval_rejects_an_absurdly_long_one() {
+        let mut cfg = DayflowConfig::default();
+        cfg.segment_seconds = DayflowConfig::MAX_SEGMENT_SECONDS + 1;
+        assert!(cfg.validate().is_err(), "beyond 1h must be rejected");
+    }
+
+    #[test]
+    fn legacy_chunk_minutes_cannot_bypass_the_floor() {
+        // Validation reads the EFFECTIVE duration, so an old config file that
+        // only sets chunk_minutes is held to the same floor as a new one.
+        let mut cfg = DayflowConfig::default();
+        cfg.segment_seconds = 0; // defer to the legacy field
+        cfg.chunk_minutes = 1; // 60s — below the floor
+        assert!(
+            cfg.validate().is_err(),
+            "a 1-minute legacy interval must be rejected, not silently honoured"
+        );
+        cfg.chunk_minutes = 10;
+        assert!(cfg.validate().is_ok(), "a 10-minute legacy interval is fine");
     }
 
     #[test]
