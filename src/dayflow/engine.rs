@@ -278,9 +278,19 @@ impl DayflowRun {
 
     fn note_closed(&mut self, w: &ClosedWindow) {
         self.chunks_written += 1;
+        // Evidence of production is when a sample was last actually TAKEN, not
+        // when the window happened to close.
+        //
+        // A window closed by a pause, an interval change or a stop ends at `now`
+        // whatever the sampler was doing. Using `end_wall` here let a dead
+        // sampler read Healthy the instant any of those fired — closing a stale
+        // window is bookkeeping, not output.
+        let Some(produced_at) = w.last_sample_at else {
+            return; // a window containing no samples is not evidence of anything
+        };
         self.last_chunk_at = Some(match self.last_chunk_at {
-            Some(prev) if prev > w.end_wall => prev,
-            _ => w.end_wall,
+            Some(prev) if prev > produced_at => prev,
+            _ => produced_at,
         });
     }
 }
@@ -541,6 +551,69 @@ mod tests {
                 "repeated ensure-on must not mask a dead sampler"
             );
         }
+    }
+
+    #[test]
+    fn closing_a_stale_window_is_not_evidence_of_production() {
+        // The root cause behind the laundering family: an interval change (or a
+        // pause, or a stop) closes whatever window is open with end_wall = now.
+        // Treating that as output let a DEAD sampler read Healthy the instant
+        // any of them fired.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(60)); // ...then the sampler dies
+
+        assert_eq!(r.liveness(at(3_000)).health, DayflowHealth::Degraded);
+
+        // A config change closes the stale window — bookkeeping, not production.
+        // Note the new interval must not WIDEN the staleness tolerance, or the
+        // run is legitimately healthy for a longer silence and the test would be
+        // measuring the wrong thing. 300s ⇒ stale after 600s.
+        r.set_interval(std::time::Duration::from_secs(300), at(3_000));
+        assert_eq!(
+            r.liveness(at(3_000)).health,
+            DayflowHealth::Degraded,
+            "closing a stale window must NOT resurrect a dead sampler"
+        );
+        assert_eq!(
+            r.liveness(at(3_000)).last_chunk_at,
+            Some(at(60)),
+            "the evidence timestamp is the last SAMPLE, not the window close"
+        );
+    }
+
+    #[test]
+    fn turning_on_after_a_long_deliberate_off_reads_healthy() {
+        // Guards the clock-reset half that survived mutation: without it a user
+        // turning capture back on after a long off instantly reads Degraded,
+        // violating FR-032.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(600));
+        r.turn_off(at(700));
+        assert_eq!(r.liveness(at(700)).health, DayflowHealth::Off);
+
+        r.turn_on(at(20_000)).unwrap();
+        assert_eq!(
+            r.liveness(at(20_000)).health,
+            DayflowHealth::Healthy,
+            "turning it back on must give it time to produce, not fault instantly"
+        );
+        // ...and it still degrades if it then produces nothing
+        assert_eq!(r.liveness(at(22_000)).health, DayflowHealth::Degraded);
+    }
+
+    #[test]
+    fn stopping_a_paused_run_leaves_no_open_gap_in_its_ledger() {
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        settle_idle(&mut r, 400, 300);
+        assert!(r.pauses_seen().last().unwrap().to.is_none(), "open while paused");
+        r.stop(at(2_000));
+        assert!(
+            r.pauses_seen().iter().all(|p| p.to.is_some()),
+            "a finished run must not carry a pause that never closes"
+        );
     }
 
     #[test]

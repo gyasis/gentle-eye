@@ -80,6 +80,13 @@ pub struct ClosedWindow {
     pub end_wall: DateTime<Utc>,
     /// How many samples were taken during it, including skipped ones.
     pub sample_count: u32,
+    /// When a sample was last actually TAKEN in this window, if any.
+    ///
+    /// Distinct from `end_wall`, and the distinction matters: a window closed by
+    /// a pause, an interval change or a stop ends at `now` regardless of whether
+    /// anything was sampled recently. Treating the close time as evidence of
+    /// production lets a dead sampler look alive the moment any of those fire.
+    pub last_sample_at: Option<DateTime<Utc>>,
     /// Why it ended.
     pub reason: CloseReason,
 }
@@ -114,6 +121,7 @@ struct OpenWindow {
     sequence: u64,
     start_wall: DateTime<Utc>,
     sample_count: u32,
+    last_sample_at: Option<DateTime<Utc>>,
 }
 
 /// Owns window lifecycle for every captured display.
@@ -176,7 +184,9 @@ impl WindowController {
         } else {
             None
         };
-        self.open_if_absent(display_id, now).sample_count += 1;
+        let w = self.open_if_absent(display_id, now);
+        w.sample_count += 1;
+        w.last_sample_at = Some(now);
         closed
     }
 
@@ -252,15 +262,32 @@ impl WindowController {
         self.close(display_id, now, CloseReason::DisplayRemoved)
     }
 
-    /// Stop: close every open window (FR-005).
+    /// Stop: close every open window (FR-005), and close an open pause interval.
+    ///
+    /// A pause left with `to: None` in a FINISHED run's ledger is corruption: a
+    /// later reader cannot tell "paused until the end of the day" from "the
+    /// record was never completed". Stopping ends everything, including the gap.
     pub fn stop(&mut self, now: DateTime<Utc>) -> Vec<ClosedWindow> {
-        self.close_all(now, CloseReason::Stopped)
+        let closed = self.close_all(now, CloseReason::Stopped);
+        if self.paused.take().is_some() {
+            if let Some(last) = self.pauses.last_mut() {
+                if last.to.is_none() {
+                    last.to = Some(now);
+                }
+            }
+        }
+        closed
     }
 
     fn open_if_absent(&mut self, display_id: u32, now: DateTime<Utc>) -> &mut OpenWindow {
         let next = self.next_sequence.entry(display_id).or_insert(0);
         self.open.entry(display_id).or_insert_with(|| {
-            let w = OpenWindow { sequence: *next, start_wall: now, sample_count: 0 };
+            let w = OpenWindow {
+                sequence: *next,
+                start_wall: now,
+                sample_count: 0,
+                last_sample_at: None,
+            };
             *next += 1;
             w
         })
@@ -278,6 +305,7 @@ impl WindowController {
             start_wall: w.start_wall,
             end_wall: now,
             sample_count: w.sample_count,
+            last_sample_at: w.last_sample_at,
             reason,
         })
     }
@@ -494,6 +522,81 @@ mod tests {
         assert_eq!(closed.sample_count, 1);
         // display 0 is unaffected
         assert!(c.on_sample(0, at(600)).is_some());
+    }
+
+    #[test]
+    fn stopping_while_paused_closes_the_pause_interval() {
+        // A `to: None` pause in a FINISHED run's ledger is corruption: a later
+        // reader cannot distinguish "paused until end of day" from "the record
+        // was never completed".
+        let mut c = ctl();
+        c.on_sample(0, at(0));
+        c.pause(PauseCause::Idle, at(100));
+        assert_eq!(c.pauses().last().unwrap().to, None, "open while paused");
+
+        c.stop(at(500));
+        assert_eq!(
+            c.pauses().last().unwrap().to,
+            Some(at(500)),
+            "stopping must close the open pause, not orphan it"
+        );
+        assert_eq!(c.pause_cause(), None);
+    }
+
+    #[test]
+    fn a_second_pause_cycle_closes_its_own_interval_not_the_first() {
+        // Catches `last_mut()` -> `first_mut()`: with only one cycle the two are
+        // indistinguishable, so a wrong-element write survives every test.
+        let mut c = ctl();
+        c.on_sample(0, at(0));
+        c.pause(PauseCause::Idle, at(100));
+        c.resume(at(200));
+        c.on_sample(0, at(300));
+        c.pause(PauseCause::Locked, at(400));
+        c.resume(at(500));
+
+        let p = c.pauses();
+        assert_eq!(p.len(), 2, "two distinct pauses");
+        assert_eq!(p[0].from, at(100));
+        assert_eq!(p[0].to, Some(at(200)), "the FIRST pause keeps its own end");
+        assert_eq!(p[1].from, at(400));
+        assert_eq!(p[1].to, Some(at(500)), "the SECOND pause gets the second end");
+        assert!(p.iter().all(|i| i.to.is_some()), "no interval left open");
+    }
+
+    #[test]
+    fn an_off_upgrade_touches_the_current_pause_not_an_earlier_one() {
+        // Same wrong-element class, on the upgrade path: with a historical closed
+        // pause present, writing to the first element rewrites history while the
+        // live pause stays Idle.
+        let mut c = ctl();
+        c.on_sample(0, at(0));
+        c.pause(PauseCause::Idle, at(100));
+        c.resume(at(200));
+        c.on_sample(0, at(300));
+        c.pause(PauseCause::Idle, at(400)); // second pause, still idle
+        c.pause(PauseCause::UserOff, at(450)); // user turns it off mid-idle
+
+        let p = c.pauses();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].cause, PauseCause::Idle, "history must NOT be rewritten");
+        assert_eq!(p[1].cause, PauseCause::UserOff, "the CURRENT pause is upgraded");
+        assert_eq!(c.pause_cause(), Some(PauseCause::UserOff));
+    }
+
+    #[test]
+    fn a_window_closed_by_a_pause_reports_when_it_last_sampled() {
+        // last_sample_at must reflect the SAMPLE, not the close.
+        let mut c = ctl();
+        c.on_sample(0, at(0));
+        c.on_sample(0, at(60));
+        let closed = c.pause(PauseCause::Idle, at(400)).pop().unwrap();
+        assert_eq!(closed.end_wall, at(400), "it closed when the pause began");
+        assert_eq!(
+            closed.last_sample_at,
+            Some(at(60)),
+            "but the last SAMPLE was long before that"
+        );
     }
 
     #[test]

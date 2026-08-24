@@ -945,3 +945,60 @@ narrowing one.
 The verification ran its mutations in a **throwaway git worktree**, leaving the repo untouched
 — worth copying. Mutation testing is destructive by nature, and doing it in the working tree
 risks leaving a mutation behind if anything interrupts the restore.
+
+
+---
+
+## R17 — Third verification round: the root cause under the laundering family (2026-08-24)
+
+Verdict **PASS WITH NOTES**. Both prior fixes verified and mutation-killed, no test weakened —
+and five more confirmed findings, one of which explains the whole family.
+
+### The root cause: closing a window is not producing
+
+`note_closed` took its evidence timestamp from `ClosedWindow.end_wall`. But a window closed by
+a **pause**, an **interval change**, a **display removal** or a **stop** ends at `now` whatever
+the sampler was doing. So with a dead sampler and an open window, any of those events refreshed
+`last_chunk_at` to the present and the run read **Healthy** again. Proven by probe.
+
+This is the same shape as Hole 2 (`turn_on` laundering health) and the `set_interval` case the
+reviewer found — they were not three bugs but **three symptoms of one wrong definition**.
+
+Fixed by recording `last_sample_at` on the window and using it as the evidence: production is
+**when a sample was last actually taken**, not when bookkeeping happened to close a window. A
+window with no samples now contributes no evidence at all.
+
+**The lesson generalises past this feature**: when a health signal has been laundered in three
+different places, stop patching the call sites and ask what the signal is actually measuring.
+Every one of those patches was locally correct and none addressed the cause.
+
+### Also fixed
+
+- **`stop()` during a pause left `to: None` forever** in a finished run's ledger — the exact
+  defect my own `turn_off` guard's comment condemns. Fixed on one path, missed on the adjacent
+  one. A later reader cannot distinguish "paused until end of day" from a truncated record.
+- **`last_mut()` → `first_mut()` survived in TWO places** (`resume` and the pause upgrade),
+  because no test drove **two** pause cycles — with one pause the first and last element are the
+  same. A day with two pauses is ordinary, and the mutant would close the wrong interval or
+  rewrite history. Two-cycle tests added.
+- **The `producing_since` reset was itself unasserted** — third occurrence of "fix correct,
+  asserted nowhere" in three commits.
+
+### Two of my own test premises were wrong, and one was instructive
+
+`closing_a_stale_window_is_not_evidence_of_production` failed at first because the interval
+change I used (600s → 1800s) **widened the staleness tolerance** to 2×1800s, making the run
+legitimately healthy for that silence. The code was right and the test was measuring the wrong
+thing. Worth remembering: **changing the interval changes what "stale" means**, so any test
+about staleness must hold the interval fixed or account for it.
+
+The second was mundane — a 50,000-second offset crossed midnight and tripped the cross-day
+guard.
+
+### Method
+
+Mutations ran in a **throwaway git worktree**, adopted from the previous review. One mutation
+(`M2`) silently failed to apply because its pattern appeared twice in the file, and reported a
+passing suite — a false "killed" that would have been read as success. **A mutation that does
+not apply looks exactly like a mutation the tests caught.** Assert the pattern is unique, and
+treat an unexpectedly passing mutation as suspicious rather than reassuring.
