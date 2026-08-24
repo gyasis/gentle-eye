@@ -23,6 +23,7 @@ pub mod errors;
 pub mod gate;
 pub mod models;
 pub mod sampler;
+pub mod window;
 pub mod retention;
 pub mod summarizer;
 pub mod timeline;
