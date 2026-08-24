@@ -308,6 +308,11 @@ fn default_magnitude_threshold() -> f64 {
     6.0
 }
 
+/// Absorbs downscale resampling jitter before counting a pixel as changed.
+fn default_pixel_tolerance() -> u8 {
+    2
+}
+
 /// videolocr `change_threshold` — 0.4 in practice (proportion strategy).
 fn default_proportion_threshold() -> f64 {
     0.4
@@ -693,6 +698,12 @@ pub struct DeltaConfig {
     /// dayflow does not use).
     #[serde(default = "default_magnitude_threshold", alias = "change_threshold")]
     pub magnitude_threshold: f64,
+    /// PROPORTION strategy: a pixel counts as changed only if it differs by MORE
+    /// than this. videolocr needed no tolerance because it read decoded video;
+    /// dayflow compares downscaled captures, where resampling jitter alone can
+    /// move a large share of pixels by +/-1 and trip the gate on every sample.
+    #[serde(default = "default_pixel_tolerance")]
+    pub pixel_tolerance: u8,
     /// PROPORTION strategy: fraction of pixels that must differ. videolocr's
     /// `change_threshold` = 0.4 in practice ("lower means more frames").
     #[serde(default = "default_proportion_threshold")]
@@ -714,6 +725,7 @@ impl Default for DeltaConfig {
             gate_width: default_gate_width(),
             strategy: crate::dayflow::gate::GateStrategy::default(),
             magnitude_threshold: default_magnitude_threshold(),
+            pixel_tolerance: default_pixel_tolerance(),
             proportion_threshold: default_proportion_threshold(),
             content_std: default_content_std(),
             dedup_text: default_dedup_text(),

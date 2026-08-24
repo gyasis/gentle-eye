@@ -109,15 +109,26 @@ pub fn mean_abs_diff(prev: &[u8], cur: &[u8]) -> f64 {
     sum as f64 / cur.len() as f64
 }
 
-/// Fraction of pixels that differ at all (videolocr's method).
+/// Fraction of pixels differing by more than `tolerance` (videolocr's method,
+/// with a tolerance videolocr did not need).
+///
+/// videolocr counted `count_nonzero(absdiff)` — ANY one-level difference. It
+/// read decoded video frames, which are stable. Dayflow compares DOWNSCALED
+/// captures, and resampling jitter alone can move a large share of pixels by
+/// ±1. With a zero tolerance that would trip the gate on nearly every sample and
+/// erode the entire saving, so a small tolerance is applied before counting.
 ///
 /// Differing lengths return `1.0` — everything changed — for the same reason
 /// [`mean_abs_diff`] returns infinity.
-pub fn changed_fraction(prev: &[u8], cur: &[u8]) -> f64 {
+pub fn changed_fraction(prev: &[u8], cur: &[u8], tolerance: u8) -> f64 {
     if prev.len() != cur.len() || cur.is_empty() {
         return 1.0;
     }
-    let changed = prev.iter().zip(cur).filter(|(a, b)| a != b).count();
+    let changed = prev
+        .iter()
+        .zip(cur)
+        .filter(|(a, b)| a.abs_diff(**b) > tolerance)
+        .count();
     changed as f64 / cur.len() as f64
 }
 
@@ -150,6 +161,7 @@ pub fn evaluate(
     strategy: GateStrategy,
     magnitude_threshold: f64,
     proportion_threshold: f64,
+    pixel_tolerance: u8,
     content_std_floor: f64,
 ) -> GateVerdict {
     // An empty buffer means the capture or downscale failed. Fail OPEN: we
@@ -165,7 +177,7 @@ pub fn evaluate(
     };
 
     let by_magnitude = mean_abs_diff(prev, cur) > magnitude_threshold;
-    let by_proportion = changed_fraction(prev, cur) > proportion_threshold;
+    let by_proportion = changed_fraction(prev, cur, pixel_tolerance) > proportion_threshold;
 
     let changed = match strategy {
         GateStrategy::Magnitude => by_magnitude,
@@ -207,7 +219,7 @@ mod tests {
         }
         assert!(mean_abs_diff(&base, &subtle) > MAG, "magnitude sees it");
         assert!(
-            changed_fraction(&base, &subtle) > PROP,
+            changed_fraction(&base, &subtle, 0) > PROP,
             "proportion also sees an every-pixel shift"
         );
 
@@ -219,9 +231,9 @@ mod tests {
             *b = b.wrapping_add(200);
         }
         assert!(mean_abs_diff(&base, &intense) < MAG, "magnitude ignores a 1% change");
-        assert!(changed_fraction(&base, &intense) < PROP, "proportion ignores it too");
+        assert!(changed_fraction(&base, &intense, 0) < PROP, "proportion ignores it too");
         assert_eq!(
-            evaluate(Some(&base), &intense, GateStrategy::Either, MAG, PROP, STD),
+            evaluate(Some(&base), &intense, GateStrategy::Either, MAG, PROP, 0, STD),
             GateVerdict::Unchanged,
             "a cursor blink must NOT count as a changed screen"
         );
@@ -234,15 +246,15 @@ mod tests {
             *b = b.wrapping_add(25);
         }
         let dm = mean_abs_diff(&base, &narrow_intense);
-        let dp = changed_fraction(&base, &narrow_intense);
+        let dp = changed_fraction(&base, &narrow_intense, 0);
         assert!(dm > MAG, "magnitude catches it (mean {dm})");
         assert!(dp < PROP, "proportion misses it (only {dp} of pixels moved)");
         assert_eq!(
-            evaluate(Some(&base), &narrow_intense, GateStrategy::Proportion, MAG, PROP, STD),
+            evaluate(Some(&base), &narrow_intense, GateStrategy::Proportion, MAG, PROP, 0, STD),
             GateVerdict::Unchanged
         );
         assert_eq!(
-            evaluate(Some(&base), &narrow_intense, GateStrategy::Either, MAG, PROP, STD),
+            evaluate(Some(&base), &narrow_intense, GateStrategy::Either, MAG, PROP, 0, STD),
             GateVerdict::Changed,
             "Either must not inherit Proportion's blind spot either"
         );
@@ -254,18 +266,45 @@ mod tests {
             *b = b.saturating_add(3);
         }
         let m = mean_abs_diff(&base, &half);
-        let p = changed_fraction(&base, &half);
+        let p = changed_fraction(&base, &half, 0);
         assert!(m < MAG, "magnitude misses it (mean only {m})");
         assert!(p > PROP, "proportion catches it ({p} of pixels moved)");
         // ...and this is exactly why Either exists:
         assert_eq!(
-            evaluate(Some(&base), &half, GateStrategy::Magnitude, MAG, PROP, STD),
+            evaluate(Some(&base), &half, GateStrategy::Magnitude, MAG, PROP, 0, STD),
             GateVerdict::Unchanged
         );
         assert_eq!(
-            evaluate(Some(&base), &half, GateStrategy::Either, MAG, PROP, STD),
+            evaluate(Some(&base), &half, GateStrategy::Either, MAG, PROP, 0, STD),
             GateVerdict::Changed,
             "Either must not inherit Magnitude's blind spot"
+        );
+    }
+
+    #[test]
+    fn a_pixel_tolerance_absorbs_downscale_jitter() {
+        // R14 risk: dayflow compares DOWNSCALED captures, where resampling can
+        // shift a large share of pixels by +/-1. With zero tolerance that trips
+        // the gate on nearly every sample and the whole saving disappears.
+        let base = textured(10_000, 0);
+        let jittered: Vec<u8> = base
+            .iter()
+            .enumerate()
+            .map(|(i, b)| if i % 2 == 0 { b.saturating_add(1) } else { *b })
+            .collect();
+
+        assert!(
+            changed_fraction(&base, &jittered, 0) > PROP,
+            "with NO tolerance, +/-1 jitter on half the pixels trips the gate"
+        );
+        assert!(
+            changed_fraction(&base, &jittered, 2) < PROP,
+            "a tolerance of 2 absorbs it"
+        );
+        assert_eq!(
+            evaluate(Some(&base), &jittered, GateStrategy::Proportion, MAG, PROP, 2, STD),
+            GateVerdict::Unchanged,
+            "jitter alone must not count as a changed screen"
         );
     }
 
@@ -279,7 +318,7 @@ mod tests {
             GateStrategy::Both,
         ] {
             assert_eq!(
-                evaluate(Some(&a), &a, s, MAG, PROP, STD),
+                evaluate(Some(&a), &a, s, MAG, PROP, 0, STD),
                 GateVerdict::Unchanged,
                 "{s:?} must report an identical frame unchanged"
             );
@@ -293,9 +332,9 @@ mod tests {
         let a = textured(5_000, 0);
         let b = textured(9_000, 0);
         assert_eq!(mean_abs_diff(&a, &b), f64::INFINITY);
-        assert_eq!(changed_fraction(&a, &b), 1.0);
+        assert_eq!(changed_fraction(&a, &b, 0), 1.0);
         for s in [GateStrategy::Magnitude, GateStrategy::Proportion, GateStrategy::Both] {
-            assert_eq!(evaluate(Some(&a), &b, s, MAG, PROP, STD), GateVerdict::Changed);
+            assert_eq!(evaluate(Some(&a), &b, s, MAG, PROP, 0, STD), GateVerdict::Changed);
         }
     }
 
@@ -304,7 +343,7 @@ mod tests {
         // An empty buffer means capture or downscale failed. We cannot tell
         // whether anything changed, so we must NOT claim it did not.
         let prev = textured(5_000, 0);
-        let verdict = evaluate(Some(&prev), &[], GateStrategy::Either, MAG, PROP, STD);
+        let verdict = evaluate(Some(&prev), &[], GateStrategy::Either, MAG, PROP, 0, STD);
         assert_eq!(verdict, GateVerdict::Indeterminate);
         assert!(
             verdict.should_perceive(),
@@ -316,7 +355,7 @@ mod tests {
     fn a_blank_screen_is_recognised_and_skipped() {
         let blank = vec![17u8; 5_000]; // uniform → std 0
         assert!(gray_std(&blank) < STD);
-        let v = evaluate(None, &blank, GateStrategy::Either, MAG, PROP, STD);
+        let v = evaluate(None, &blank, GateStrategy::Either, MAG, PROP, 0, STD);
         assert_eq!(v, GateVerdict::Blank);
         assert!(!v.should_perceive());
         assert_eq!(v.skip_reason(), Some("blank"));
@@ -325,7 +364,7 @@ mod tests {
     #[test]
     fn first_sight_is_always_perceived() {
         let a = textured(5_000, 0);
-        let v = evaluate(None, &a, GateStrategy::Either, MAG, PROP, STD);
+        let v = evaluate(None, &a, GateStrategy::Either, MAG, PROP, 0, STD);
         assert_eq!(v, GateVerdict::FirstSight);
         assert!(v.should_perceive());
         assert_eq!(v.skip_reason(), None);
