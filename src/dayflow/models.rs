@@ -118,6 +118,35 @@ impl DayflowHealth {
     }
 }
 
+/// Everything [`DayflowLiveness::assess`] needs.
+///
+/// A struct rather than a long argument list: eight positional parameters of
+/// which three are `Option<DateTime>` is a swap waiting to happen, and the
+/// compiler cannot catch it.
+#[derive(Debug, Clone, Copy)]
+pub struct LivenessInput {
+    /// Now.
+    pub now: DateTime<Utc>,
+    /// Windows closed and recorded so far.
+    pub chunks_written: u64,
+    /// End of the most recent recorded window.
+    pub last_chunk_at: Option<DateTime<Utc>>,
+    /// Timestamp of the most recent timeline entry.
+    pub last_summary_at: Option<DateTime<Utc>>,
+    /// The interval in force.
+    pub segment_seconds: u32,
+    /// Display pipelines currently capturing.
+    pub displays_active: u32,
+    /// Why capture is paused, if it is.
+    pub paused_cause: Option<crate::dayflow::window::PauseCause>,
+    /// Whether the run has stopped.
+    pub stopped: bool,
+    /// When this run last STARTED producing — run start, or the most recent
+    /// resume. The staleness clock runs from here when nothing has been
+    /// produced yet, so "just started" is not mistaken for "broken".
+    pub producing_since: DateTime<Utc>,
+}
+
 /// Evidence that a recorder is alive, derived from what it PRODUCED.
 ///
 /// Every field here comes from an artifact another process wrote — the segment
@@ -150,17 +179,20 @@ impl DayflowLiveness {
     /// `paused_cause` and `stopped` describe INTENT; everything else is
     /// evidence. Intent wins only for explaining silence that was asked for —
     /// it can never make a silent recorder look healthy.
-    pub fn assess(
-        now: DateTime<Utc>,
-        chunks_written: u64,
-        last_chunk_at: Option<DateTime<Utc>>,
-        last_summary_at: Option<DateTime<Utc>>,
-        segment_seconds: u32,
-        displays_active: u32,
-        paused_cause: Option<crate::dayflow::window::PauseCause>,
-        stopped: bool,
-    ) -> Self {
+    pub fn assess(input: LivenessInput) -> Self {
         use crate::dayflow::window::PauseCause;
+        let LivenessInput {
+            now,
+            chunks_written,
+            last_chunk_at,
+            last_summary_at,
+            segment_seconds,
+            displays_active,
+            paused_cause,
+            stopped,
+            producing_since,
+        } = input;
+
         let health = if stopped {
             DayflowHealth::Stopped
         } else {
@@ -168,15 +200,21 @@ impl DayflowLiveness {
                 Some(PauseCause::UserOff) => DayflowHealth::Off,
                 Some(_) => DayflowHealth::Paused,
                 None => {
+                    // Staleness is measured from the later of "last produced" and
+                    // "started producing". Without the second term a freshly
+                    // started run reads Degraded until its first window closes —
+                    // up to a full hour at the interval ceiling — and a run that
+                    // just resumed from a long pause reads Degraded for an
+                    // interval, contradicting FR-032.
+                    let reference = match last_chunk_at {
+                        Some(t) if t > producing_since => t,
+                        _ => producing_since,
+                    };
                     let stale_after = i64::from(segment_seconds) * i64::from(Self::STALE_INTERVALS);
-                    match last_chunk_at {
-                        // Running and producing recently.
-                        Some(t) if (now - t).num_seconds() < stale_after => DayflowHealth::Healthy,
-                        // Running, nothing recent — the fault case.
-                        Some(_) => DayflowHealth::Degraded,
-                        // Running and has NEVER produced. Degraded once enough
-                        // time has passed that it should have.
-                        None => DayflowHealth::Degraded,
+                    if (now - reference).num_seconds() < stale_after {
+                        DayflowHealth::Healthy
+                    } else {
+                        DayflowHealth::Degraded
                     }
                 }
             }
@@ -328,16 +366,67 @@ mod liveness_tests {
         pause: Option<PauseCause>,
         stopped: bool,
     ) -> DayflowLiveness {
-        DayflowLiveness::assess(
-            at(now_s),
-            if last_chunk.is_some() { 5 } else { 0 },
-            last_chunk.map(at),
-            None,
-            SEG,
-            2,
-            pause,
+        assess_from(now_s, last_chunk, pause, stopped, 0)
+    }
+
+    fn assess_from(
+        now_s: i64,
+        last_chunk: Option<i64>,
+        pause: Option<PauseCause>,
+        stopped: bool,
+        producing_since_s: i64,
+    ) -> DayflowLiveness {
+        DayflowLiveness::assess(LivenessInput {
+            now: at(now_s),
+            chunks_written: if last_chunk.is_some() { 5 } else { 0 },
+            last_chunk_at: last_chunk.map(at),
+            last_summary_at: None,
+            segment_seconds: SEG,
+            displays_active: 2,
+            paused_cause: pause,
             stopped,
-        )
+            producing_since: at(producing_since_s),
+        })
+    }
+
+    #[test]
+    fn a_freshly_started_run_is_not_a_fault_before_its_first_window() {
+        // The false-fault this clock exists to prevent: with no start reference a
+        // run reads Degraded every morning until its first window closes — up to
+        // a full hour at the interval ceiling.
+        let l = assess_from(0, None, None, false, 0);
+        assert_eq!(l.health, DayflowHealth::Healthy, "t=0 with nothing produced yet");
+        assert!(!l.health.is_fault());
+
+        // ...but it does NOT excuse silence forever.
+        let later = assess_from(5_000, None, None, false, 0);
+        assert_eq!(
+            later.health,
+            DayflowHealth::Degraded,
+            "past two intervals with nothing produced IS a fault"
+        );
+    }
+
+    #[test]
+    fn a_just_resumed_run_is_not_a_fault_for_its_stale_history() {
+        // Resuming from a long pause leaves last_chunk_at far in the past.
+        // Measuring from it alone reports Degraded immediately after resume,
+        // contradicting FR-032.
+        let l = assess_from(100_000, Some(300), None, false, 99_900);
+        assert_eq!(l.health, DayflowHealth::Healthy, "just resumed, given time to produce");
+        // and it still degrades if it then produces nothing
+        let stale = assess_from(101_500, Some(300), None, false, 99_900);
+        assert_eq!(stale.health, DayflowHealth::Degraded);
+    }
+
+    #[test]
+    fn the_start_clock_cannot_excuse_a_recorder_that_stopped_producing() {
+        // producing_since must never OVERRIDE a more recent real window; the
+        // later of the two is the reference.
+        let l = assess_from(5_000, Some(4_900), None, false, 0);
+        assert_eq!(l.health, DayflowHealth::Healthy, "a recent window wins over an old start");
+        let l2 = assess_from(5_000, Some(100), None, false, 0);
+        assert_eq!(l2.health, DayflowHealth::Degraded, "old window AND old start ⇒ fault");
     }
 
     #[test]
@@ -404,12 +493,21 @@ mod liveness_tests {
         // SC-006. The same 25-minute silence is a fault at a 10-minute interval
         // and perfectly normal at a 30-minute one.
         let silence_secs = 1_500;
-        let short = DayflowLiveness::assess(
-            at(silence_secs), 3, Some(at(0)), None, 600, 1, None, false,
-        );
-        let long = DayflowLiveness::assess(
-            at(silence_secs), 3, Some(at(0)), None, 1800, 1, None, false,
-        );
+        let mk = |seg: u32| {
+            DayflowLiveness::assess(LivenessInput {
+                now: at(silence_secs),
+                chunks_written: 3,
+                last_chunk_at: Some(at(0)),
+                last_summary_at: None,
+                segment_seconds: seg,
+                displays_active: 1,
+                paused_cause: None,
+                stopped: false,
+                producing_since: at(0),
+            })
+        };
+        let short = mk(600);
+        let long = mk(1800);
         assert_eq!(short.health, DayflowHealth::Degraded, "1500s > 2x600s");
         assert_eq!(long.health, DayflowHealth::Healthy, "1500s < 2x1800s");
     }

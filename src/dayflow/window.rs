@@ -28,6 +28,11 @@ use chrono::{DateTime, Utc};
 
 /// Why capture paused. Kept distinct from a fault: a pause is a recorded fact
 /// with a cause, and must never be reported as a degraded recorder (FR-032).
+///
+/// The AUTOMATIC causes resume on their own when the condition clears.
+/// [`PauseCause::UserOff`] does not: it is a deliberate act, and only a
+/// deliberate act reverses it. Conflating the two means a mouse movement
+/// silently un-does someone switching the recorder off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PauseCause {
@@ -39,6 +44,16 @@ pub enum PauseCause {
     DisplaySleep,
     /// The user turned capture off.
     UserOff,
+}
+
+impl PauseCause {
+    /// Whether this pause lifts on its own when the condition clears.
+    ///
+    /// `UserOff` is NOT automatic — auto-resuming it would override an explicit
+    /// instruction to stop recording.
+    pub fn is_automatic(self) -> bool {
+        !matches!(self, Self::UserOff)
+    }
 }
 
 /// A recorded pause interval. `to` is `None` while still paused.
@@ -171,7 +186,18 @@ impl WindowController {
     /// truncated window is real data, and dropping it loses the minutes before
     /// the user stepped away.
     pub fn pause(&mut self, cause: PauseCause, now: DateTime<Utc>) -> Vec<ClosedWindow> {
-        if self.paused.is_some() {
+        if let Some(existing) = self.paused.as_ref() {
+            // Already paused. A DELIBERATE off overrides an automatic pause —
+            // otherwise "turn it off" while idle is silently swallowed and the
+            // next mouse movement resumes recording.
+            if existing.cause.is_automatic() && !cause.is_automatic() {
+                if let Some(p) = self.paused.as_mut() {
+                    p.cause = cause;
+                }
+                if let Some(last) = self.pauses.last_mut() {
+                    last.cause = cause;
+                }
+            }
             return Vec::new();
         }
         let closed = self.close_all(now, CloseReason::Paused);
@@ -181,8 +207,23 @@ impl WindowController {
         closed
     }
 
-    /// Resume capture. The next sample opens a fresh window — resume never
-    /// splices across the gap into a window claiming continuous activity.
+    /// Resume capture only if the pause was AUTOMATIC.
+    ///
+    /// Returns whether it resumed. A [`PauseCause::UserOff`] pause is left
+    /// alone: activity must not override an explicit off switch.
+    pub fn resume_if_automatic(&mut self, now: DateTime<Utc>) -> bool {
+        if self.paused.as_ref().is_some_and(|p| p.cause.is_automatic()) {
+            self.resume(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resume capture unconditionally — a deliberate act (turning it back on).
+    ///
+    /// The next sample opens a fresh window; resume never splices across the gap
+    /// into a window claiming continuous activity.
     pub fn resume(&mut self, now: DateTime<Utc>) {
         if self.paused.take().is_some() {
             // Close the recorded interval too — `pauses` is the durable record,

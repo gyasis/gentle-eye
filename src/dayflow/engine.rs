@@ -43,6 +43,8 @@ pub struct DayflowRun {
     chunks_written: u64,
     last_chunk_at: Option<DateTime<Utc>>,
     last_summary_at: Option<DateTime<Utc>>,
+    /// When this run last started producing — start, or the most recent resume.
+    producing_since: DateTime<Utc>,
 }
 
 impl DayflowRun {
@@ -78,6 +80,7 @@ impl DayflowRun {
             chunks_written: 0,
             last_chunk_at: None,
             last_summary_at: None,
+            producing_since: now,
         })
     }
 
@@ -142,7 +145,13 @@ impl DayflowRun {
         match self.idle.observe(idle_for, since_last) {
             Some(IdleTransition::WentIdle) => self.pause(PauseCause::Idle, now),
             Some(IdleTransition::BecameActive) => {
-                self.windows.resume(now);
+                // Only lift an AUTOMATIC pause. Resuming unconditionally means a
+                // mouse movement silently un-does a deliberate off switch.
+                if self.windows.resume_if_automatic(now) {
+                    // Restart the staleness clock: a just-resumed recorder has
+                    // not had time to produce, and must not read as a fault.
+                    self.producing_since = now;
+                }
                 Vec::new()
             }
             None => Vec::new(),
@@ -161,6 +170,11 @@ impl DayflowRun {
     /// and silently continuing yesterday's would put today's entries on the
     /// wrong day.
     pub fn turn_on(&mut self, now: DateTime<Utc>) -> Result<StartOutcome, DayflowError> {
+        if self.stopped {
+            return Err(DayflowError::Invalid(
+                "this run has stopped; start a new one rather than resurrecting it".into(),
+            ));
+        }
         if now.date_naive() != self.day {
             return Err(DayflowError::Invalid(format!(
                 "this run belongs to {}; {} is a different day and needs a new session",
@@ -170,6 +184,7 @@ impl DayflowRun {
         }
         self.windows.resume(now);
         self.stopped = false;
+        self.producing_since = now;
         Ok(StartOutcome::Rejoined)
     }
 
@@ -196,6 +211,11 @@ impl DayflowRun {
         closed
     }
 
+    /// Pause intervals recorded by this run.
+    pub fn pauses_seen(&self) -> &[crate::dayflow::window::PauseInterval] {
+        self.windows.pauses()
+    }
+
     /// Note that a window was summarised, advancing that evidence.
     pub fn note_summarized(&mut self, at: DateTime<Utc>) {
         self.last_summary_at = Some(at);
@@ -213,16 +233,25 @@ impl DayflowRun {
 
     /// Current liveness, derived from what this run has PRODUCED.
     pub fn liveness(&self, now: DateTime<Utc>) -> DayflowLiveness {
-        DayflowLiveness::assess(
+        let capturing = if self.stopped || self.windows.pause_cause().is_some() {
+            // S3: "currently capturing" must mean it. A paused or stopped run is
+            // capturing nothing, whatever remains selected.
+            0
+        } else {
+            u32::try_from(self.displays.len()).unwrap_or(u32::MAX)
+        };
+        DayflowLiveness::assess(crate::dayflow::models::LivenessInput {
             now,
-            self.chunks_written,
-            self.last_chunk_at,
-            self.last_summary_at,
-            u32::try_from(self.windows.interval().as_secs()).unwrap_or(u32::MAX),
-            u32::try_from(self.displays.len()).unwrap_or(u32::MAX),
-            self.windows.pause_cause(),
-            self.stopped,
-        )
+            chunks_written: self.chunks_written,
+            last_chunk_at: self.last_chunk_at,
+            last_summary_at: self.last_summary_at,
+            segment_seconds: u32::try_from(self.windows.interval().as_secs())
+                .unwrap_or(u32::MAX),
+            displays_active: capturing,
+            paused_cause: self.windows.pause_cause(),
+            stopped: self.stopped,
+            producing_since: self.producing_since,
+        })
     }
 
     fn pause(&mut self, cause: PauseCause, now: DateTime<Utc>) -> Vec<ClosedWindow> {
@@ -260,6 +289,20 @@ mod tests {
 
     fn run(displays: Vec<u32>) -> DayflowRun {
         DayflowRun::start(&cfg(), DayflowMode::Daemon, displays, at(0)).unwrap()
+    }
+
+    /// Drive the tracker until the idle state settles, at a realistic cadence.
+    fn settle_idle(r: &mut DayflowRun, idle_secs: u64, from: i64) -> Vec<ClosedWindow> {
+        let d = std::time::Duration::from_secs(60);
+        let mut out = Vec::new();
+        for i in 0..4 {
+            out.extend(r.tick_idle(
+                Some(std::time::Duration::from_secs(idle_secs)),
+                d,
+                at(from + i * 60),
+            ));
+        }
+        out
     }
 
     #[test]
@@ -327,25 +370,19 @@ mod tests {
         let mut r = run(vec![0]);
         r.on_sample(0, at(0));
 
-        // idle past 300s, dwelling past 30s
-        r.tick_idle(Some(std::time::Duration::from_secs(310)), std::time::Duration::from_secs(20), at(310));
-        let closed = r.tick_idle(
-            Some(std::time::Duration::from_secs(330)),
-            std::time::Duration::from_secs(20),
-            at(330),
-        );
+        let closed = settle_idle(&mut r, 400, 310);
         assert_eq!(closed.len(), 1, "the open window closes on pause");
-        assert_eq!(r.liveness(at(330)).health, DayflowHealth::Paused);
+        assert_eq!(r.liveness(at(550)).health, DayflowHealth::Paused);
 
         // no samples counted while paused
         assert!(r.on_sample(0, at(400)).is_none());
 
         // return to activity
-        r.tick_idle(Some(std::time::Duration::ZERO), std::time::Duration::from_secs(40), at(500));
-        assert_eq!(r.liveness(at(500)).health, DayflowHealth::Healthy);
-        r.on_sample(0, at(500));
-        let w = r.on_sample(0, at(1100)).expect("a fresh window after resume");
-        assert_eq!(w.start_wall, at(500), "resume starts a new window, no splice");
+        settle_idle(&mut r, 0, 560);
+        assert_eq!(r.liveness(at(800)).health, DayflowHealth::Healthy);
+        r.on_sample(0, at(900));
+        let w = r.on_sample(0, at(1500)).expect("a fresh window after resume");
+        assert_eq!(w.start_wall, at(900), "resume starts a new window, no splice");
     }
 
     #[test]
@@ -395,6 +432,112 @@ mod tests {
         let l = r.liveness(at(100_000));
         assert_eq!(l.health, DayflowHealth::Off);
         assert!(!l.health.is_fault(), "a deliberate off switch is not a fault");
+    }
+
+    #[test]
+    fn activity_must_not_resume_capture_after_a_deliberate_off() {
+        // F1, ordering A: off first, then the user walks away and comes back.
+        // Resuming on a mouse movement would override an explicit instruction to
+        // stop recording.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.turn_off(at(100));
+        assert_eq!(r.liveness(at(100)).health, DayflowHealth::Off);
+
+        // go idle while off, then return to activity
+        settle_idle(&mut r, 400, 300);
+        settle_idle(&mut r, 0, 600);
+
+        assert_eq!(
+            r.liveness(at(900)).health,
+            DayflowHealth::Off,
+            "activity must NOT lift a deliberate off"
+        );
+        assert!(r.on_sample(0, at(700)).is_none(), "and no samples are taken");
+    }
+
+    #[test]
+    fn turning_off_while_idle_paused_actually_takes_effect() {
+        // F1, ordering B: idle-pause first, THEN off. Previously the pause call
+        // returned early, the cause stayed Idle, and the next activity resumed —
+        // the off did nothing at all.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        settle_idle(&mut r, 400, 300);
+        assert_eq!(r.liveness(at(550)).health, DayflowHealth::Paused);
+
+        r.turn_off(at(600));
+        assert_eq!(
+            r.liveness(at(600)).health,
+            DayflowHealth::Off,
+            "the off must override the idle pause, not be swallowed by it"
+        );
+
+        // activity now must NOT resume it
+        settle_idle(&mut r, 0, 700);
+        assert_eq!(r.liveness(at(1000)).health, DayflowHealth::Off);
+    }
+
+    #[test]
+    fn turning_on_again_after_a_deliberate_off_works() {
+        // The guard must block ACTIVITY, not the user.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.turn_off(at(100));
+        assert_eq!(r.turn_on(at(200)).unwrap(), StartOutcome::Rejoined);
+        assert_eq!(r.liveness(at(200)).health, DayflowHealth::Healthy);
+        r.on_sample(0, at(200));
+        assert!(r.on_sample(0, at(800)).is_some(), "capture works again");
+    }
+
+    #[test]
+    fn a_stopped_run_cannot_be_resurrected() {
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.stop(at(100));
+        let err = r.turn_on(at(200)).unwrap_err();
+        assert!(format!("{err}").contains("stopped"), "got: {err}");
+        assert_eq!(r.liveness(at(200)).health, DayflowHealth::Stopped);
+    }
+
+    #[test]
+    fn a_fresh_run_is_not_reported_as_a_fault() {
+        // F2: before this, a brand-new run read Degraded until its first window.
+        let r = run(vec![0]);
+        let l = r.liveness(at(0));
+        assert_eq!(l.health, DayflowHealth::Healthy);
+        assert_eq!(l.chunks_written, 0);
+        assert!(!l.health.is_fault(), "a run that just started is not broken");
+    }
+
+    #[test]
+    fn resuming_from_a_long_pause_is_not_reported_as_a_fault() {
+        // F2: last_chunk_at is hours stale after a long idle stretch. Measuring
+        // from it alone reports Degraded the instant capture resumes (FR-032).
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        settle_idle(&mut r, 400, 300);
+
+        // ...hours pass...
+        settle_idle(&mut r, 0, 20_000);
+
+        let l = r.liveness(at(20_300));
+        assert_eq!(l.health, DayflowHealth::Healthy, "just resumed — give it time to produce");
+        assert!(l.last_chunk_at.unwrap() < at(1_000), "its history really is stale");
+    }
+
+    #[test]
+    fn displays_active_reports_what_is_actually_capturing() {
+        // S3: "currently capturing" must mean it.
+        let mut r = run(vec![0, 1]);
+        r.on_sample(0, at(0));
+        assert_eq!(r.liveness(at(0)).displays_active, 2);
+        r.turn_off(at(100));
+        assert_eq!(r.liveness(at(100)).displays_active, 0, "off ⇒ capturing nothing");
+        r.turn_on(at(200)).unwrap();
+        assert_eq!(r.liveness(at(200)).displays_active, 2);
+        r.stop(at(300));
+        assert_eq!(r.liveness(at(300)).displays_active, 0, "stopped ⇒ capturing nothing");
     }
 
     #[test]
@@ -486,10 +629,41 @@ mod tests {
         durs.sort_unstable();
         durs.dedup();
         assert!(durs.len() > 1, "a real day yields varied window lengths, got {durs:?}");
+        // F6: assert the SCENARIO actually happened, not just that invariants
+        // held. Without these the test passes even if tick_idle, set_interval
+        // and remove_display were all no-ops — which is exactly the interaction
+        // coverage it is supposed to provide.
+        assert!(
+            !r.pauses_seen().is_empty(),
+            "the mid-morning idle stretch must have produced a recorded pause"
+        );
+        assert!(
+            windows.iter().any(|w| w.reason == crate::dayflow::window::CloseReason::Paused),
+            "a window must have closed BECAUSE of the pause"
+        );
+        assert!(
+            windows.iter().any(|w| w.duration().num_seconds() > 600),
+            "after the interval change windows must exceed the original 600s"
+        );
+        let last_d1 = windows
+            .iter()
+            .filter(|w| w.display_id == 1)
+            .map(|w| w.end_wall)
+            .max()
+            .expect("display 1 produced windows before being unplugged");
+        assert!(
+            last_d1 <= at(120 * 180),
+            "display 1 must produce NOTHING after it was unplugged at step 120"
+        );
+        assert!(
+            windows.iter().any(|w| w.display_id == 0 && w.end_wall > at(120 * 180)),
+            "display 0 must keep going after display 1 was removed"
+        );
+
         // and the evidence agrees with what was produced
         let l = r.liveness(at(160 * 180));
         assert_eq!(l.chunks_written as usize, windows.len());
         assert_eq!(l.health, DayflowHealth::Stopped);
-        assert_eq!(l.displays_active, 1, "display 1 was unplugged");
+        assert_eq!(l.displays_active, 0, "a STOPPED run captures nothing (S3)");
     }
 }

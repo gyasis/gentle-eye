@@ -804,3 +804,87 @@ The reviewer's question — *"what could I break in the source that this test wo
 catch?"* — is the one that separates a test from decoration, and it is worth asking of every
 test before it is written, not after. Three of the tests it flagged were written in the same
 session that adopted a no-test-gaming rule.
+
+
+---
+
+## R15 — Wave 3 checkpoint review: a real user-facing defect (2026-08-24)
+
+Verdict **FAIL**, and correctly. The headline finding was not a test problem — it was a
+control defect in shipped behaviour.
+
+### F1 — a mouse movement silently cancelled a deliberate OFF
+
+`tick_idle`'s `BecameActive` arm called `windows.resume()` unconditionally, and `resume` never
+inspected WHY capture was paused. Two live paths, neither covered by a test:
+
+1. Turn capture **off**, walk away past the idle threshold, come back → the tracker emits
+   `BecameActive` and **capture resumes on activity**, overriding an explicit instruction to
+   stop recording. On an all-day screen recorder that is a privacy defect, not a nit.
+2. Idle-pause first, **then** `turn_off` → `pause()` returned early because it was already
+   paused, the cause stayed `Idle`, liveness reported **Paused rather than Off**, and the next
+   activity resumed it. The off switch did nothing at all.
+
+**Fixed** by making the distinction explicit rather than implicit: `PauseCause::is_automatic()`
+(idle / locked / display-sleep lift themselves; `UserOff` does not), `resume_if_automatic()` for
+the activity path, and `pause()` upgrading an automatic pause when a deliberate off arrives.
+Both orderings now have tests.
+
+### F2 — liveness manufactured FALSE faults
+
+`assess` had no start reference, so a run read **`Degraded` at t=0 every morning** until its
+first window closed — up to a full hour at the interval ceiling — and a run resuming from a long
+pause read `Degraded` for an interval, contradicting FR-032.
+
+The reviewer also identified why the tests missed it: `liveness_counts_only_windows_that_actually_closed`
+called `liveness(at(0))` but asserted only `chunks_written`. Asserting `health` there would have
+failed. **A test that stops just short of the interesting assertion is worse than no test — it
+looks like coverage.**
+
+**Fixed** with `producing_since` (run start, or the most recent resume). Staleness now measures
+from the LATER of that and `last_chunk_at`, so a fresh or just-resumed run is given time to
+produce, while a genuinely silent one still degrades. Three new tests, including one asserting
+the start clock cannot excuse a recorder that stopped producing.
+
+### F4 — hysteresis was a no-op at every realistic poll rate
+
+`pending_for += since_last` credited time spent under the OPPOSITE condition toward the dwell.
+Whenever the poll period is at least the dwell — 30s default, and dayflow polls **minutes**
+apart — every transition fired on its first observation and the debounce did nothing. The
+existing flap test hard-coded 5s ticks and could not see it; the day simulation ticks at 180s,
+where it was provably inert.
+
+**Fixed**: the dwell now starts when the flip is FIRST seen and accumulates only from subsequent
+readings. New tests exercise the realistic 180s cadence in both directions.
+
+### F3, F5, F6, S2, S3 — also fixed
+
+- **F3**: `assess` had 8 positional args and tripped `clippy::too_many_arguments`, breaking the
+  lint gate this wave. Replaced with `LivenessInput`; clippy is back to the 4 pre-existing
+  errors owned by T050.
+- **F5**: a test named "…and releases a held pause" exercised no such thing, and the branch it
+  named was **unreachable**. Branch deleted, test renamed to what it actually checks.
+- **F6**: the day simulation asserted only structural invariants, so it passed even if
+  `tick_idle` were a no-op. It now asserts its own scenario — a recorded pause, a window closed
+  BECAUSE of it, a post-change window longer than the original interval, and display 1 producing
+  nothing after its unplug. **Mutation-proven**: making `tick_idle` a no-op now fails it.
+- **S2**: `turn_on` silently resurrected a stopped run. Refused.
+- **S3**: `displays_active` reported the selected count while paused or stopped. Now reports
+  what is actually capturing.
+
+### F7 — accepted as staging, and the checkbox corrected
+
+The reviewer noted T017's claim that liveness reads "the segment ledger and `timeline_entries`"
+overstates what shipped: the evidence currently comes from in-memory engine counters, and
+`daemon.rs` is still a stub. `assess` is deliberately parameterised so a ledger can feed it in
+Wave 4/5, and the sweep test does prove intent flags cannot yield `Healthy` — but the wording
+was ahead of the code, and is corrected in tasks.md.
+
+### The pattern across two reviews
+
+Both checkpoints found the same shape of error: **a test that stops just short of the assertion
+that would have failed.** Wave 2's display test asserted field inequality instead of calling
+`fuse`. Wave 3's liveness test asserted `chunks_written` instead of `health`. Neither was
+lazy — both were written believing they covered the behaviour. The reviewer's question ("what
+could I break that this would not catch?") is the only reliable defence, and it has to be asked
+of a test *before* it is written.

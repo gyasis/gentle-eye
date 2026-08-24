@@ -112,14 +112,16 @@ pub enum IdleTransition {
 pub struct IdleTracker {
     cfg: IdleConfig,
     state: Activity,
-    /// How long the pending opposite condition has held, if any.
+    /// The opposite condition currently being observed, if any.
+    pending: Option<Activity>,
+    /// How long `pending` has held SINCE IT WAS FIRST SEEN.
     pending_for: Duration,
 }
 
 impl IdleTracker {
     /// A tracker starting from [`Activity::Active`].
     pub fn new(cfg: IdleConfig) -> Self {
-        Self { cfg, state: Activity::Active, pending_for: Duration::ZERO }
+        Self { cfg, state: Activity::Active, pending: None, pending_for: Duration::ZERO }
     }
 
     /// Current state.
@@ -140,11 +142,11 @@ impl IdleTracker {
     ) -> Option<IdleTransition> {
         if !self.cfg.enabled {
             // Disabled: never pause, and never accumulate a pending transition.
+            // There is no "release a held pause" branch, because `enabled` is
+            // fixed for a tracker's lifetime and `state` can only become Idle on
+            // the enabled path — that combination is unreachable.
+            self.pending = None;
             self.pending_for = Duration::ZERO;
-            if self.state == Activity::Idle {
-                self.state = Activity::Active;
-                return Some(IdleTransition::BecameActive);
-            }
             return None;
         }
 
@@ -156,15 +158,29 @@ impl IdleTracker {
 
         let wants = if looks_idle { Activity::Idle } else { Activity::Active };
         if wants == self.state {
+            self.pending = None;
             self.pending_for = Duration::ZERO;
             return None;
         }
 
+        // Dwell accumulates only from readings AFTER the flip was first seen.
+        //
+        // Adding `since_last` on the first sighting would credit time spent
+        // under the OPPOSITE condition toward the dwell, which makes the whole
+        // debounce collapse whenever the poll period is at least as long as the
+        // dwell: every transition would then fire on its first observation.
+        // Dayflow polls minutes apart, so that is the normal case, not an edge.
+        if self.pending != Some(wants) {
+            self.pending = Some(wants);
+            self.pending_for = Duration::ZERO;
+            return None;
+        }
         self.pending_for = self.pending_for.saturating_add(since_last);
         if self.pending_for < dwell {
             return None; // still dwelling
         }
 
+        self.pending = None;
         self.pending_for = Duration::ZERO;
         self.state = wants;
         Some(match wants {
@@ -213,13 +229,17 @@ mod tests {
         let mut t = IdleTracker::new(cfg()); // 300s threshold, 30s dwell
         assert_eq!(t.observe(Some(Duration::from_secs(299)), TICK), None, "under threshold");
 
-        // First reading past the threshold starts the dwell, it does not fire...
+        // First reading past the threshold only STARTS the dwell — the time
+        // before it was spent active and must not be credited.
         let first = t.observe(Some(Duration::from_secs(301)), Duration::from_secs(10));
-        assert_eq!(first, None, "10s of dwell is under the 30s requirement");
+        assert_eq!(first, None, "the flip is only just observed");
         assert_eq!(t.state(), Activity::Active);
 
-        // ...and it fires once the dwell is satisfied.
-        let then = t.observe(Some(Duration::from_secs(320)), Duration::from_secs(25));
+        let second = t.observe(Some(Duration::from_secs(310)), Duration::from_secs(20));
+        assert_eq!(second, None, "20s of dwell is under the 30s requirement");
+
+        // ...and it fires once the dwell is genuinely satisfied.
+        let then = t.observe(Some(Duration::from_secs(320)), Duration::from_secs(15));
         assert_eq!(then, Some(IdleTransition::WentIdle));
         assert_eq!(t.state(), Activity::Idle);
     }
@@ -227,11 +247,15 @@ mod tests {
     #[test]
     fn returning_to_activity_resumes_after_its_own_dwell() {
         let mut t = IdleTracker::new(cfg());
+        t.observe(Some(Duration::from_secs(400)), TICK);
         t.observe(Some(Duration::from_secs(400)), TICK).unwrap();
         assert_eq!(t.state(), Activity::Idle);
 
         let first = t.observe(Some(Duration::ZERO), Duration::from_secs(5));
         assert_eq!(first, None, "resume dwells too — a stray event should not resume");
+
+        let second = t.observe(Some(Duration::ZERO), Duration::from_secs(10));
+        assert_eq!(second, None, "still under the dwell");
 
         let then = t.observe(Some(Duration::ZERO), Duration::from_secs(30));
         assert_eq!(then, Some(IdleTransition::BecameActive));
@@ -273,7 +297,10 @@ mod tests {
     }
 
     #[test]
-    fn disabling_idle_detection_never_pauses_and_releases_a_held_pause() {
+    fn disabling_idle_detection_never_pauses() {
+        // Named for what it actually tests. There is no "release a held pause"
+        // branch, because that state is unreachable: `enabled` is fixed for a
+        // tracker's lifetime and `state` only becomes Idle on the enabled path.
         let mut c = cfg();
         c.enabled = false;
         let mut t = IdleTracker::new(c);
@@ -281,6 +308,50 @@ mod tests {
             assert_eq!(t.observe(Some(Duration::from_secs(9_999)), TICK), None);
         }
         assert_eq!(t.state(), Activity::Active, "disabled must never pause");
+    }
+
+    #[test]
+    fn hysteresis_holds_at_realistic_poll_rates_not_just_fast_ones() {
+        // F4. Dayflow polls MINUTES apart, far longer than the 30s dwell. If the
+        // dwell credited time spent under the opposite condition, every
+        // transition would fire on its first observation and the debounce would
+        // be a no-op in normal operation — while a fast-tick test still passed.
+        let mut t = IdleTracker::new(cfg()); // 300s threshold, 30s dwell
+        let slow = Duration::from_secs(180); // the day-simulation cadence
+
+        // first sighting of idle must NOT fire, however long the gap before it
+        assert_eq!(
+            t.observe(Some(Duration::from_secs(400)), slow),
+            None,
+            "a 180s gap must not be credited toward the dwell"
+        );
+        assert_eq!(t.state(), Activity::Active);
+        // the NEXT reading, still idle, satisfies the dwell
+        assert_eq!(
+            t.observe(Some(Duration::from_secs(600)), slow),
+            Some(IdleTransition::WentIdle)
+        );
+
+        // and the same in the resume direction
+        assert_eq!(t.observe(Some(Duration::ZERO), slow), None, "resume dwells too");
+        assert_eq!(
+            t.observe(Some(Duration::ZERO), slow),
+            Some(IdleTransition::BecameActive)
+        );
+    }
+
+    #[test]
+    fn flapping_at_a_slow_cadence_also_produces_no_transitions() {
+        // The original flap test used 5s ticks and could not see the bug above.
+        let mut t = IdleTracker::new(cfg());
+        let mut transitions = 0;
+        for i in 0..40 {
+            let idle = if i % 2 == 0 { 299 } else { 301 };
+            if t.observe(Some(Duration::from_secs(idle)), Duration::from_secs(180)).is_some() {
+                transitions += 1;
+            }
+        }
+        assert_eq!(transitions, 0, "slow-cadence flapping must also be absorbed");
     }
 
     #[test]
