@@ -20,6 +20,7 @@ pub mod chunking;
 pub mod daemon;
 pub mod engine;
 pub mod errors;
+pub mod gate;
 pub mod models;
 pub mod retention;
 pub mod summarizer;

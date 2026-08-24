@@ -303,9 +303,14 @@ fn default_gate_width() -> u32 {
     240
 }
 
-/// Lookout `GATE_CHANGE` — 6.0 for screen grabs.
-fn default_change_threshold() -> f64 {
+/// Lookout `GATE_CHANGE` — 6.0 for screen grabs (magnitude strategy).
+fn default_magnitude_threshold() -> f64 {
     6.0
+}
+
+/// videolocr `change_threshold` — 0.4 in practice (proportion strategy).
+fn default_proportion_threshold() -> f64 {
+    0.4
 }
 
 /// Lookout `CONTENT_STD` — below this the frame is blank/uniform.
@@ -678,10 +683,20 @@ pub struct DeltaConfig {
     /// Gate frames are downscaled to this width before comparison. Lookout: 240.
     #[serde(default = "default_gate_width")]
     pub gate_width: u32,
-    /// Mean-abs-diff above which a screen counts as changed. Lookout: 6.0 for
-    /// screen grabs (9.0 for noisy video sources, which dayflow does not use).
-    #[serde(default = "default_change_threshold")]
-    pub change_threshold: f64,
+    /// Which change-detection strategy to apply. Both are implemented; this
+    /// picks per situation rather than committing the product to one.
+    /// Defaults to [`crate::dayflow::gate::GateStrategy::Either`].
+    #[serde(default)]
+    pub strategy: crate::dayflow::gate::GateStrategy,
+    /// MAGNITUDE strategy: mean-abs-diff above which a screen counts as changed.
+    /// Lookout `GATE_CHANGE` = 6.0 for screen grabs (9.0 for noisy video, which
+    /// dayflow does not use).
+    #[serde(default = "default_magnitude_threshold", alias = "change_threshold")]
+    pub magnitude_threshold: f64,
+    /// PROPORTION strategy: fraction of pixels that must differ. videolocr's
+    /// `change_threshold` = 0.4 in practice ("lower means more frames").
+    #[serde(default = "default_proportion_threshold")]
+    pub proportion_threshold: f64,
     /// Greyscale std below which a frame is blank/uniform and has no content
     /// worth perceiving at all. Lookout: 8.0.
     #[serde(default = "default_content_std")]
@@ -697,7 +712,9 @@ impl Default for DeltaConfig {
         Self {
             enabled: default_delta_enabled(),
             gate_width: default_gate_width(),
-            change_threshold: default_change_threshold(),
+            strategy: crate::dayflow::gate::GateStrategy::default(),
+            magnitude_threshold: default_magnitude_threshold(),
+            proportion_threshold: default_proportion_threshold(),
             content_std: default_content_std(),
             dedup_text: default_dedup_text(),
         }
@@ -1305,13 +1322,45 @@ mod tests {
     }
 
     #[test]
+    fn gate_strategy_is_a_parameter_not_a_hardcoded_choice() {
+        use crate::dayflow::gate::GateStrategy;
+        // Both methods ship; the situation picks. Default is Either, which
+        // inherits neither strategy's blind spot — for an all-day recorder a
+        // false "changed" costs one wasted pass, a false "unchanged" loses the
+        // moment permanently.
+        assert_eq!(DeltaConfig::default().strategy, GateStrategy::Either);
+        for s in [
+            GateStrategy::Magnitude,
+            GateStrategy::Proportion,
+            GateStrategy::Either,
+            GateStrategy::Both,
+        ] {
+            let mut d = DayflowConfig::default();
+            d.delta.strategy = s;
+            let back: DayflowConfig =
+                toml::from_str(&toml::to_string(&d).expect("ser")).expect("de");
+            assert_eq!(back.delta.strategy, s, "{s:?} must round-trip through config");
+        }
+    }
+
+    #[test]
+    fn a_config_written_before_the_split_still_parses() {
+        // `change_threshold` was the single knob before the two strategies were
+        // separated; it aliases onto the magnitude threshold it always meant.
+        let d: DeltaConfig = toml::from_str("change_threshold = 9.0\n").expect("legacy parse");
+        assert_eq!(d.magnitude_threshold, 9.0);
+        assert_eq!(d.proportion_threshold, 0.4, "the new knob takes its default");
+    }
+
+    #[test]
     fn delta_gate_carries_lookouts_tuned_constants() {
         // Reused from sparse-delta-perception rather than re-derived. If these
         // drift, the gate has been retuned by accident.
         let g = DeltaConfig::default();
         assert!(g.enabled, "the content gate is the largest saving; default on");
         assert_eq!(g.gate_width, 240, "Lookout GATE_WIDTH");
-        assert_eq!(g.change_threshold, 6.0, "Lookout GATE_CHANGE for screen grabs");
+        assert_eq!(g.magnitude_threshold, 6.0, "Lookout GATE_CHANGE for screen grabs");
+        assert_eq!(g.proportion_threshold, 0.4, "videolocr change_threshold");
         assert_eq!(g.content_std, 8.0, "Lookout CONTENT_STD");
         assert!(g.dedup_text, "identical text must not be re-stored");
     }
@@ -1323,7 +1372,8 @@ mod tests {
         // defeat the whole saving. The gate is deliberately lossy.
         let g = DeltaConfig::default();
         assert!(g.gate_width <= 320, "gate must be a cheap downscale, not full res");
-        assert!(g.change_threshold > 0.0, "a zero threshold IS pixel-exact matching");
+        assert!(g.magnitude_threshold > 0.0, "a zero threshold IS pixel-exact matching");
+        assert!(g.proportion_threshold > 0.0, "likewise for the proportion strategy");
     }
 
     #[test]
