@@ -888,3 +888,60 @@ that would have failed.** Wave 2's display test asserted field inequality instea
 lazy — both were written believing they covered the behaviour. The reviewer's question ("what
 could I break that this would not catch?") is the only reliable defence, and it has to be asked
 of a test *before* it is written.
+
+
+---
+
+## R16 — Verifying the fixes (2026-08-24). PASS WITH NOTES, and two holes I made
+
+After the Wave 3 review returned FAIL I fixed everything and self-certified. That is exactly
+the situation these reviews exist to catch, so the fix commit got its own verification pass —
+one whose brief was explicitly to distrust the author's grading.
+
+### The question worth asking of any fix: were tests WEAKENED?
+
+Independently diffed, assertion by assertion, against both pre-fix commits. Verdict: **no
+assertion was removed, loosened, or retargeted to something easier**; several were made
+strictly harder. The one genuine deletion — a claim about a branch proven unreachable — was
+correct to remove.
+
+This matters because weakening a test is worse than the original bug: it removes the alarm
+while still looking like coverage, and nothing downstream can tell the difference.
+
+### Two holes the verification found that I did not
+
+**1. The fix was correct and asserted nowhere.** Deleting the LEDGER half of the pause upgrade
+(`window.rs`, `pauses.last_mut().cause = cause`) passed all 321 tests. Live state would report
+`UserOff` while the durable `pauses` record still said `Idle` — the precise divergence the fix
+was written to prevent. Found by mutation, not by reading.
+
+The irony is instructive: one commit earlier I had recorded R15's lesson — *"a test that stops
+just short of the assertion that would have failed"* — and then did it again, in the fix for
+the very finding that produced the lesson. **Knowing the failure mode does not prevent it.**
+Only mutating the code and watching a test fail does.
+
+**2. My F2 fix opened a new hole.** `turn_on` reset `producing_since` unconditionally, so
+calling it on an ALREADY-RUNNING run flipped a genuinely `Degraded` state back to `Healthy` —
+repeatably, forever. An idempotent "ensure capture is on" caller in the daemon (T019, not yet
+written) would have permanently masked a dead sampler. The reviewer proved it by executing a
+probe rather than inferring it.
+
+The general shape: **a fix for a false NEGATIVE created a false POSITIVE.** F2 was "liveness
+wrongly says broken"; the cure made it "liveness wrongly says fine", which is the far more
+dangerous direction for this feature. Widening a health definition needs the same scrutiny as
+narrowing one.
+
+**Both fixed and mutation-proven**: removing either guard now fails a test.
+
+### Also closed
+
+- `turn_off` on a stopped run recorded a pause interval that could never close, leaving a
+  permanently open gap in a finished run's ledger.
+- The day simulation's S3 update lost "an unplug decrements displays_active *while running*" —
+  restored as its own test.
+
+### Method note
+
+The verification ran its mutations in a **throwaway git worktree**, leaving the repo untouched
+— worth copying. Mutation testing is destructive by nature, and doing it in the working tree
+risks leaving a mutation behind if anything interrupts the restore.

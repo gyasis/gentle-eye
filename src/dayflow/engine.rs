@@ -159,7 +159,13 @@ impl DayflowRun {
     }
 
     /// Turn capture OFF. The in-progress windows close and are accounted for.
+    ///
+    /// A no-op on a stopped run: recording a pause that can never close would
+    /// leave a permanently open interval in a finished run's ledger.
     pub fn turn_off(&mut self, now: DateTime<Utc>) -> Vec<ClosedWindow> {
+        if self.stopped {
+            return Vec::new();
+        }
         self.pause(PauseCause::UserOff, now)
     }
 
@@ -182,9 +188,17 @@ impl DayflowRun {
                 now.date_naive()
             )));
         }
-        self.windows.resume(now);
-        self.stopped = false;
-        self.producing_since = now;
+        // Only restart the staleness clock if this call ACTUALLY lifted a pause.
+        //
+        // Resetting unconditionally makes `turn_on` a health-launderer: an
+        // idempotent "ensure capture is on" caller would flip a genuinely
+        // Degraded run back to Healthy on every invocation and mask a dead
+        // sampler indefinitely. Turning on something already on is a no-op, and
+        // a no-op must not change what the evidence says.
+        if self.windows.pause_cause().is_some() {
+            self.windows.resume(now);
+            self.producing_since = now;
+        }
         Ok(StartOutcome::Rejoined)
     }
 
@@ -472,6 +486,14 @@ mod tests {
             DayflowHealth::Off,
             "the off must override the idle pause, not be swallowed by it"
         );
+        // The DURABLE record must agree with the live state. Updating only one
+        // of them leaves the ledger saying Idle while liveness says Off — and a
+        // gap's recorded cause is what a later reader has to trust.
+        assert_eq!(
+            r.pauses_seen().last().expect("a pause was recorded").cause,
+            crate::dayflow::window::PauseCause::UserOff,
+            "the recorded pause interval must be upgraded too, not just live state"
+        );
 
         // activity now must NOT resume it
         settle_idle(&mut r, 0, 700);
@@ -488,6 +510,66 @@ mod tests {
         assert_eq!(r.liveness(at(200)).health, DayflowHealth::Healthy);
         r.on_sample(0, at(200));
         assert!(r.on_sample(0, at(800)).is_some(), "capture works again");
+    }
+
+    #[test]
+    fn turning_on_an_already_running_run_cannot_launder_a_degraded_state() {
+        // The mutation-surviving hole: turn_on unconditionally reset the
+        // staleness clock, so an idempotent "ensure capture is on" caller would
+        // flip a genuinely Degraded run back to Healthy on EVERY call and mask a
+        // dead sampler forever.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(600)); // one window closes
+
+        // sampler dies; silence past two intervals
+        assert_eq!(r.liveness(at(3_000)).health, DayflowHealth::Degraded);
+
+        // "ensure it's on" — must NOT change the evidence
+        assert_eq!(r.turn_on(at(3_000)).unwrap(), StartOutcome::Rejoined);
+        assert_eq!(
+            r.liveness(at(3_000)).health,
+            DayflowHealth::Degraded,
+            "turning on something already on is a no-op; it must not launder health"
+        );
+        // ...and repeating it must not help either
+        for t in [3_100, 3_200, 3_300] {
+            r.turn_on(at(t)).unwrap();
+            assert_eq!(
+                r.liveness(at(t)).health,
+                DayflowHealth::Degraded,
+                "repeated ensure-on must not mask a dead sampler"
+            );
+        }
+    }
+
+    #[test]
+    fn turning_off_a_stopped_run_records_no_open_pause() {
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.stop(at(100));
+        let before = r.pauses_seen().len();
+        r.turn_off(at(200));
+        assert_eq!(
+            r.pauses_seen().len(),
+            before,
+            "a stopped run must not gain a pause interval that can never close"
+        );
+    }
+
+    #[test]
+    fn unplugging_a_display_decrements_what_is_capturing() {
+        // Coverage the day-sim lost when S3 changed its stopped-state assertion.
+        let mut r = run(vec![0, 1]);
+        r.on_sample(0, at(0));
+        r.on_sample(1, at(0));
+        assert_eq!(r.liveness(at(0)).displays_active, 2);
+        r.remove_display(1, at(120));
+        assert_eq!(
+            r.liveness(at(120)).displays_active,
+            1,
+            "while STILL RUNNING, an unplug must decrement the count"
+        );
     }
 
     #[test]
