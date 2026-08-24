@@ -8,10 +8,23 @@
 //!
 //! | | [`GateStrategy::Magnitude`] (Lookout) | [`GateStrategy::Proportion`] (videolocr) |
 //! |---|---|---|
-//! | measures | mean absolute difference | fraction of pixels that changed at all |
-//! | catches | a large SUBTLE shift — a theme change, a dimmed screen | a small INTENSE change — a cursor, a spinner, one edited line |
-//! | blind to | a tiny region changing violently | a whole screen shifting slightly |
-//! | tuned at | `6.0` (0–255 scale) | `0.4` fraction |
+//! | measures | mean absolute difference across all pixels | fraction of pixels differing at all |
+//! | sensitive to | how MUCH changed | how WIDELY it changed |
+//! | tuned at | `6.0` on a 0–255 scale | `0.4` of pixels |
+//!
+//! At those thresholds each is blind to a case the other catches, and both
+//! directions are demonstrated in the tests below rather than merely asserted
+//! here:
+//!
+//! - **Proportion catches, Magnitude misses** — half the pixels shift by a small
+//!   amount: mean stays under 6.0, but 0.5 of pixels moved.
+//! - **Magnitude catches, Proportion misses** — 30% of pixels shift hard: mean
+//!   exceeds 6.0, but 0.3 of pixels is under the 0.4 floor.
+//!
+//! Note what NEITHER catches at these settings: a genuinely tiny change such as
+//! a blinking cursor (~1% of pixels). That is deliberate — a gate that fires on
+//! a cursor blink saves nothing — but it means "the screen changed" here means
+//! *meaningfully* changed, not *any* change.
 //!
 //! Rather than pick one and inherit its blind spot, both are implemented and
 //! selectable, plus [`GateStrategy::Either`], which fires when *either* signal
@@ -198,19 +211,40 @@ mod tests {
             "proportion also sees an every-pixel shift"
         );
 
-        // B: a SMALL INTENSE change — 1% of pixels swing hard (a cursor).
+        // B: a genuinely TINY change — 1% of pixels swing hard (a cursor blink).
+        // NEITHER strategy fires, and that is intended: a gate that trips on a
+        // cursor saves nothing. Documented so nobody "fixes" it later.
         let mut intense = base.clone();
         for b in intense.iter_mut().take(n / 100) {
             *b = b.wrapping_add(200);
         }
-        assert!(
-            mean_abs_diff(&base, &intense) < MAG,
-            "magnitude is BLIND to a 1% intense change: {}",
-            mean_abs_diff(&base, &intense)
+        assert!(mean_abs_diff(&base, &intense) < MAG, "magnitude ignores a 1% change");
+        assert!(changed_fraction(&base, &intense) < PROP, "proportion ignores it too");
+        assert_eq!(
+            evaluate(Some(&base), &intense, GateStrategy::Either, MAG, PROP, STD),
+            GateVerdict::Unchanged,
+            "a cursor blink must NOT count as a changed screen"
         );
-        assert!(
-            changed_fraction(&base, &intense) < PROP,
-            "proportion at 0.4 is also blind to a 1% change"
+
+        // D: the OTHER direction — 30% of pixels shift hard. Mean clears 6.0
+        // while the changed fraction stays under 0.4, so Magnitude earns its
+        // place under Either exactly as Proportion does in case C.
+        let mut narrow_intense = base.clone();
+        for b in narrow_intense.iter_mut().take(n * 30 / 100) {
+            *b = b.wrapping_add(25);
+        }
+        let dm = mean_abs_diff(&base, &narrow_intense);
+        let dp = changed_fraction(&base, &narrow_intense);
+        assert!(dm > MAG, "magnitude catches it (mean {dm})");
+        assert!(dp < PROP, "proportion misses it (only {dp} of pixels moved)");
+        assert_eq!(
+            evaluate(Some(&base), &narrow_intense, GateStrategy::Proportion, MAG, PROP, STD),
+            GateVerdict::Unchanged
+        );
+        assert_eq!(
+            evaluate(Some(&base), &narrow_intense, GateStrategy::Either, MAG, PROP, STD),
+            GateVerdict::Changed,
+            "Either must not inherit Proportion's blind spot either"
         );
 
         // C: a moderate-area change that magnitude misses but proportion catches:

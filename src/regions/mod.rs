@@ -88,9 +88,19 @@ pub struct Region {
     /// — a top-left region on a portrait panel is not comparable to a
     /// bottom-right one on a laptop panel.
     ///
-    /// `bbox` is DISPLAY-LOCAL, not virtual-desktop global. On a desk whose
-    /// displays sit at x-offsets 0, 1920 and 5360 the global form would make
-    /// every crop and every comparison carry an offset it does not need.
+    /// `bbox` is expressed in the coordinate space of THIS `display_id` —
+    /// display-local, not virtual-desktop global. On a desk whose displays sit
+    /// at x-offsets 0, 1920 and 5360 the global form would make every crop and
+    /// every comparison carry an offset it does not need.
+    ///
+    /// **Current producer gap, stated rather than hidden:** the WM provider
+    /// (`providers::wm`) translates window coordinates to ROOT, and emits
+    /// `display_id: 0`. That is self-consistent while only one capture surface
+    /// exists — display 0 is effectively the whole virtual desktop — but it is
+    /// NOT display-local, and the per-display sampler (T010/T011) must set both
+    /// the id and the local origin when it captures each screen separately.
+    /// Until then, treat multi-display geometry from `detect()` as unpopulated
+    /// rather than as satisfying this invariant.
     #[serde(default)]
     pub display_id: u32,
     /// Full source chain when fused (seeded to `[source]`).
@@ -179,7 +189,13 @@ pub fn fuse(mut regions: Vec<Region>, thresh: f32) -> Vec<Region> {
     let mut kept: Vec<Region> = Vec::new();
     'next: for r in regions {
         for k in kept.iter_mut() {
-            if k.granularity == r.granularity && iou(&k.bbox, &r.bbox) >= thresh {
+            // Display FIRST: two regions with identical display-local geometry on
+            // different screens have IoU 1.0. Without this guard they fuse into
+            // one and a whole display vanishes from the timeline, silently.
+            if k.display_id == r.display_id
+                && k.granularity == r.granularity
+                && iou(&k.bbox, &r.bbox) >= thresh
+            {
                 for s in &r.provenance {
                     if !k.provenance.contains(s) {
                         k.provenance.push(*s);
@@ -233,6 +249,7 @@ pub fn assign_parents(regions: &mut [Region]) {
     let n = regions.len();
     let boxes: Vec<_> = regions.iter().map(|r| r.bbox).collect();
     let gran: Vec<_> = regions.iter().map(|r| r.granularity).collect();
+    let disp: Vec<_> = regions.iter().map(|r| r.display_id).collect();
     for i in 0..n {
         let mut best: Option<usize> = None;
         let mut best_area = u64::MAX;
@@ -240,7 +257,14 @@ pub fn assign_parents(regions: &mut [Region]) {
             if i == j {
                 continue;
             }
-            if gran[j] <= gran[i] && contains(&boxes[j], &boxes[i]) && !same_box(&boxes[j], &boxes[i]) {
+            // Containment is only meaningful WITHIN a display: bboxes are
+            // display-local, so a pane on one screen can sit "inside" a window
+            // on another purely by coordinate coincidence.
+            if disp[j] == disp[i]
+                && gran[j] <= gran[i]
+                && contains(&boxes[j], &boxes[i])
+                && !same_box(&boxes[j], &boxes[i])
+            {
                 let area = boxes[j].w as u64 * boxes[j].h as u64;
                 if area < best_area {
                     best_area = area;
@@ -421,18 +445,79 @@ mod tests {
     }
 
     #[test]
-    fn regions_on_different_displays_are_distinguishable() {
-        // Identical geometry on two screens must not be the same region. Without
-        // a display, a 3-display desk silently conflates them.
+    fn fuse_must_not_merge_identical_geometry_across_displays() {
+        // THE bug this guard exists for: bboxes are display-local, so the same
+        // pane position on two screens has IoU 1.0. Without a display check
+        // `fuse` collapses them into one region and an entire display vanishes
+        // from the timeline — silently, which is the worst kind.
         let bbox = PixelRect { x: 100, y: 100, w: 400, h: 300 };
-        let a = Region::new(bbox, Source::Wm, Granularity::Pane, 0.9).on_display(0);
-        let b = Region::new(bbox, Source::Wm, Granularity::Pane, 0.9).on_display(2);
-        assert_eq!(a.bbox, b.bbox, "same geometry");
-        assert_ne!(a.display_id, b.display_id, "different screens");
+        let regions = vec![
+            Region::new(bbox, Source::Wm, Granularity::Pane, 0.9).on_display(0),
+            Region::new(bbox, Source::Wm, Granularity::Pane, 0.8).on_display(2),
+        ];
+        assert_eq!(iou(&bbox, &bbox), 1.0, "precondition: geometry is identical");
+
+        let kept = fuse(regions, 0.5);
+        assert_eq!(kept.len(), 2, "both displays must survive fusion, got {kept:?}");
+        let mut displays: Vec<u32> = kept.iter().map(|r| r.display_id).collect();
+        displays.sort_unstable();
+        assert_eq!(displays, vec![0, 2]);
     }
 
     #[test]
-    fn a_region_defaults_to_the_first_display() {
+    fn fuse_still_merges_duplicates_on_the_same_display() {
+        // The guard must not disable fusion outright — same screen, overlapping
+        // boxes from two providers should still collapse to one.
+        let a = PixelRect { x: 0, y: 0, w: 100, h: 100 };
+        let b = PixelRect { x: 2, y: 2, w: 100, h: 100 };
+        let kept = fuse(
+            vec![
+                Region::new(a, Source::Wm, Granularity::Window, 0.9).on_display(1),
+                Region::new(b, Source::AtSpi, Granularity::Window, 0.6).on_display(1),
+            ],
+            0.5,
+        );
+        assert_eq!(kept.len(), 1, "same display + high IoU must still fuse");
+        assert_eq!(kept[0].display_id, 1);
+        assert!(kept[0].provenance.len() >= 2, "provenance must merge");
+    }
+
+    #[test]
+    fn a_region_is_never_parented_to_one_on_another_display() {
+        // Containment is only meaningful within a display. A pane at (10,10) on
+        // display 1 sits "inside" a window at (0,0,500,500) on display 0 purely
+        // by coordinate coincidence.
+        let mut regions = vec![
+            Region::new(
+                PixelRect { x: 0, y: 0, w: 500, h: 500 },
+                Source::Wm,
+                Granularity::Window,
+                0.9,
+            )
+            .on_display(0),
+            Region::new(
+                PixelRect { x: 10, y: 10, w: 100, h: 100 },
+                Source::Wm,
+                Granularity::Pane,
+                0.9,
+            )
+            .on_display(1),
+        ];
+        assign_parents(&mut regions);
+        assert_eq!(
+            regions[1].parent, None,
+            "a pane on display 1 must not be parented to a window on display 0"
+        );
+
+        // ...and the same pane ON display 0 IS parented, so the guard did not
+        // simply disable parenting.
+        regions[1].display_id = 0;
+        assign_parents(&mut regions);
+        assert_eq!(regions[1].parent, Some(0), "same display must still parent");
+    }
+
+    #[test]
+    fn a_region_defaults_to_the_first_display_and_on_display_sets_it() {
         let r = Region::new(
             PixelRect { x: 0, y: 0, w: 10, h: 10 },
             Source::Wm,
@@ -440,6 +525,7 @@ mod tests {
             1.0,
         );
         assert_eq!(r.display_id, 0, "single-display callers need no change");
+        assert_eq!(r.on_display(3).display_id, 3);
     }
 
     #[test]

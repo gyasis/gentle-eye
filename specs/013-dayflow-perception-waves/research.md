@@ -736,3 +736,71 @@ indentation across frames.
    scrolling panes within a window, and better than a flat seen-set.
 5. **A deliberate choice** between magnitude-based (Lookout) and proportion-based (videolocr)
    pixel gating, recorded rather than defaulted.
+
+
+---
+
+## R14 — Wave 2 checkpoint review findings (independent reviewer, 2026-08-24)
+
+An independent reviewer (separate model, no authorship stake) checked the Wave 2 commits with
+one mandate above all: find tests that pass without proving functionality. Verdict: **FAIL**.
+It was right. What it caught, and what changed:
+
+### Confirmed and fixed
+
+1. **T009 was marked done while half-implemented.** The task said thread `display_id` through
+   `detect`/`fuse`/`assign_parents`; only the field and builder had been added. `fuse()`
+   clustered on `granularity + IoU` alone, so two regions with identical display-local geometry
+   on different screens (IoU 1.0) **merged into one and a display vanished** — the exact
+   conflation the commit claimed to fix. `assign_parents()` could parent a pane on display 1 to
+   a window on display 0. Both now guard on display, **mutation-proven**: removing either guard
+   fails the new tests, while `fuse_still_merges_duplicates_on_the_same_display` keeps passing,
+   so the guard fixes the bug without disabling fusion.
+
+2. **The old test could not have caught it.** It asserted field inequality on two hand-built
+   structs — the only breakage it detected was `on_display` becoming a no-op. Replaced with
+   tests that call `fuse` and `assign_parents` and assert on their output.
+
+3. **The `Region.bbox` doc contradicted its only producer.** The doc declared display-local
+   while the WM provider translates to ROOT and emits `display_id: 0`. Rather than quietly
+   change one, the doc now states the invariant AND the current producer gap, so the
+   contradiction is visible instead of hidden until T010.
+
+4. **The gate module doc was contradicted by its own tests.** It claimed Proportion catches "a
+   small intense change — a cursor"; the file's own case B proves a ~1% change trips **neither**
+   strategy at the shipped thresholds. And only one direction of the asymmetry was demonstrated.
+   Doc corrected to describe what is actually proven, the cursor case documented as deliberate
+   ("a gate that fires on a cursor blink saves nothing"), and the missing direction added: 30%
+   of pixels shifting by 25 gives mean 7.5 > 6.0 with fraction 0.3 < 0.4, so **Magnitude earns
+   its place under `Either`** exactly as Proportion does.
+
+5. **Test theatre removed.** Three tests in `models.rs` asserted only on literals the test
+   itself supplied (`!c.summarized` where the helper hardcoded `summarized: false`; `0 == 0`;
+   tuple inequality of constants). They would pass against any implementation including a broken
+   one. Deleted, with a note saying why, and replaced by a test against `plan_chunks` — the code
+   that actually assigns `sequence` — which fails if the assignment is broken.
+
+6. **Clippy could not pass.** `-D warnings` comes from `.cargo/config.toml`, and 5 errors made
+   the constitution's pre-merge gate unsatisfiable. One was introduced by this branch
+   (a manual `!RangeInclusive::contains`) and is fixed. **Four are pre-existing**
+   (`regions/providers/wm.rs:41,48`, `regions/mod.rs:302,340`) and are left for **T050**, which
+   owns that gate — not fixed as a drive-by.
+
+### Open risks the reviewer raised for T010 — address, do not rediscover
+
+- **`changed_fraction` has no per-pixel tolerance.** It is a faithful port of videolocr's
+  `count_nonzero`, so ANY ±1 difference counts as a changed pixel. On a real capture → downscale
+  path with resampling jitter, more than 40% of pixels differing by ±1 is entirely plausible,
+  which would make Proportion — and therefore the default `Either` — fire on nearly every
+  sample and **erode the whole saving**. Untested hypothesis. T010 must measure it on real
+  frames and, if confirmed, add a small per-pixel tolerance before counting.
+- **`dayflow_samples` primary key includes `taken_at TEXT`.** If T010 writes second-resolution
+  timestamps and ever samples twice within a second, the insert violates the key. Either use
+  sub-second precision or key on the sample index instead.
+
+### The lesson
+
+The reviewer's question — *"what could I break in the source that this test would fail to
+catch?"* — is the one that separates a test from decoration, and it is worth asking of every
+test before it is written, not after. Three of the tests it flagged were written in the same
+session that adopted a no-test-gaming rule.

@@ -209,7 +209,7 @@ does not.
       `> DONE:` the doc covers all five and the quickstart's verification steps resolve against it.
 - [ ] T049 [S] `cargo test` — all unit and integration tests green (was T290).
       `> DONE:` `./.tooling/bin/cargo test` exits 0.
-- [ ] T050 [S] `cargo clippy --all-targets -- -D warnings` — zero warnings (was T291).
+- [ ] T050 [S] `cargo clippy --all-targets -- -D warnings` — zero warnings (was T291). NOTE: 4 PRE-EXISTING errors are outstanding on this branch — `regions/providers/wm.rs:41,48` (`and_then(|x| Ok(y))`) and `regions/mod.rs:302,340` (`map_or`). `-D warnings` comes from `.cargo/config.toml`, so the gate is unsatisfiable until they are fixed; they were deliberately NOT fixed as a drive-by by another task.
       `> DONE:` clippy exits 0.
 - [ ] T051 Live validation in `tests/dayflow_live.rs`, `#[ignore]` (was T292) — a real multi-display session through real segments, real perception tiers and a real timeline, answering "what was I doing at 2pm?".
       `> DONE:` `cargo test --test dayflow_live -- --ignored` produces a real timeline; the quickstart's six manual checks all pass. A green `cargo test` alone does NOT certify this feature.

@@ -999,8 +999,8 @@ impl DayflowConfig {
             ("dayflow.sampling.day_interval_seconds", self.sampling.day_interval_seconds),
             ("dayflow.sampling.focused_interval_seconds", self.sampling.focused_interval_seconds),
         ] {
-            if secs < SamplingConfig::MIN_INTERVAL_SECONDS
-                || secs > SamplingConfig::MAX_INTERVAL_SECONDS
+            if !(SamplingConfig::MIN_INTERVAL_SECONDS..=SamplingConfig::MAX_INTERVAL_SECONDS)
+                .contains(&secs)
             {
                 return Err(ConfigError::ValueOutOfRange {
                     field: field.to_string(),

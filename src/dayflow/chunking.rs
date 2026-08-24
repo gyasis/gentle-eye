@@ -60,6 +60,31 @@ pub fn plan_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_chunks_assigns_monotonic_sequence_and_a_display() {
+        // Exercises the code that actually SETS these fields, so breaking the
+        // assignment (e.g. `sequence: 0`) fails here.
+        let start = "2026-08-24T09:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let chunks = plan_chunks(start, 45 * 60, 15, Path::new("/tmp/dayflow"));
+        assert_eq!(chunks.len(), 3);
+
+        let seqs: Vec<u64> = chunks.iter().map(|c| c.sequence).collect();
+        assert_eq!(seqs, vec![0, 1, 2], "sequence must advance with each window");
+        assert!(
+            seqs.windows(2).all(|w| w[1] > w[0]),
+            "sequence must be strictly increasing"
+        );
+        assert!(
+            chunks.iter().all(|c| c.display_id == 0),
+            "the deterministic planner lays out a single display"
+        );
+        assert!(
+            chunks.iter().all(|c| !c.summarized),
+            "a freshly planned window has not been summarised — the eviction guard \
+             (FR-025) depends on this starting false"
+        );
+    }
     use chrono::TimeZone;
 
     fn t0() -> DateTime<Utc> {
