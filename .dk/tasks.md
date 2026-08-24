@@ -50,7 +50,7 @@ Verified on `main` 2026-08-23: ~581 lines, 7 passing tests. Listed as a table, d
       `> DONE:` the probe passes and the exact working argument vector is recorded in `research.md`; if `-force_key_frames expr:` does not hold at 0.2–0.5 fps, STOP and record the fallback before building on it.
 - [x] T005 [P] Prove the idle signal — a probe reading X11 screensaver idle-ms and blank state, run both locked and unlocked, confirming the two are distinguishable (research R2).
       `> DONE:` idle counter verified monotonic (+2000ms/2s). LOCK DETECTION DESCOPED 2026-08-23 (user: "we don't really lock the screen anyway") — idle threshold is the primary and sufficient trigger. The X saver `state` field is unusable here regardless (reports 3); if lock is ever wanted, use org.gnome.ScreenSaver D-Bus or logind LockedHint, never the X field. No-backend fallback stays "never idle", never a permanent pause.
-- [ ] T006 [P] Prove concurrent multi-display capture and read the governed lane's real idle-unload window (research R3, R5).
+- [x] T006 [P] Prove concurrent multi-display capture and read the governed lane's real idle-unload window (research R3, R5).
       `> DONE:` two concurrent capturers open without contention, or the round-robin fallback is recorded; the measured unload window is written into `research.md` rather than guessed.
 
 ## Phase 2: Foundational

@@ -181,10 +181,25 @@ geometric reading order (T034) must sort **within a display** before merging acr
 otherwise a top-left region on the portrait screen sorts against a bottom-right region on the
 laptop and the ordering is nonsense. **Owed at T009/T033.**
 
-**Still UNVERIFIED**: whether `scrap` can hold three concurrent capturers without contention.
-**Check owed**: a small Rust probe opening one capturer per display before the multi-pipeline
-supervisor is built. Fallback if it cannot: round-robin capture across displays within one
-interval — a scheduling change, not a redesign.
+**VERIFIED 2026-08-24 (T006)** — concurrent capture WORKS; no fallback needed.
+`tests/dayflow_segmentation.rs::concurrent_capturers_across_all_displays` (`#[ignore]`, live)
+holds a `scrap::Capturer` open on **every** display at once and pulls a frame from each:
+
+| display | geometry | frame bytes |
+|---|---|---|
+| 0 | 1920×1080 | 8,294,400 |
+| 1 | 1080×2560 (portrait) | 11,059,200 |
+| 2 | 3440×1440 (ultrawide) | 19,814,400 |
+| | **total per frame** | **39,168,000 (37.4 MiB)** |
+
+Byte counts are exactly `w × h × 4`, confirming BGRA end to end.
+
+**The number that matters for design**: one frame across all three displays is **37.4 MiB of
+raw BGRA**. At the dayflow rate of 0.5 fps that is ~18.7 MiB/s streamed into the encoders,
+~1.1 GiB/min of raw pixels — all of it transient (piped straight to ffmpeg, never buffered to
+disk), but it sets the floor for the memory-pressure path and it is why compositing displays
+into one frame was never viable. Use these figures, not the segment sizes from the synthetic
+R1 probe, when setting the disk-budget defaults.
 
 ---
 
