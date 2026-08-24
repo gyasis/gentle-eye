@@ -644,3 +644,95 @@ The only copy lives on an **unsynced Google Drive folder on an external SSD**. I
 git, not on GitHub (the upstream repo replaced it), and it was ALREADY lost once — 127 hits in
 the April-2026 recovery index are file listings of exactly this tree. If it matters, it should
 be copied somewhere durable. Flagged, not acted on: it is not this repo's file to relocate.
+
+
+---
+
+## R13 — The full videolocr cost ladder, read from source (2026-08-24)
+
+`ds-toolkit/knowledge/ingestors/videolocr/`. This is a **four-stage** cost ladder, every stage
+local and free before anything expensive runs. Dayflow should adopt its shape wholesale.
+
+### Stage 1 — pixel change gate (`videoocr.py:451`, `_frame_difference`)
+
+```python
+prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+curr_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+frame_diff = cv2.absdiff(prev_gray, curr_gray)
+non_zero_count = np.count_nonzero(frame_diff)
+total_pixels   = frame_diff.size          # → changed-pixel FRACTION
+```
+
+Checked only every `check_interval` seconds (`frame_count % self.check_interval == 0`), and a
+frame is kept when the fraction exceeds `change_threshold`.
+
+**This differs from Lookout, and the difference is instructive.** Lookout compares the MEAN
+ABSOLUTE MAGNITUDE of the difference; videolocr counts the PROPORTION OF PIXELS that changed
+at all. Magnitude is robust to a large subtle shift (a theme change); proportion is robust to a
+small intense one (a cursor blink). Neither is strictly better — dayflow should pick one
+deliberately and say why, not average them.
+
+| parameter | value |
+|---|---|
+| `change_threshold` (class default) | 0.1 |
+| `change_threshold` (CLI/extractor default) | **0.4** — "lower means more frames" |
+| `check_interval` | 5 seconds |
+
+### Stage 2 — the "cheap local code/diagram gate" (`video_code_extractor.py:552`, `_frame_is_informative`)
+
+The stage the `information_ingest_3.py` comment referred to, and the most reusable idea here.
+Its own docstring:
+
+> Cheap LOCAL Boolean gate: keep CODE **or** DIAGRAM/SLIDE frames; drop talking-heads/blanks.
+> All local + free (tesseract OCR + cv2 line structure). Runs BEFORE the paid cloud vision OCR
+> so we only spend on frames that carry real content.
+> **FAIL-OPEN: on any error we KEEP the frame — never risk MISSING code/diagrams.**
+
+Signals: `min_code_lines = 2`, `min_words = 12`, and `cv2.Canny(gray, 80, 200)` for line
+structure (tables, diagrams, slide furniture).
+
+**FAIL-OPEN is the principle to carry over verbatim.** A content gate that errs toward keeping
+costs one wasted perception call; one that errs toward dropping loses the data silently and
+forever — and dayflow cannot re-capture yesterday. Every gate in this feature must fail open.
+
+### Stage 3 — OCR aggregation (`multimodal/ocraggregator.py`)
+
+`OCRAggregator(similarity_threshold=0.85, max_history=5)`. Keeps a rolling window of the last 5
+`TextBlock`s; for each new frame's lines, `_find_best_overlap` scores against that history with
+`SequenceMatcher(...).ratio() >= 0.85` and `append_lines` EXTENDS the matched block rather than
+creating a new one.
+
+That is the scrolling-terminal problem solved directly: consecutive samples of a scrolling pane
+are one growing block, not N near-duplicate entries.
+
+### Stage 4 — text diff-merge (`videoocr.py`, `CodeTracker`) — see R12
+
+Block-level: append only when similarity **< 0.95**; `_grep_similar_content` at **> 0.3**;
+`_diff_merge_chunks` keeps unique and code lines; `CodeTracker` follows blocks by signature and
+indentation across frames.
+
+### The tuned-threshold table (reuse; do not re-derive)
+
+| stage | parameter | value |
+|---|---|---|
+| pixel gate | changed-pixel fraction | 0.1 default / **0.4** in practice |
+| pixel gate | check interval | 5 s |
+| informative gate | min code lines / min words | 2 / 12 |
+| informative gate | Canny thresholds | 80, 200 |
+| OCR aggregation | overlap similarity | **0.85** |
+| OCR aggregation | history window | 5 blocks |
+| text block | "changed" similarity | **< 0.95** |
+| text block | comparison candidate | **> 0.3** |
+
+### What dayflow takes
+
+1. **The ladder shape** — cheap local gates first, expensive perception last. Already D6;
+   this is independent confirmation from a working system.
+2. **FAIL-OPEN on every gate.** Non-negotiable for an all-day recorder that cannot re-capture.
+3. **The informative gate**, adapted: videolocr drops talking-heads, dayflow's analogue is
+   dropping blank/idle/wallpaper frames. `CONTENT_STD` from Lookout (R11) covers the blank case;
+   the Canny line-structure signal is the richer version.
+4. **Rolling-window OCR aggregation** at 0.85 over a 5-block history — the right answer for
+   scrolling panes within a window, and better than a flat seen-set.
+5. **A deliberate choice** between magnitude-based (Lookout) and proportion-based (videolocr)
+   pixel gating, recorded rather than defaulted.
