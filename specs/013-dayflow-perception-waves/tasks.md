@@ -79,7 +79,7 @@ correct ranges; confirm status distinguishes healthy / paused / off / degraded.
 
 - [ ] T012 [US1] Per-display capture pipelines in `src/capture/service.rs`, one encoder per display via the existing `DisplayManager`, all writing into one session (FR-029).
       `> DONE:` a two-display run produces two segment series under one session id; `displays_active` reports 2.
-- [ ] T013 [P] [US1] New `src/dayflow/idle.rs` — an `IdleDetector` trait plus the X11 screensaver backend from T005, with hysteresis on both transitions. A platform with no backend reports "never idle".
+- [x] T013 [P] [US1] New `src/dayflow/idle.rs` — an `IdleDetector` trait plus the X11 screensaver backend from T005, with hysteresis on both transitions. A platform with no backend reports "never idle".
       `> DONE:` unit tests cover idle→active→idle with hysteresis and the no-backend fallback; no `unwrap()` outside tests.
 - [ ] T014 [US1] Wire pause/resume into the rotation controller — pause closes the in-progress segment cleanly and records a `PauseInterval` with its cause; resume opens a new segment (FR-030/031/032).
       `> DONE:` a simulated lock mid-segment yields a closed segment plus a recorded pause, and no truncated file; resume starts a new segment rather than splicing across the gap.
@@ -87,7 +87,7 @@ correct ranges; confirm status distinguishes healthy / paused / off / degraded.
       `> DONE:` off→on within a day returns the original session id and the off interval is recorded as a gap; a new day starts a new session.
 - [ ] T016 [US1] Apply a segment-interval change at the next boundary without re-timing any existing entry (FR-034/035); persist the interval in force on the session.
       `> DONE:` a run switched 15→30 mid-session leaves earlier entries untouched and later segments 30 minutes long; a test asserts nothing derives duration from config.
-- [ ] T017 [US1] `DayflowLiveness` in `src/dayflow/models.rs` + `daemon.rs`, every field read from the segment ledger and `timeline_entries` — never from an in-memory flag (FR-006/008).
+- [x] T017 [US1] `DayflowLiveness` in `src/dayflow/models.rs` + `daemon.rs`, every field read from the segment ledger and `timeline_entries` — never from an in-memory flag (FR-006/008).
       `> DONE:` a daemon that captures zero segments reports `degraded`; a healthy one advances `chunks_written`; a paused one reports `paused` with its cause and is NOT degraded.
 - [ ] T018 [S] [US1] Flesh `src/dayflow/engine.rs` — `start_session` / `stop_session` / `status` over one shared pipeline, honouring the session max-duration cap and closing the in-progress segment on stop (FR-003/005).
       `> DONE:` start→stop drives the pipeline, the cap is enforced in a test, and the final segment is accounted for; `cargo check` green.

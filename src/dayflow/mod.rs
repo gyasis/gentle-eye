@@ -21,6 +21,7 @@ pub mod daemon;
 pub mod engine;
 pub mod errors;
 pub mod gate;
+pub mod idle;
 pub mod models;
 pub mod sampler;
 pub mod window;
