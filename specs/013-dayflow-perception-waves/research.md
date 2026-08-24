@@ -566,3 +566,81 @@ change-extraction as a blueprint) but is **not on disk** under either name — `
 returns nothing. Its ideas survive in Lookout (the batched multi-panel VLM call is annotated in
 `engine.rs` as "videolocr concept #1"), so treat Lookout as the live source and do not go
 looking for videoocr as a dependency.
+
+
+---
+
+## R12 — videoocr FOUND: the TEXT-level complement to Lookout's pixel gate (2026-08-24)
+
+Corrects R11's closing note, which said videoocr was not on disk. It is. My searches failed
+because I looked for a **project** by that name; it is a **module inside `ds-toolkit`**, on an
+external drive:
+
+```
+/media/gyasis/Blade 15 SSD/Users/gyasi/Google Drive (not syncing)/Collection/ds-toolkit/knowledge/
+├── information_ingest_3.py                              (4048 lines — the entry point)
+└── ingestors/videolocr/video_process/videoocr.py        (961 lines — the method)
+   (also mirrored at knowledge-ingestor/src/legacy_ingestors/videolocr/…)
+```
+
+`proj-locate` could never find it: not a repo, not under `$HOME`, and the GitHub
+`gyasis/knowledge-ingestor` is a LATER, different incarnation with no video/OCR files at all.
+**The lesson generalises**: a name-based project probe cannot find a module, and `$HOME` is not
+the whole filesystem. Mounted drives are a real search location.
+
+### What the non-`--gemini` path does — the architecture we are rebuilding
+
+From `information_ingest_3.py:1003-1019`, verbatim:
+
+```
+# The Gemini flag drives the engine, and REVERSES the skip flags:
+#   --gemini  → use whole-video Gemini   (skip_gemini=False, skip_ocr=True)
+#   default   → Ollama cost path: cheap local code/diagram gate → Ollama Cloud
+#               vision OCR with per-frame transcript context, no whole-video
+#               Gemini (skip_gemini=True, skip_ocr=False)
+```
+
+The DEFAULT is the cheap path: **a cheap local gate decides which frames earn expensive
+perception.** That is the same two-tier ladder as D6, arrived at independently and already in
+production — strong corroboration that the dayflow design is the right shape.
+
+### The method: text-level DIFF-MERGE, not just dedup
+
+`videoocr.py` is not a pixel gate. It works one level up, on OCR'd text, and it does something
+Lookout's seen-set does not: it **merges** rather than discarding.
+
+| mechanism | detail |
+|---|---|
+| `VideoOCR(change_threshold=0.1, check_interval=5)` | sampling + change parameters |
+| `_calculate_block_similarity` | `difflib.SequenceMatcher(a, b).ratio()` |
+| text-block change gate | append only when similarity **< 0.95** — "higher threshold for text" |
+| `_grep_similar_content` | common-line ratio; candidates at **> 0.3** similarity |
+| `_diff_merge_chunks` | merges two chunks preserving unique lines, KEEPING code lines even when deleted |
+| `CodeTracker` | tracks code blocks across frames by signature + indent, emitting `LineChange`s |
+| `chunk_size = 50` | text processed in 50-line chunks |
+
+### Why this matters for dayflow, and how it composes
+
+Lookout and videoocr solve **different halves** of the same problem, and dayflow needs both:
+
+| | Lookout | videoocr |
+|---|---|---|
+| level | pixels | text |
+| question | "is this the same picture?" | "is this the same content, and what is NEW?" |
+| method | downscaled grey mean-abs-diff | `SequenceMatcher` ratio + diff-merge |
+| on a match | skip entirely | **merge, keeping unique lines** |
+
+The merge behaviour is the part worth stealing for T035. Within a window, a scrolling terminal
+or an edited file produces many samples whose text overlaps heavily. A seen-set drops the
+duplicates but also drops the *new* lines' relationship to the old; a diff-merge yields the
+UNION as one coherent block, which is what a timeline entry should carry.
+
+Threshold note: 0.95 for "same text block" is far stricter than 0.3 for "worth comparing at
+all". Both are tuned numbers from a working system — reuse them rather than re-deriving.
+
+### ⚠️ Fragile location
+
+The only copy lives on an **unsynced Google Drive folder on an external SSD**. It is not in
+git, not on GitHub (the upstream repo replaced it), and it was ALREADY lost once — 127 hits in
+the April-2026 recovery index are file listings of exactly this tree. If it matters, it should
+be copied somewhere durable. Flagged, not acted on: it is not this repo's file to relocate.
