@@ -294,6 +294,29 @@ pub trait ConfigProvider: Send + Sync {
 // Dayflow configuration
 // ----------------------------------------------------------------------------
 
+fn default_delta_enabled() -> bool {
+    true
+}
+
+/// Lookout `GATE_WIDTH` — gate frames downscale to 240 px wide.
+fn default_gate_width() -> u32 {
+    240
+}
+
+/// Lookout `GATE_CHANGE` — 6.0 for screen grabs.
+fn default_change_threshold() -> f64 {
+    6.0
+}
+
+/// Lookout `CONTENT_STD` — below this the frame is blank/uniform.
+fn default_content_std() -> f64 {
+    8.0
+}
+
+fn default_dedup_text() -> bool {
+    true
+}
+
 fn default_day_interval_seconds() -> u32 {
     180 // one frame every 3 minutes — all-day tracking is the coarse one
 }
@@ -491,21 +514,137 @@ impl Default for DayflowVideoConfig {
 
 /// Which displays dayflow captures.
 ///
-/// Default is [`DisplaySelection::All`]: every attached display is captured and
-/// merged into ONE timeline, with each entry identifying its source display
-/// (FR-029). Decided 2026-08-23.
+/// Default is [`DisplaySelection::All`]: every attached display, merged into ONE
+/// timeline, each entry identifying its source display (FR-029).
+///
+/// But a focused session should be able to narrow to one or two screens — "just
+/// the main monitor", "just the portrait one" — because on a three-display desk
+/// that is a 2–3x saving in samples, stills and perception passes for a session
+/// that only cares about one screen. Selection is therefore by IDENTITY, not
+/// only by index: an index changes when a monitor is unplugged, while "primary"
+/// and "portrait" keep meaning the same thing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplaySelection {
-    /// Capture every attached display.
+    /// Every attached display. The default for all-day tracking.
     All,
-    /// Capture only these display indices.
+    /// Only the primary display.
+    Primary,
+    /// Only these display indices. Positional — brittle across replug.
     Only(Vec<u32>),
+    /// By identity: `primary`, `portrait`, `landscape`, `ultrawide`, or a label
+    /// the user has assigned to a display. Matching is case-insensitive, and a
+    /// name that resolves to nothing is an error rather than a silent empty set.
+    Named(Vec<String>),
 }
 
 impl Default for DisplaySelection {
     fn default() -> Self {
         Self::All
+    }
+}
+
+impl DisplaySelection {
+    /// Resolve this selection against the attached displays, returning indices.
+    ///
+    /// An empty result is returned as `None` so the caller must handle it: a
+    /// selection that matches nothing has to fail loudly, not quietly record
+    /// nothing all day (the same false-green this feature is built to avoid).
+    pub fn resolve(&self, displays: &[crate::capture::display::DisplayInfo]) -> Option<Vec<u32>> {
+        let idx = |i: usize| u32::try_from(i).unwrap_or(u32::MAX);
+        let picked: Vec<u32> = match self {
+            Self::All => (0..displays.len()).map(idx).collect(),
+            Self::Primary => displays
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.is_primary)
+                .map(|(i, _)| idx(i))
+                .collect(),
+            Self::Only(v) => v
+                .iter()
+                .copied()
+                .filter(|i| (*i as usize) < displays.len())
+                .collect(),
+            Self::Named(names) => {
+                let mut out: Vec<u32> = Vec::new();
+                for name in names {
+                    let want = name.trim().to_lowercase();
+                    for (i, d) in displays.iter().enumerate() {
+                        let matches = match want.as_str() {
+                            "primary" | "main" => d.is_primary,
+                            "portrait" => d.height > d.width,
+                            "landscape" => d.width > d.height && d.aspect_ratio() < 2.0,
+                            "ultrawide" => d.aspect_ratio() >= 2.0,
+                            other => d.display_name().to_lowercase() == other,
+                        };
+                        if matches && !out.contains(&idx(i)) {
+                            out.push(idx(i));
+                        }
+                    }
+                }
+                out
+            }
+        };
+        if picked.is_empty() {
+            None
+        } else {
+            Some(picked)
+        }
+    }
+}
+
+/// Content-identity gate: don't store or perceive a sample that is the same
+/// picture again.
+///
+/// # Reused, not invented
+///
+/// This is Lookout's change gate (`sparse-delta-perception`,
+/// `lookout/src-tauri/src/perception/`), whose constants are already tuned in
+/// production. The method is deliberately NOT a full-resolution pixel-exact
+/// comparison — that would be both more expensive AND more brittle, since one
+/// antialiased pixel or a blinking cursor would report "changed". Instead:
+///
+/// 1. downscale the frame to [`DeltaConfig::gate_width`] px wide, greyscale;
+/// 2. mean-absolute-difference against the previous gate buffer;
+/// 3. treat it as changed only above [`DeltaConfig::change_threshold`].
+///
+/// Buffers of differing length count as a large change, so a resolution change
+/// can never be mistaken for "no change".
+///
+/// Text is deduped the same way one level up: OCR lines are whitespace- and
+/// case-normalised and checked against a seen-set, so identical text is never
+/// re-stored even when the pixels shifted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeltaConfig {
+    /// Skip a sample whose gate buffer is unchanged from the previous one.
+    #[serde(default = "default_delta_enabled")]
+    pub enabled: bool,
+    /// Gate frames are downscaled to this width before comparison. Lookout: 240.
+    #[serde(default = "default_gate_width")]
+    pub gate_width: u32,
+    /// Mean-abs-diff above which a screen counts as changed. Lookout: 6.0 for
+    /// screen grabs (9.0 for noisy video sources, which dayflow does not use).
+    #[serde(default = "default_change_threshold")]
+    pub change_threshold: f64,
+    /// Greyscale std below which a frame is blank/uniform and has no content
+    /// worth perceiving at all. Lookout: 8.0.
+    #[serde(default = "default_content_std")]
+    pub content_std: f64,
+    /// Also dedupe at the TEXT level: normalised OCR lines already seen are not
+    /// re-stored, even if the pixels moved.
+    #[serde(default = "default_dedup_text")]
+    pub dedup_text: bool,
+}
+
+impl Default for DeltaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_delta_enabled(),
+            gate_width: default_gate_width(),
+            change_threshold: default_change_threshold(),
+            content_std: default_content_std(),
+            dedup_text: default_dedup_text(),
+        }
     }
 }
 
@@ -677,6 +816,9 @@ pub struct DayflowConfig {
     /// Optional timelapse output. Off by default — the timeline is the artifact.
     #[serde(default)]
     pub video: DayflowVideoConfig,
+    /// Content-identity gate — never keep or perceive the same picture twice.
+    #[serde(default)]
+    pub delta: DeltaConfig,
     /// Which displays are captured (FR-029).
     #[serde(default)]
     pub displays: DisplaySelection,
@@ -700,6 +842,7 @@ impl Default for DayflowConfig {
             default_provider: default_dayflow_provider(),
             sampling: SamplingConfig::default(),
             video: DayflowVideoConfig::default(),
+            delta: DeltaConfig::default(),
             displays: DisplaySelection::default(),
             idle: IdleConfig::default(),
             perception: PerceptionConfig::default(),
@@ -1032,6 +1175,94 @@ mod tests {
     fn test_validate_valid_config() {
         let config = AppConfig::default();
         assert!(config.validate().is_ok());
+    }
+
+    /// This machine's real layout, measured in T006: a 16:9 laptop panel, a
+    /// rotated portrait panel, and a 21:9 ultrawide.
+    fn three_display_desk() -> Vec<crate::capture::display::DisplayInfo> {
+        use crate::capture::display::DisplayInfo;
+        vec![
+            DisplayInfo::new(0, 1920, 1080, true),  // eDP-1, primary
+            DisplayInfo::new(1, 1080, 2560, false), // DP-1-0, portrait
+            DisplayInfo::new(2, 3440, 1440, false), // HDMI-1-0, ultrawide
+        ]
+    }
+
+    #[test]
+    fn display_selection_defaults_to_every_screen() {
+        let d = three_display_desk();
+        assert_eq!(DisplaySelection::default(), DisplaySelection::All);
+        assert_eq!(DisplaySelection::All.resolve(&d), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn display_selection_can_narrow_by_identity_not_just_index() {
+        // The point: "the portrait one" keeps meaning the same screen after a
+        // replug, where an index does not.
+        let d = three_display_desk();
+        assert_eq!(DisplaySelection::Primary.resolve(&d), Some(vec![0]));
+        assert_eq!(
+            DisplaySelection::Named(vec!["portrait".into()]).resolve(&d),
+            Some(vec![1]),
+            "the 1080x2560 rotated panel"
+        );
+        assert_eq!(
+            DisplaySelection::Named(vec!["ultrawide".into()]).resolve(&d),
+            Some(vec![2]),
+            "the 3440x1440 21:9 panel"
+        );
+        assert_eq!(
+            DisplaySelection::Named(vec!["landscape".into()]).resolve(&d),
+            Some(vec![0]),
+            "16:9 is landscape; 21:9 is classified ultrawide, not landscape"
+        );
+        // one or two screens, as needed for a focused session
+        assert_eq!(
+            DisplaySelection::Named(vec!["main".into(), "portrait".into()]).resolve(&d),
+            Some(vec![0, 1])
+        );
+    }
+
+    #[test]
+    fn a_selection_matching_nothing_fails_loudly() {
+        // A selection that silently matches nothing would record an empty day and
+        // look healthy doing it — the exact false-green this feature exists to
+        // prevent. It must return None so the caller has to handle it.
+        let d = three_display_desk();
+        assert_eq!(DisplaySelection::Named(vec!["tv".into()]).resolve(&d), None);
+        assert_eq!(DisplaySelection::Only(vec![7]).resolve(&d), None);
+        // ...and a single-display machine has no ultrawide
+        let solo = vec![crate::capture::display::DisplayInfo::new(0, 1920, 1080, true)];
+        assert_eq!(DisplaySelection::Named(vec!["ultrawide".into()]).resolve(&solo), None);
+    }
+
+    #[test]
+    fn display_names_match_case_insensitively() {
+        let d = three_display_desk();
+        assert_eq!(DisplaySelection::Named(vec!["PORTRAIT".into()]).resolve(&d), Some(vec![1]));
+        assert_eq!(DisplaySelection::Named(vec![" Primary ".into()]).resolve(&d), Some(vec![0]));
+    }
+
+    #[test]
+    fn delta_gate_carries_lookouts_tuned_constants() {
+        // Reused from sparse-delta-perception rather than re-derived. If these
+        // drift, the gate has been retuned by accident.
+        let g = DeltaConfig::default();
+        assert!(g.enabled, "the content gate is the largest saving; default on");
+        assert_eq!(g.gate_width, 240, "Lookout GATE_WIDTH");
+        assert_eq!(g.change_threshold, 6.0, "Lookout GATE_CHANGE for screen grabs");
+        assert_eq!(g.content_std, 8.0, "Lookout CONTENT_STD");
+        assert!(g.dedup_text, "identical text must not be re-stored");
+    }
+
+    #[test]
+    fn delta_gate_is_downscaled_not_pixel_exact() {
+        // A full-res pixel-exact compare is both costlier and MORE brittle: a
+        // blinking cursor or one antialiased pixel would report "changed" and
+        // defeat the whole saving. The gate is deliberately lossy.
+        let g = DeltaConfig::default();
+        assert!(g.gate_width <= 320, "gate must be a cheap downscale, not full res");
+        assert!(g.change_threshold > 0.0, "a zero threshold IS pixel-exact matching");
     }
 
     #[test]

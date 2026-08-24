@@ -505,3 +505,64 @@ whatever tool happens to invoke the shadowed name, one or two layers down, with 
 describes the *symptom* (`could not find native static library`) and never the *cause*. When a
 build fails with output from an unrelated program in it — here, PromptChain logging inside a C
 compile — suspect a PATH shadow before suspecting the build.
+
+---
+
+## R11 — Content-identity gate: REUSED from Lookout, not invented (2026-08-24)
+
+The user asked for "a pixel-by-pixel identity match, so if it's the same image again we don't
+need to keep both — the same with OCR", and pointed at Lookout and videoocr as prior art. That
+prior art exists, is in production, and is already Rust:
+`~/Documents/code/sparse-delta-perception/lookout/src-tauri/src/perception/{engine.rs,capture.rs}`.
+
+### The method, read from the source
+
+**Frame gate** (`capture::gate_gray` + `capture::mean_abs_diff`, driven from `engine::tick`):
+
+1. screenshot the display (optionally cropped to the focus bbox);
+2. `ffmpeg -vf scale=GATE_WIDTH:-1 -pix_fmt gray -f rawvideo` → a small grey byte buffer;
+3. `mean_abs_diff(prev, cur) > GATE_CHANGE` ⇒ changed, otherwise **do nothing at all**;
+4. buffers of differing length return `f64::INFINITY`, so a resolution change can never be
+   mistaken for "no change".
+
+**Tuned constants, carried over verbatim:**
+
+| constant | value | meaning |
+|---|---|---|
+| `GATE_WIDTH` | 240 | gate frames downscale to 240 px wide |
+| `GATE_CHANGE` | 6.0 | mean-abs-diff to count as changed (screen grabs) |
+| `GATE_CHANGE_ATEM` | 9.0 | higher for noisy MJPEG video — not dayflow's case |
+| `CONTENT_STD` | 8.0 | grey std below this ⇒ blank/uniform, no content at all |
+
+**Text gate** (`engine::terminal_pass`): each OCR line is normalised
+(`split_whitespace().join(" ").to_lowercase()`), dropped if under 2 chars or already in a
+`seen` set; `terms.rs` additionally content-hashes the tail (`hash_str`, `DefaultHasher`) so
+identical text never triggers work twice.
+
+### Why this is NOT literal pixel-by-pixel — and why that is better
+
+A full-resolution exact comparison is **both more expensive and more brittle**. A blinking
+cursor, one antialiased glyph edge, or a clock ticking a second would all report "changed" and
+defeat the entire saving, while costing a full-res compare to discover it. The 240 px grey
+downscale plus a 6.0 threshold is cheap *and* robust — it answers "is this meaningfully the
+same screen", which is the actual question.
+
+A test asserts the gate stays a downscale (`gate_width <= 320`) and that the threshold is
+non-zero, since a zero threshold *is* pixel-exact matching reintroduced by accident.
+
+### Two levels, because they catch different things
+
+- the **frame** gate catches an idle screen — nothing happened, so nothing is stored or perceived;
+- the **text** gate catches a screen that moved but says the same thing — scrolled, refocused,
+  repainted — where the pixels differ and the content does not.
+
+Neither subsumes the other, and reading is most of a working day, so together they are where
+the cost actually goes to zero.
+
+### Still to do
+
+`videoocr` / `videolocr` is referenced by the plan (T038's shrink step cites its
+change-extraction as a blueprint) but is **not on disk** under either name — `proj-locate`
+returns nothing. Its ideas survive in Lookout (the batched multi-panel VLM call is annotated in
+`engine.rs` as "videolocr concept #1"), so treat Lookout as the live source and do not go
+looking for videoocr as a dependency.
