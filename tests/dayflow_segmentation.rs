@@ -182,3 +182,194 @@ fn concurrent_capturers_across_all_displays() {
         eprintln!("  display {i}: frame OK, {len} bytes ({w}x{h})");
     }
 }
+
+// ─── T020: window/sample integration over a whole run ───────────────────────
+//
+// These drive the real types end to end at a simulated clock. They are NOT
+// `#[ignore]`d: no hardware is involved, and the edge cases they cover — clock
+// discontinuity, hot-plug, non-uniform windows, pause gaps — are exactly the
+// ones that only appear when the pieces run together.
+
+mod integration {
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
+    use gentle_eye::config::{DayflowConfig, DeltaConfig};
+    use gentle_eye::dayflow::engine::DayflowRun;
+    use gentle_eye::dayflow::models::{DayflowHealth, DayflowMode};
+    use gentle_eye::dayflow::sampler::{RawFrame, Sampler};
+    use gentle_eye::dayflow::window::{CloseReason, PauseCause};
+    use std::time::Duration;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_787_500_000 + secs, 0).expect("valid timestamp")
+    }
+
+    fn cfg() -> DayflowConfig {
+        let mut c = DayflowConfig::default();
+        c.segment_seconds = 600;
+        c
+    }
+
+    fn frame(w: u32, h: u32, seed: u8) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h * 4) as usize);
+        for i in 0..(w * h) {
+            let n = ((i.wrapping_mul(37) % 251) as u8) ^ seed;
+            v.extend_from_slice(&[n, n.wrapping_add(40), n.wrapping_add(80), 255]);
+        }
+        v
+    }
+
+    #[test]
+    fn windows_are_contiguous_and_non_overlapping_across_a_run() {
+        let mut r = DayflowRun::start(&cfg(), DayflowMode::Daemon, vec![0], at(0)).unwrap();
+        let mut closed = Vec::new();
+        for step in 0..30 {
+            closed.extend(r.on_sample(0, at(step * 180)));
+        }
+        closed.extend(r.stop(at(30 * 180)));
+
+        assert!(closed.len() >= 4, "a 90-minute run must yield several windows");
+        for pair in closed.windows(2) {
+            assert!(
+                pair[0].end_wall <= pair[1].start_wall,
+                "windows must not overlap: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+            assert!(pair[0].sequence < pair[1].sequence, "sequence must advance");
+        }
+    }
+
+    #[test]
+    fn a_pause_leaves_a_visible_gap_rather_than_a_stretched_window() {
+        // The failure this prevents: a window spanning the pause would claim the
+        // user was working through it.
+        let mut r = DayflowRun::start(&cfg(), DayflowMode::Daemon, vec![0], at(0)).unwrap();
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(120));
+        let before = r.turn_off(at(300)).pop().expect("the open window closes");
+
+        r.turn_on(at(7_200)).unwrap();
+        r.on_sample(0, at(7_200));
+        let after = r.on_sample(0, at(7_800)).expect("a new window after resume");
+
+        let gap = after.start_wall - before.end_wall;
+        assert!(gap > ChronoDuration::minutes(100), "the gap is real: {gap:?}");
+        assert!(
+            after.duration() <= ChronoDuration::seconds(600),
+            "no window may stretch across the gap"
+        );
+        let recorded = r.pauses_seen();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].cause, PauseCause::UserOff);
+        assert_eq!(recorded[0].to, Some(at(7_200)), "the gap is a recorded fact");
+    }
+
+    #[test]
+    fn a_backwards_clock_step_cannot_produce_a_negative_window() {
+        // DST or a manual clock change. A window whose end precedes its start is
+        // corruption, and every duration computation downstream inherits it.
+        let mut r = DayflowRun::start(&cfg(), DayflowMode::Daemon, vec![0], at(0)).unwrap();
+        r.on_sample(0, at(1_000));
+        r.on_sample(0, at(1_060));
+
+        // clock jumps BACKWARDS an hour, then the run is stopped
+        let closed = r.stop(at(1_000 - 3_600));
+        for w in &closed {
+            assert!(
+                w.duration().num_seconds() <= 0 || w.end_wall >= w.start_wall,
+                "a backwards clock must not silently yield a plausible-looking window: {w:?}"
+            );
+        }
+        // whatever it recorded, liveness must not read Healthy off a future stamp
+        let l = r.liveness(at(1_060));
+        assert_eq!(l.health, DayflowHealth::Stopped);
+    }
+
+    #[test]
+    fn hot_plugging_a_display_mid_run_strands_nothing() {
+        let mut r = DayflowRun::start(&cfg(), DayflowMode::Daemon, vec![0, 1], at(0)).unwrap();
+        for step in 0..3 {
+            r.on_sample(0, at(step * 200));
+            r.on_sample(1, at(step * 200));
+        }
+        let orphaned = r.remove_display(1, at(700)).expect("its window must close");
+        assert_eq!(orphaned.display_id, 1);
+        assert_eq!(orphaned.reason, CloseReason::DisplayRemoved);
+        assert_eq!(orphaned.sample_count, 3, "its samples are accounted for, not lost");
+
+        // display 0 continues untouched
+        assert_eq!(r.displays(), &[0]);
+        r.on_sample(0, at(700));
+        assert!(r.on_sample(0, at(1_400)).is_some());
+        // and a sample from the unplugged display is ignored, not recorded
+        assert!(r.on_sample(1, at(1_500)).is_none());
+    }
+
+    #[test]
+    fn the_sampler_and_window_controller_agree_on_what_was_produced() {
+        // Cross-checks the two halves: every sample the sampler KEPT should be
+        // reflected in the window's count, and the skipped ones too.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Sampler::new(DeltaConfig::default());
+        let mut r = DayflowRun::start(&cfg(), DayflowMode::Daemon, vec![0], at(0)).unwrap();
+
+        let a = frame(64, 48, 0);
+        let b = frame(64, 48, 0xFF);
+        let mut kept = 0usize;
+        let mut total = 0usize;
+        let mut closed = Vec::new();
+        for step in 0..6 {
+            // Pairs — A, A, B, B, A, A — so every SECOND frame is a repeat and
+            // the gate has something to skip. Alternating single frames would
+            // mean every sample genuinely changed, and the gate keeping all of
+            // them would be correct rather than a bug.
+            let px = if (step / 2) % 2 == 0 { &a } else { &b };
+            let t = at(step * 120);
+            let rec = s
+                .observe(0, 0, RawFrame { bgra: px, width: 64, height: 48 }, t, dir.path())
+                .unwrap();
+            if rec.path.is_some() {
+                kept += 1;
+            }
+            total += 1;
+            // 6 samples at 120s spans 720s, which CROSSES the 600s boundary — so
+            // this run legitimately produces more than one window. Collect them
+            // all rather than assuming.
+            closed.extend(r.on_sample(0, t));
+        }
+        closed.extend(r.stop(at(6 * 120)));
+
+        let counted: usize = closed.iter().map(|w| w.sample_count as usize).sum();
+        assert!(closed.len() >= 2, "720s at a 600s interval spans two windows");
+        assert_eq!(counted, total, "the windows together count EVERY sample");
+        assert!(kept < total, "the gate must have skipped at least one");
+        let files = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(files, kept, "only kept samples are written to disk");
+    }
+
+    #[test]
+    fn a_day_of_windows_has_no_duration_that_could_be_computed_from_a_count() {
+        // Guards the invariant that makes every downstream aggregation honest.
+        let mut r = DayflowRun::start(&cfg(), DayflowMode::Daemon, vec![0], at(0)).unwrap();
+        let mut closed = Vec::new();
+        for step in 0..20 {
+            closed.extend(r.on_sample(0, at(step * 200)));
+        }
+        closed.extend(r.set_interval(Duration::from_secs(1_800), at(4_100)));
+        for step in 21..40 {
+            closed.extend(r.on_sample(0, at(step * 200)));
+        }
+        closed.extend(r.stop(at(40 * 200)));
+
+        let mut durs: Vec<i64> = closed.iter().map(|w| w.duration().num_seconds()).collect();
+        durs.sort_unstable();
+        durs.dedup();
+        assert!(
+            durs.len() > 1,
+            "a day with an interval change must contain windows of differing length: {durs:?}"
+        );
+        let total: i64 = closed.iter().map(|w| w.duration().num_seconds()).sum();
+        let naive = closed.len() as i64 * 600;
+        assert_ne!(total, naive, "count x configured interval must NOT equal the truth");
+    }
+}

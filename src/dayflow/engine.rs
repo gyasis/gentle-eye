@@ -32,6 +32,7 @@ pub enum StartOutcome {
 #[derive(Debug)]
 pub struct DayflowRun {
     session_id: Uuid,
+    started_at: DateTime<Utc>,
     day: NaiveDate,
     mode: DayflowMode,
     intent: DayflowIntent,
@@ -45,6 +46,8 @@ pub struct DayflowRun {
     last_summary_at: Option<DateTime<Utc>>,
     /// When this run last started producing — start, or the most recent resume.
     producing_since: DateTime<Utc>,
+    /// Hard cap on a bounded session's wall-clock length, if any.
+    max_duration: Option<std::time::Duration>,
 }
 
 impl DayflowRun {
@@ -70,6 +73,7 @@ impl DayflowRun {
         }
         Ok(Self {
             session_id: Uuid::new_v4(),
+            started_at: now,
             day: now.date_naive(),
             mode,
             intent: cfg.intent,
@@ -81,7 +85,59 @@ impl DayflowRun {
             last_chunk_at: None,
             last_summary_at: None,
             producing_since: now,
+            max_duration: None,
         })
+    }
+
+    /// Cap a bounded session's wall-clock length.
+    ///
+    /// Only meaningful for [`DayflowMode::Session`]: a daemon is unbounded by
+    /// definition. Applying it to a daemon is refused rather than ignored — a
+    /// silently-dropped cap would look like it was honoured.
+    pub fn with_max_duration(
+        mut self,
+        max: std::time::Duration,
+    ) -> Result<Self, DayflowError> {
+        if self.mode != DayflowMode::Session {
+            return Err(DayflowError::Invalid(
+                "a max duration applies to a bounded session, not a daemon".into(),
+            ));
+        }
+        if max.is_zero() {
+            return Err(DayflowError::Invalid("a session max duration must be positive".into()));
+        }
+        self.max_duration = Some(max);
+        Ok(self)
+    }
+
+    /// The configured cap, if any.
+    pub fn max_duration(&self) -> Option<std::time::Duration> {
+        self.max_duration
+    }
+
+    /// Whether the cap has been reached at `now`.
+    pub fn max_duration_reached(&self, now: DateTime<Utc>) -> bool {
+        self.max_duration.is_some_and(|max| {
+            (now - self.started_at).to_std().is_ok_and(|elapsed| elapsed >= max)
+        })
+    }
+
+    /// Enforce the cap: stop the run if it has run long enough.
+    ///
+    /// Returns the windows closed by the stop, or `None` if the cap has not been
+    /// reached (or none is set). Called automatically from
+    /// [`DayflowRun::on_sample`], so a capped session ends even if nothing else
+    /// is driving it.
+    pub fn enforce_max_duration(&mut self, now: DateTime<Utc>) -> Option<Vec<ClosedWindow>> {
+        if self.stopped || !self.max_duration_reached(now) {
+            return None;
+        }
+        Some(self.stop(now))
+    }
+
+    /// When this run started.
+    pub fn started_at(&self) -> DateTime<Utc> {
+        self.started_at
     }
 
     /// This run's session id.
@@ -119,6 +175,11 @@ impl DayflowRun {
     /// Returns any window that closed as a result. Windows are counted here, so
     /// the liveness evidence advances only when something was actually produced.
     pub fn on_sample(&mut self, display_id: u32, now: DateTime<Utc>) -> Option<ClosedWindow> {
+        // Enforce the cap before accepting the sample: a bounded session must not
+        // record past its own limit just because something kept feeding it.
+        if self.enforce_max_duration(now).is_some() {
+            return None;
+        }
         if self.stopped || !self.displays.contains(&display_id) {
             return None;
         }
@@ -643,6 +704,82 @@ mod tests {
             1,
             "while STILL RUNNING, an unplug must decrement the count"
         );
+    }
+
+    fn session(displays: Vec<u32>) -> DayflowRun {
+        DayflowRun::start(&cfg(), DayflowMode::Session, displays, at(0)).unwrap()
+    }
+
+    #[test]
+    fn a_capped_session_stops_itself_at_the_limit() {
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(1800))
+            .unwrap();
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(600));
+        assert!(!r.max_duration_reached(at(1_799)));
+        assert_ne!(r.liveness(at(1_700)).health, DayflowHealth::Stopped);
+
+        // the sample that crosses the cap must not be recorded
+        assert!(r.on_sample(0, at(1_800)).is_none());
+        assert_eq!(
+            r.liveness(at(1_800)).health,
+            DayflowHealth::Stopped,
+            "a capped session must end itself at the limit"
+        );
+    }
+
+    #[test]
+    fn a_capped_session_does_not_record_past_its_limit() {
+        // The failure that matters: something keeps feeding it and it keeps
+        // recording, silently outliving the bound the user asked for.
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(1200))
+            .unwrap();
+        r.on_sample(0, at(0));
+        let before = r.liveness(at(0)).chunks_written;
+
+        for t in [1_200, 1_800, 2_400, 3_000, 6_000] {
+            assert!(r.on_sample(0, at(t)).is_none(), "no sample may land past the cap");
+        }
+        let after = r.liveness(at(6_000)).chunks_written;
+        assert_eq!(
+            after,
+            before + 1,
+            "exactly the one window the stop closed — nothing recorded afterwards"
+        );
+    }
+
+    #[test]
+    fn stopping_at_the_cap_still_accounts_for_the_open_window() {
+        // FR-005: the partial window is closed, not discarded.
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(900))
+            .unwrap();
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(120));
+        let closed = r.enforce_max_duration(at(900)).expect("the cap fires");
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].sample_count, 2, "its samples are accounted for");
+        assert_eq!(closed[0].reason, crate::dayflow::window::CloseReason::Stopped);
+    }
+
+    #[test]
+    fn a_daemon_refuses_a_max_duration_rather_than_ignoring_it() {
+        // A silently dropped cap looks exactly like an honoured one.
+        let err = run(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(600))
+            .unwrap_err();
+        assert!(format!("{err}").contains("daemon"), "got: {err}");
+    }
+
+    #[test]
+    fn an_uncapped_session_runs_indefinitely() {
+        let mut r = session(vec![0]);
+        assert_eq!(r.max_duration(), None);
+        r.on_sample(0, at(0));
+        assert!(!r.max_duration_reached(at(999_999)));
+        assert!(r.on_sample(0, at(600)).is_some(), "no cap ⇒ no self-stop");
     }
 
     #[test]

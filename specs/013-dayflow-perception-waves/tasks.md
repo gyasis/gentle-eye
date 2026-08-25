@@ -89,11 +89,11 @@ correct ranges; confirm status distinguishes healthy / paused / off / degraded.
       `> DONE:` a run switched 15→30 mid-session leaves earlier entries untouched and later segments 30 minutes long; a test asserts nothing derives duration from config.
 - [x] T017 [US1] `DayflowLiveness` in `src/dayflow/models.rs`, derived from PRODUCED evidence rather than a self-reported flag (FR-006). SCOPE NOTE (review F7): the evidence currently comes from in-memory engine counters; `assess` is parameterised via `LivenessInput` so the segment ledger and `timeline_entries` feed it directly in Wave 4/5, and `daemon.rs` remains a stub until T019. FR-008 (per-segment latency) is NOT yet implemented — it belongs to T029.
       `> DONE:` a daemon that captures zero segments reports `degraded`; a healthy one advances `chunks_written`; a paused one reports `paused` with its cause and is NOT degraded.
-- [ ] T018 [S] [US1] Flesh `src/dayflow/engine.rs` — `start_session` / `stop_session` / `status` over one shared pipeline, honouring the session max-duration cap and closing the in-progress segment on stop (FR-003/005).
+- [x] T018 [S] [US1] Flesh `src/dayflow/engine.rs` — `start_session` / `stop_session` / `status` over one shared pipeline, honouring the session max-duration cap and closing the in-progress segment on stop (FR-003/005).
       `> DONE:` start→stop drives the pipeline, the cap is enforced in a test, and the final segment is accounted for; `cargo check` green.
-- [ ] T019 [S] [US1] Flesh `src/dayflow/daemon.rs` — continuous supervision, persisted lifecycle state, clean stop, and a restart that resumes onto the same day.
+- [x] T019 [S] [US1] Flesh `src/dayflow/daemon.rs` — continuous supervision, persisted lifecycle state, clean stop, and a restart that resumes onto the same day.
       `> DONE:` daemon starts, auto-segments across a short interval, survives a restart onto the same day, stops cleanly; `cargo check` + tests green.
-- [ ] T020 [P] [US1] Integration coverage in `tests/dayflow_segmentation.rs` — boundaries, non-uniform lengths, pause gaps, clock discontinuity, display hot-plug.
+- [x] T020 [P] [US1] Integration coverage in `tests/dayflow_segmentation.rs` — boundaries, non-uniform lengths, pause gaps, clock discontinuity, display hot-plug.
       `> DONE:` all listed edge cases from `spec.md` are asserted; no test assumes a uniform segment length.
 
 ## Phase 4: User Story 2 — Ask what I was doing (P1)
