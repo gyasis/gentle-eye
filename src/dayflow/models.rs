@@ -137,6 +137,8 @@ pub struct LivenessInput {
     pub segment_seconds: u32,
     /// Display pipelines currently capturing.
     pub displays_active: u32,
+    /// Intervals whose frame could not be obtained.
+    pub frames_dropped: u64,
     /// Why capture is paused, if it is.
     pub paused_cause: Option<crate::dayflow::window::PauseCause>,
     /// Whether the run has stopped.
@@ -165,6 +167,13 @@ pub struct DayflowLiveness {
     pub segment_seconds: u32,
     /// How many display pipelines are currently capturing.
     pub displays_active: u32,
+    /// Intervals whose frame was WANTED and could not be obtained.
+    ///
+    /// Distinct from a skip: a skip is the gate working, a drop is missing data.
+    /// Surfaced here because a caller has to be able to SEE the holes — a
+    /// dropped minute cannot be recaptured, so it must be investigable rather
+    /// than inferred from a gap in the timeline.
+    pub frames_dropped: u64,
     /// The derived state.
     pub health: DayflowHealth,
 }
@@ -188,6 +197,7 @@ impl DayflowLiveness {
             last_summary_at,
             segment_seconds,
             displays_active,
+            frames_dropped,
             paused_cause,
             stopped,
             producing_since,
@@ -225,6 +235,7 @@ impl DayflowLiveness {
             last_summary_at,
             segment_seconds,
             displays_active,
+            frames_dropped,
             health,
         }
     }
@@ -383,6 +394,7 @@ mod liveness_tests {
             last_summary_at: None,
             segment_seconds: SEG,
             displays_active: 2,
+            frames_dropped: 0,
             paused_cause: pause,
             stopped,
             producing_since: at(producing_since_s),
@@ -501,6 +513,7 @@ mod liveness_tests {
                 last_summary_at: None,
                 segment_seconds: seg,
                 displays_active: 1,
+                frames_dropped: 0,
                 paused_cause: None,
                 stopped: false,
                 producing_since: at(0),

@@ -1002,3 +1002,79 @@ Mutations ran in a **throwaway git worktree**, adopted from the previous review.
 passing suite — a false "killed" that would have been read as success. **A mutation that does
 not apply looks exactly like a mutation the tests caught.** Assert the pattern is unique, and
 treat an unexpectedly passing mutation as suspicious rather than reassuring.
+
+
+---
+
+## R18 — A half-written file is a DROPPED FRAME (2026-08-25)
+
+The daemon's corrupt-state handling originally "started fresh" silently. The user's correction:
+a half-written file is a **possible dropped frame** — it needs a loud warning, it needs to be
+**visible**, and where possible the frame for that interval should be **re-acquired** rather
+than lost.
+
+That reframing applies far beyond the daemon, and it exposed a category the design did not have.
+
+### Drop is not skip
+
+| | skip | **drop** |
+|---|---|---|
+| meaning | the gate worked — nothing changed | the frame was WANTED and could not be obtained |
+| data | complete | **missing** |
+| recoverable later | n/a | **never** — the minute is gone |
+
+Filing a drop as a skip is the same false-green as everything else in this feature: the record
+looks healthy while data is absent. `SampleRecord` now carries `drop: Option<DropReason>`
+distinct from the gate verdict, and `perceived()` is false for both — but only a drop counts as
+a hole.
+
+### Three things a drop now does
+
+1. **Logs at WARN**, naming the display, interval, attempt count and expected-vs-actual bytes.
+2. **Is recorded and countable** — `Sampler::drops()`, `dropped_count()`,
+   `unrecovered_drops()`, and surfaced through `DayflowLiveness::frames_dropped` so a status
+   payload SHOWS holes instead of leaving them to be inferred from a gap.
+3. **Triggers re-acquisition**: `observe_with_reacquire` asks the caller for a fresh frame FOR
+   THE SAME INTERVAL before giving up. Recovering the frame beats recording the hole, because
+   the minute is not repeatable. A recovered interval is still recorded as a drop flagged
+   `recovered: true` — success must not erase the anomaly.
+
+### DropPolicy: fail while developing, record in production
+
+Second correction from the user: *an error may be necessary for now so we can dev fixes*. So the
+posture is explicit rather than hardcoded:
+
+- **`DropPolicy::Fail` (the default, today)** — a drop returns an error and stops the run. A
+  hole quietly recorded in a ledger is easy to scroll past; a build that halts gets fixed.
+- **`DropPolicy::Record`** — log, count, carry on. Correct for an unattended all-day recorder,
+  where one bad frame must not cost the remaining seven hours.
+
+The policy decides only whether the run CONTINUES. The drop is recorded either way, and a test
+asserts that the failing policy still records — otherwise "fail fast" would quietly mean "fail
+without evidence".
+
+### The subtle bug this surfaced
+
+A bad frame must not become the gate's comparison baseline. If it did, the next GOOD frame would
+be diffed against garbage — or worse, a frame that was never stored would make a real change
+look unchanged, turning one dropped frame into an unbounded run of false skips. The gate buffer
+is now updated only after the frame is safely handled, with a test that replays the pre-drop
+frame and asserts it still reads `Unchanged`.
+
+### Daemon state gets the same treatment
+
+`load_reporting()` returns a `StateAnomaly` alongside the state, because "no state because we
+stopped cleanly" and "no state because the file was half-written" are the same value through
+`load()` and mean opposite things. Only the second says the last run died mid-write and its
+final windows may be incomplete.
+
+### Method: a mutation that does not COMPILE reports nothing at all
+
+R17 warned that a mutation which fails to APPLY looks like success. This session produced the
+sharper variant twice: a mutation that applies but does not **compile** prints no `test result`
+line whatsoever. Skimming for "FAILED" finds nothing and the eye reads it as fine.
+
+Both times the mutation removed the last use of a variable, and `-D warnings` turned that into a
+build error. The fix is to mutate in a way that preserves usage — `max_attempts.max(1).min(1)`
+rather than `1u32` — and, more importantly, to **treat a missing result line as a failed
+experiment, not a passing one**. Assert that a mutation run produced output before believing it.

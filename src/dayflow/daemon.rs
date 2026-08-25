@@ -73,6 +73,30 @@ impl DaemonState {
     }
 }
 
+/// Something wrong with the state on disk, worth surfacing rather than swallowing.
+///
+/// Both variants mean the daemon starts fresh. The distinction is diagnostic:
+/// they say the last run did not stop cleanly, so its final windows may be
+/// incomplete — the same class of evidence as a dropped frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateAnomaly {
+    /// The file existed but did not parse — a half-written or truncated save.
+    Corrupt,
+    /// The file existed but could not be read at all.
+    Unreadable,
+}
+
+impl StateAnomaly {
+    /// Short stable label for status payloads.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Corrupt => "corrupt_state",
+            Self::Unreadable => "unreadable_state",
+        }
+    }
+}
+
 /// Where the daemon keeps its state, and how it reads and writes it.
 #[derive(Debug, Clone)]
 pub struct DaemonStateStore {
@@ -92,16 +116,49 @@ impl DaemonStateStore {
 
     /// Load the state, if any.
     ///
-    /// A corrupt or unreadable file returns `Ok(None)` rather than an error: the
-    /// daemon must still be able to start. It loses continuity with the previous
-    /// session — which is visible as a new session id — rather than refusing to
-    /// record anything at all, because a recorder that will not start is worse
-    /// than one that starts fresh.
+    /// A corrupt or unreadable file yields no state rather than an error: the
+    /// daemon must still start, because a recorder that refuses to run loses the
+    /// whole day, while starting fresh loses only continuity.
+    ///
+    /// But it is NOT silent. Use [`DaemonStateStore::load_reporting`] to see
+    /// WHY there is no state — a half-written file is a symptom worth
+    /// investigating, and the previous session's tail may itself be incomplete.
     pub fn load(&self) -> Result<Option<DaemonState>, DayflowError> {
+        Ok(self.load_reporting()?.0)
+    }
+
+    /// Load the state, reporting any anomaly alongside it.
+    ///
+    /// The anomaly is the point: "no state" from a clean stop and "no state
+    /// because the file was half-written" mean very different things, and only
+    /// the second says something went wrong last time.
+    pub fn load_reporting(
+        &self,
+    ) -> Result<(Option<DaemonState>, Option<StateAnomaly>), DayflowError> {
         match std::fs::read_to_string(&self.path) {
-            Ok(text) => Ok(serde_json::from_str(&text).ok()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Ok(None),
+            Ok(text) => match serde_json::from_str::<DaemonState>(&text) {
+                Ok(state) => Ok((Some(state), None)),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        bytes = text.len(),
+                        error = %e,
+                        "dayflow: daemon state is unreadable — treating it as a crashed \
+                         session and starting fresh; the previous session's tail may be \
+                         incomplete and is worth investigating"
+                    );
+                    Ok((None, Some(StateAnomaly::Corrupt)))
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((None, None)),
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "dayflow: daemon state could not be read — starting fresh"
+                );
+                Ok((None, Some(StateAnomaly::Unreadable)))
+            }
         }
     }
 
@@ -224,16 +281,40 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_state_file_starts_fresh_rather_than_refusing_to_run() {
-        // A recorder that will not start is worse than one that starts fresh:
-        // the lost continuity is visible as a new session id, whereas refusing
-        // to run loses the whole day silently.
+    fn a_corrupt_state_file_starts_fresh_but_says_so() {
+        // A recorder that will not start loses the whole day; starting fresh
+        // loses only continuity. But a half-written file is a SYMPTOM — the last
+        // run did not stop cleanly and its final windows may be incomplete — so
+        // it must be reported, not swallowed.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("daemon.json");
         std::fs::write(&path, "{ this is not json").unwrap();
         let store = DaemonStateStore::new(&path);
-        assert_eq!(store.load().unwrap(), None);
-        assert_eq!(decide_resume(None, at(0)), ResumeDecision::Fresh);
+
+        let (state, anomaly) = store.load_reporting().unwrap();
+        assert_eq!(state, None, "it still starts");
+        assert_eq!(
+            anomaly,
+            Some(StateAnomaly::Corrupt),
+            "and it reports WHY there is no state"
+        );
+        assert_eq!(decide_resume(state.as_ref(), at(0)), ResumeDecision::Fresh);
+    }
+
+    #[test]
+    fn a_clean_start_is_distinguishable_from_a_crashed_one() {
+        // The distinction that makes the anomaly useful: "no state because we
+        // stopped cleanly" and "no state because the file was half-written" look
+        // identical through `load()` alone.
+        let dir = tempfile::tempdir().unwrap();
+        let clean = DaemonStateStore::new(dir.path().join("clean.json"));
+        assert_eq!(clean.load_reporting().unwrap(), (None, None), "never written ⇒ no anomaly");
+
+        let crashed = DaemonStateStore::new(dir.path().join("crashed.json"));
+        std::fs::write(crashed.path(), "{\"session_id\": \"trunc").unwrap();
+        let (_, anomaly) = crashed.load_reporting().unwrap();
+        assert!(anomaly.is_some(), "a truncated save must be distinguishable from a clean stop");
+        assert_eq!(anomaly.unwrap().label(), "corrupt_state");
     }
 
     #[test]

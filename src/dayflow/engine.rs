@@ -48,6 +48,8 @@ pub struct DayflowRun {
     producing_since: DateTime<Utc>,
     /// Hard cap on a bounded session's wall-clock length, if any.
     max_duration: Option<std::time::Duration>,
+    /// Intervals whose frame could not be obtained.
+    frames_dropped: u64,
 }
 
 impl DayflowRun {
@@ -86,6 +88,7 @@ impl DayflowRun {
             last_summary_at: None,
             producing_since: now,
             max_duration: None,
+            frames_dropped: 0,
         })
     }
 
@@ -291,6 +294,19 @@ impl DayflowRun {
         self.windows.pauses()
     }
 
+    /// Record that an interval's frame could not be obtained.
+    ///
+    /// Called by the capture loop with the sampler's unrecovered drop count, so
+    /// status reports holes rather than leaving them to be inferred.
+    pub fn note_frames_dropped(&mut self, total: u64) {
+        self.frames_dropped = total;
+    }
+
+    /// Intervals whose frame could not be obtained.
+    pub fn frames_dropped(&self) -> u64 {
+        self.frames_dropped
+    }
+
     /// Note that a window was summarised, advancing that evidence.
     pub fn note_summarized(&mut self, at: DateTime<Utc>) {
         self.last_summary_at = Some(at);
@@ -323,6 +339,7 @@ impl DayflowRun {
             segment_seconds: u32::try_from(self.windows.interval().as_secs())
                 .unwrap_or(u32::MAX),
             displays_active: capturing,
+            frames_dropped: self.frames_dropped,
             paused_cause: self.windows.pause_cause(),
             stopped: self.stopped,
             producing_since: self.producing_since,

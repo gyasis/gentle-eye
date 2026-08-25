@@ -659,6 +659,31 @@ impl DisplaySelection {
     }
 }
 
+/// What to do when an interval's frame cannot be obtained.
+///
+/// The tradeoff is between finding bugs and surviving them, and the right answer
+/// differs by phase:
+///
+/// - [`DropPolicy::Fail`] — return an error. A dropped frame stops the run, so
+///   the cause gets investigated instead of scrolled past. **The default while
+///   the feature is under development**, because a hole quietly recorded in a
+///   ledger is far easier to ignore than a build that stops.
+/// - [`DropPolicy::Record`] — record the drop, log loudly, keep recording. Right
+///   for an unattended all-day recorder in production, where one bad frame must
+///   not cost the remaining seven hours.
+///
+/// Either way the drop is recorded and counted; the policy only decides whether
+/// the run continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DropPolicy {
+    /// Stop the run so the cause is investigated. Development default.
+    #[default]
+    Fail,
+    /// Record it and carry on. Production behaviour for an all-day recorder.
+    Record,
+}
+
 /// Content-identity gate: don't store or perceive a sample that is the same
 /// picture again.
 ///
@@ -712,6 +737,13 @@ pub struct DeltaConfig {
     /// worth perceiving at all. Lookout: 8.0.
     #[serde(default = "default_content_std")]
     pub content_std: f64,
+    /// What to do when a frame cannot be obtained for an interval.
+    ///
+    /// Defaults to [`DropPolicy::Fail`] while the feature is being built: a
+    /// dropped frame should stop us and get fixed, not accumulate silently.
+    /// Flip to `Record` before running unattended.
+    #[serde(default)]
+    pub on_drop: DropPolicy,
     /// Also dedupe at the TEXT level: normalised OCR lines already seen are not
     /// re-stored, even if the pixels moved.
     #[serde(default = "default_dedup_text")]
@@ -728,6 +760,7 @@ impl Default for DeltaConfig {
             pixel_tolerance: default_pixel_tolerance(),
             proportion_threshold: default_proportion_threshold(),
             content_std: default_content_std(),
+            on_drop: DropPolicy::default(),
             dedup_text: default_dedup_text(),
         }
     }
