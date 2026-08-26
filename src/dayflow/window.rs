@@ -80,6 +80,14 @@ pub struct ClosedWindow {
     pub end_wall: DateTime<Utc>,
     /// How many samples were taken during it, including skipped ones.
     pub sample_count: u32,
+    /// Set when the closing instant preceded the window's start — a backwards
+    /// clock step (DST, NTP correction, manual change).
+    ///
+    /// The span is CLAMPED so the ledger never holds a negative duration, and
+    /// this flag preserves the fact that it happened. Silently clamping would
+    /// hide a real anomaly; silently recording `end < start` would corrupt every
+    /// downstream sum, render and total.
+    pub clock_anomaly: bool,
     /// When a sample was last actually TAKEN in this window, if any.
     ///
     /// Distinct from `end_wall`, and the distinction matters: a window closed by
@@ -299,14 +307,31 @@ impl WindowController {
         now: DateTime<Utc>,
         reason: CloseReason,
     ) -> Option<ClosedWindow> {
-        self.open.remove(&display_id).map(|w| ClosedWindow {
-            display_id,
-            sequence: w.sequence,
-            start_wall: w.start_wall,
-            end_wall: now,
-            sample_count: w.sample_count,
-            last_sample_at: w.last_sample_at,
-            reason,
+        self.open.remove(&display_id).map(|w| {
+            // A backwards clock must never yield end < start. Clamp to the
+            // start, and flag it — a zero-length window is honest about having
+            // been interrupted; a negative one is corruption that propagates.
+            let clock_anomaly = now < w.start_wall;
+            if clock_anomaly {
+                tracing::warn!(
+                    display_id,
+                    sequence = w.sequence,
+                    start_wall = %w.start_wall,
+                    closing_at = %now,
+                    "dayflow: clock stepped BACKWARDS during a window — span clamped to zero \
+                     and flagged; investigate the time source"
+                );
+            }
+            ClosedWindow {
+                display_id,
+                sequence: w.sequence,
+                start_wall: w.start_wall,
+                end_wall: if clock_anomaly { w.start_wall } else { now },
+                sample_count: w.sample_count,
+                last_sample_at: w.last_sample_at,
+                clock_anomaly,
+                reason,
+            }
         })
     }
 

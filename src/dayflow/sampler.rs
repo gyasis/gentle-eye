@@ -159,6 +159,28 @@ struct DisplayState {
     prev_gate: Option<Vec<u8>>,
 }
 
+/// One interval's worth of sampling context.
+///
+/// A struct rather than a long argument list, for the same reason
+/// [`crate::dayflow::models::LivenessInput`] is one: eight positional parameters
+/// is a swap the compiler cannot catch. This is the second time that lint fired
+/// in this feature.
+#[derive(Debug, Clone, Copy)]
+pub struct SampleRequest<'a> {
+    /// Which display.
+    pub display_id: u32,
+    /// The window this interval belongs to.
+    pub sequence: u64,
+    /// The captured frame.
+    pub frame: RawFrame<'a>,
+    /// The interval's instant.
+    pub taken_at: DateTime<Utc>,
+    /// Where a kept frame is written.
+    pub dir: &'a Path,
+    /// How many acquisition attempts are permitted.
+    pub max_attempts: u32,
+}
+
 /// Samples frames, gates them, and writes the survivors.
 #[derive(Debug)]
 pub struct Sampler {
@@ -207,7 +229,10 @@ impl Sampler {
         taken_at: DateTime<Utc>,
         dir: &Path,
     ) -> Result<SampleRecord, DayflowError> {
-        self.observe_with_reacquire(display_id, sequence, frame, taken_at, dir, 1, |_| None)
+        self.observe_with_reacquire(
+            SampleRequest { display_id, sequence, frame, taken_at, dir, max_attempts: 1 },
+            |_| None,
+        )
     }
 
     /// Observe a frame, and on a bad one try to RE-ACQUIRE a good frame for the
@@ -224,17 +249,13 @@ impl Sampler {
     /// be silent — a drop is missing data, not a skip.
     pub fn observe_with_reacquire<F>(
         &mut self,
-        display_id: u32,
-        sequence: u64,
-        frame: RawFrame<'_>,
-        taken_at: DateTime<Utc>,
-        dir: &Path,
-        max_attempts: u32,
+        req: SampleRequest<'_>,
         mut acquire: F,
     ) -> Result<SampleRecord, DayflowError>
     where
         F: FnMut(u32) -> Option<Vec<u8>>,
     {
+        let SampleRequest { display_id, sequence, frame, taken_at, dir, max_attempts } = req;
         let attempts_allowed = max_attempts.max(1);
         let (width, height) = (frame.width, frame.height);
         let mut owned: Option<Vec<u8>> = None;
@@ -643,12 +664,14 @@ mod tests {
         let mut calls = 0;
         let rec = s
             .observe_with_reacquire(
-                0,
-                1,
-                RawFrame { bgra: &truncated, width: 64, height: 48 },
-                at(0),
-                dir.path(),
-                3,
+                SampleRequest {
+                    display_id: 0,
+                    sequence: 1,
+                    frame: RawFrame { bgra: &truncated, width: 64, height: 48 },
+                    taken_at: at(0),
+                    dir: dir.path(),
+                    max_attempts: 3,
+                },
                 |attempt| {
                     calls += 1;
                     assert_eq!(attempt, 2, "re-acquire is asked for the NEXT attempt");
@@ -676,12 +699,14 @@ mod tests {
         let mut calls = 0;
         let rec = s
             .observe_with_reacquire(
-                0,
-                1,
-                RawFrame { bgra: &truncated, width: 64, height: 48 },
-                at(0),
-                dir.path(),
-                4,
+                SampleRequest {
+                    display_id: 0,
+                    sequence: 1,
+                    frame: RawFrame { bgra: &truncated, width: 64, height: 48 },
+                    taken_at: at(0),
+                    dir: dir.path(),
+                    max_attempts: 4,
+                },
                 |_| {
                     calls += 1;
                     Some(vec![0u8; 16]) // still bad
@@ -701,12 +726,14 @@ mod tests {
         let truncated = vec![0u8; 16];
         let rec = s
             .observe_with_reacquire(
-                0,
-                1,
-                RawFrame { bgra: &truncated, width: 64, height: 48 },
-                at(0),
-                dir.path(),
-                10,
+                SampleRequest {
+                    display_id: 0,
+                    sequence: 1,
+                    frame: RawFrame { bgra: &truncated, width: 64, height: 48 },
+                    taken_at: at(0),
+                    dir: dir.path(),
+                    max_attempts: 10,
+                },
                 |_| None, // the source has nothing to give
             )
             .unwrap();

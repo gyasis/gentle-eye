@@ -1133,3 +1133,74 @@ a design that collapses the first time the Studio is busy. Cold load is a separa
 smaller effect (10.3s cold vs 2.6s warm).
 
 Source: cross-session measurement, and PRD `dayflow_waves_continuance_2026-08-23` §5.
+
+
+---
+
+## R20 — Wave 4 review: a tautological test hiding real corruption (2026-08-26)
+
+Verdict **FAIL**, five confirmed. The worst was a test I wrote and named for the exact
+protection it did not provide.
+
+### C1 — the tautology
+
+```rust
+assert!(w.duration().num_seconds() <= 0 || w.end_wall >= w.start_wall)
+```
+
+`duration()` **is** `end - start`. The first arm covers `end < start`, the second covers
+`end >= start` — together, every possible value. **It cannot fail against any implementation.**
+Meanwhile the code genuinely produced a **−3600s window**, and the commit message claimed the
+protection existed.
+
+This is a new species of the recurring failure. Earlier ones were tests that stopped *short* of
+the interesting assertion. This one asserts something **structurally impossible to violate** —
+it reads as rigorous and is worth nothing. A disjunction whose arms are exhaustive is always
+this, and it is easy to write when phrasing a property defensively ("either it's zero or it's
+positive").
+
+Fixed with a clamp (`end_wall = start_wall` on a backwards step) plus a `clock_anomaly` flag, so
+the ledger never holds a negative span AND the anomaly is not silently swallowed. Both halves
+mutation-proven, plus a test asserting a normal close is NOT flagged — a flag that is always set
+is noise.
+
+### C2 — `frames_dropped` was unreachable plumbing
+
+`note_frames_dropped` was called by nothing, in source or tests, and hardcoding
+`frames_dropped: 0` passed all 380 tests. Status would have shown zero holes while frames were
+dropped — the precise false-green R18 introduced the drop category to prevent, defeated by a
+missing wire. Fixed with `sync_drops_from(&Sampler)`, counting only UNRECOVERED drops so a
+successful retry does not inflate the number a reader acts on.
+
+### C3/C4 — the cap
+
+A capped session stamped its final window at ENFORCEMENT time, not the cap boundary: with a
+sleep/wake the recorded window ran 13.4 hours past its own limit, claiming the user worked
+through it. Same stretched-window failure the pause path already clamps. And `on_sample`
+SWALLOWED the window the cap-stop closed, so the FR-005 "closed and accounted" final window
+existed only in an in-memory counter and never reached a caller for persistence.
+
+### C5 — the same lint, one wave later
+
+`observe_with_reacquire` took 8 positional arguments and re-broke the clippy gate — the
+identical defect fixed in `assess` one wave earlier with `LivenessInput`. Fixed the same way
+(`SampleRequest`). **Two occurrences of one lint in consecutive waves means the habit, not the
+instance, is the problem**: past about five parameters, bundle them.
+
+### The harness lied to me twice more
+
+1. `grep "^test result" | head -1` reads only the **lib** suite. My C1 test is an INTEGRATION
+   test, so two genuinely-killed mutations reported as survivors. A mutation harness must
+   inspect EVERY suite's result line, and count failures across all of them.
+2. One mutation did not compile and printed no result at all — the R18 trap again.
+
+Combined rule, now three times learned: **a mutation experiment must prove it ran.** Assert the
+pattern applied, assert the build produced result lines, and count failures across every suite.
+Anything else is indistinguishable from a pass.
+
+### Process correction from the user
+
+Waves had been overlapping — Wave 5 was built while Wave 4 was under review, and the reviewer
+noted the commit landing mid-review. The rule is now strictly serial: **build → review → wait →
+fix → verify → next wave.** No wave opens while another is being checked. Wave 5 therefore owes
+its own review before Wave 6.

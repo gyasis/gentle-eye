@@ -178,6 +178,7 @@ mod tests {
             end_wall: at(to),
             sample_count: samples,
             last_sample_at: (samples > 0).then(|| at(to - 1)),
+            clock_anomaly: false,
             reason: CloseReason::Boundary,
         }
     }

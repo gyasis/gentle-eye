@@ -194,7 +194,7 @@ mod integration {
     use chrono::{DateTime, Duration as ChronoDuration, Utc};
     use gentle_eye::config::{DayflowConfig, DeltaConfig};
     use gentle_eye::dayflow::engine::DayflowRun;
-    use gentle_eye::dayflow::models::{DayflowHealth, DayflowMode};
+    use gentle_eye::dayflow::models::DayflowMode;
     use gentle_eye::dayflow::sampler::{RawFrame, Sampler};
     use gentle_eye::dayflow::window::{CloseReason, PauseCause};
     use std::time::Duration;
@@ -266,23 +266,45 @@ mod integration {
 
     #[test]
     fn a_backwards_clock_step_cannot_produce_a_negative_window() {
-        // DST or a manual clock change. A window whose end precedes its start is
-        // corruption, and every duration computation downstream inherits it.
+        // The previous version of this test was a TAUTOLOGY:
+        //     assert!(w.duration() <= 0 || w.end_wall >= w.start_wall)
+        // `duration()` IS `end - start`, so the two arms cover every possible
+        // value and it could not fail against any implementation — while the
+        // code genuinely produced a -3600s window.
         let mut r = DayflowRun::start(&cfg(), DayflowMode::Daemon, vec![0], at(0)).unwrap();
         r.on_sample(0, at(1_000));
         r.on_sample(0, at(1_060));
 
         // clock jumps BACKWARDS an hour, then the run is stopped
         let closed = r.stop(at(1_000 - 3_600));
-        for w in &closed {
-            assert!(
-                w.duration().num_seconds() <= 0 || w.end_wall >= w.start_wall,
-                "a backwards clock must not silently yield a plausible-looking window: {w:?}"
-            );
-        }
-        // whatever it recorded, liveness must not read Healthy off a future stamp
-        let l = r.liveness(at(1_060));
-        assert_eq!(l.health, DayflowHealth::Stopped);
+        assert_eq!(closed.len(), 1);
+        let w = &closed[0];
+
+        assert!(
+            w.end_wall >= w.start_wall,
+            "a window must NEVER end before it starts: {} -> {}",
+            w.start_wall,
+            w.end_wall
+        );
+        assert!(
+            w.duration().num_seconds() >= 0,
+            "and its duration must never be negative: {}s",
+            w.duration().num_seconds()
+        );
+        assert!(w.clock_anomaly, "the anomaly must be FLAGGED, not silently clamped away");
+        // clamping to zero is honest about an interrupted window; a negative
+        // span would propagate into every later sum, render and total
+        assert_eq!(w.duration().num_seconds(), 0);
+    }
+
+    #[test]
+    fn a_normal_close_is_not_flagged_as_a_clock_anomaly() {
+        // The flag must mean something — if it were always set, it would be noise.
+        let mut r = DayflowRun::start(&cfg(), DayflowMode::Daemon, vec![0], at(0)).unwrap();
+        r.on_sample(0, at(0));
+        let closed = r.stop(at(600));
+        assert!(!closed[0].clock_anomaly, "an ordinary close is not an anomaly");
+        assert_eq!(closed[0].duration().num_seconds(), 600);
     }
 
     #[test]

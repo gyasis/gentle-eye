@@ -135,7 +135,18 @@ impl DayflowRun {
         if self.stopped || !self.max_duration_reached(now) {
             return None;
         }
-        Some(self.stop(now))
+        // Close AT the cap boundary, not at whenever enforcement happened to
+        // run. A sleep/wake or a slow driver can deliver this call hours late,
+        // and a window stamped with that time claims the user was working
+        // through it — the same stretched-window failure the pause path clamps.
+        let boundary = self
+            .max_duration
+            .and_then(|max| chrono::Duration::from_std(max).ok())
+            .map_or(now, |max| {
+                let b = self.started_at + max;
+                if b < now { b } else { now }
+            });
+        Some(self.stop(boundary))
     }
 
     /// When this run started.
@@ -180,8 +191,12 @@ impl DayflowRun {
     pub fn on_sample(&mut self, display_id: u32, now: DateTime<Utc>) -> Option<ClosedWindow> {
         // Enforce the cap before accepting the sample: a bounded session must not
         // record past its own limit just because something kept feeding it.
-        if self.enforce_max_duration(now).is_some() {
-            return None;
+        //
+        // The windows it closes are RETURNED, not swallowed: every other close
+        // path hands them back for persistence, and a final window that exists
+        // only in an in-memory counter never reaches the ledger (FR-005).
+        if let Some(mut closed) = self.enforce_max_duration(now) {
+            return closed.pop();
         }
         if self.stopped || !self.displays.contains(&display_id) {
             return None;
@@ -296,10 +311,20 @@ impl DayflowRun {
 
     /// Record that an interval's frame could not be obtained.
     ///
-    /// Called by the capture loop with the sampler's unrecovered drop count, so
-    /// status reports holes rather than leaving them to be inferred.
-    pub fn note_frames_dropped(&mut self, total: u64) {
-        self.frames_dropped = total;
+    /// Takes the sampler's UNRECOVERED drop count so status reports real holes:
+    /// an interval that was retried successfully is not missing data, and
+    /// counting it would inflate the number a reader acts on.
+    pub fn note_frames_dropped(&mut self, unrecovered: u64) {
+        self.frames_dropped = unrecovered;
+    }
+
+    /// Pull the current hole count straight from a sampler.
+    ///
+    /// The wire that makes `frames_dropped` real rather than plumbing: a caller
+    /// that samples and never syncs would report zero holes while dropping
+    /// frames, which is exactly the false-green this feature exists to prevent.
+    pub fn sync_drops_from(&mut self, sampler: &crate::dayflow::sampler::Sampler) {
+        self.frames_dropped = sampler.unrecovered_drops().count() as u64;
     }
 
     /// Intervals whose frame could not be obtained.
@@ -728,6 +753,122 @@ mod tests {
     }
 
     #[test]
+    fn dropped_frames_reach_liveness_so_holes_are_visible() {
+        // C2: without this wire, `frames_dropped` is plumbing that reports 0
+        // forever — a status showing no holes while frames are being dropped is
+        // precisely the false-green this feature exists to prevent.
+        use crate::config::{DeltaConfig, DropPolicy};
+        use crate::dayflow::sampler::{RawFrame, Sampler};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = DeltaConfig::default();
+        d.on_drop = DropPolicy::Record;
+        let mut sampler = Sampler::new(d);
+        let mut r = run(vec![0]);
+        assert_eq!(r.liveness(at(0)).frames_dropped, 0, "nothing dropped yet");
+
+        let truncated = vec![0u8; 16];
+        for i in 0..3 {
+            sampler
+                .observe(0, 1, RawFrame { bgra: &truncated, width: 64, height: 48 }, at(i * 60), dir.path())
+                .unwrap();
+        }
+        r.sync_drops_from(&sampler);
+
+        assert_eq!(
+            r.liveness(at(180)).frames_dropped,
+            3,
+            "every unrecovered hole must be visible in status"
+        );
+    }
+
+    #[test]
+    fn a_recovered_interval_is_not_counted_as_a_hole() {
+        // A retried-and-succeeded interval is not missing data; counting it
+        // would inflate the number a reader acts on.
+        use crate::config::DeltaConfig;
+        use crate::dayflow::sampler::{RawFrame, SampleRequest, Sampler};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sampler = Sampler::new(DeltaConfig::default());
+        let mut r = run(vec![0]);
+        let good = {
+            let mut v = Vec::with_capacity(64 * 48 * 4);
+            for i in 0..(64 * 48u32) {
+                let n = ((i.wrapping_mul(37) % 251) as u8) ^ 9;
+                v.extend_from_slice(&[n, n.wrapping_add(40), n.wrapping_add(80), 255]);
+            }
+            v
+        };
+        let truncated = vec![0u8; 16];
+        sampler
+            .observe_with_reacquire(
+                SampleRequest {
+                    display_id: 0,
+                    sequence: 1,
+                    frame: RawFrame { bgra: &truncated, width: 64, height: 48 },
+                    taken_at: at(0),
+                    dir: dir.path(),
+                    max_attempts: 3,
+                },
+                |_| Some(good.clone()),
+            )
+            .unwrap();
+
+        assert_eq!(sampler.dropped_count(), 1, "the near-miss is recorded");
+        r.sync_drops_from(&sampler);
+        assert_eq!(
+            r.liveness(at(60)).frames_dropped,
+            0,
+            "but a RECOVERED interval is not a hole"
+        );
+    }
+
+    #[test]
+    fn a_capped_session_stamps_its_final_window_at_the_cap_not_at_enforcement() {
+        // C3: a sleep/wake or a slow driver can deliver enforcement hours late.
+        // A window stamped with that time claims the user worked through it —
+        // the same stretched-window failure the pause path already clamps.
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(1_800))
+            .unwrap();
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(600));
+
+        // enforcement arrives 13 hours late
+        let closed = r.enforce_max_duration(at(50_000)).expect("the cap fires");
+        assert_eq!(closed.len(), 1);
+        assert_eq!(
+            closed[0].end_wall,
+            at(1_800),
+            "the window must end AT the cap boundary, not at enforcement time"
+        );
+        assert!(
+            closed[0].duration().num_seconds() <= 1_800,
+            "a capped session cannot record a window longer than its own cap"
+        );
+    }
+
+    #[test]
+    fn the_window_closed_by_the_cap_is_returned_to_the_caller() {
+        // C4: every other close path hands windows back for persistence. A final
+        // window living only in an in-memory counter never reaches the ledger.
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(900))
+            .unwrap();
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(120));
+        let returned = r.on_sample(0, at(900));
+        assert!(
+            returned.is_some(),
+            "the sample that trips the cap must return the window it closed"
+        );
+        let w = returned.unwrap();
+        assert_eq!(w.sample_count, 2, "with its samples accounted for");
+        assert_eq!(w.reason, crate::dayflow::window::CloseReason::Stopped);
+    }
+
+    #[test]
     fn a_capped_session_stops_itself_at_the_limit() {
         let mut r = session(vec![0])
             .with_max_duration(std::time::Duration::from_secs(1800))
@@ -737,13 +878,17 @@ mod tests {
         assert!(!r.max_duration_reached(at(1_799)));
         assert_ne!(r.liveness(at(1_700)).health, DayflowHealth::Stopped);
 
-        // the sample that crosses the cap must not be recorded
-        assert!(r.on_sample(0, at(1_800)).is_none());
+        // The sample that crosses the cap is not RECORDED, but it does return the
+        // window the cap-stop closed, so the caller can persist it (C4).
+        let closing = r.on_sample(0, at(1_800));
+        assert!(closing.is_some(), "the cap-stop's window is handed back");
         assert_eq!(
             r.liveness(at(1_800)).health,
             DayflowHealth::Stopped,
             "a capped session must end itself at the limit"
         );
+        // ...and nothing after it is accepted
+        assert!(r.on_sample(0, at(2_400)).is_none(), "the session is over");
     }
 
     #[test]
@@ -756,7 +901,10 @@ mod tests {
         r.on_sample(0, at(0));
         let before = r.liveness(at(0)).chunks_written;
 
-        for t in [1_200, 1_800, 2_400, 3_000, 6_000] {
+        // The first call past the cap returns the window the stop closed; every
+        // later one returns None because the session has ended.
+        assert!(r.on_sample(0, at(1_200)).is_some(), "the cap-stop hands back its window");
+        for t in [1_800, 2_400, 3_000, 6_000] {
             assert!(r.on_sample(0, at(t)).is_none(), "no sample may land past the cap");
         }
         let after = r.liveness(at(6_000)).chunks_written;
