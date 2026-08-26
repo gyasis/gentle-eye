@@ -24,6 +24,11 @@ use crate::dayflow::models::{ChunkSummary, RollingContext, TimelineEntry};
 use crate::dayflow::window::ClosedWindow;
 
 /// A window waiting to be summarised.
+///
+/// `#[must_use]`: dropping one taken from [`SummaryScheduler::next_due`] without
+/// calling [`SummaryScheduler::succeeded`] or [`SummaryScheduler::failed`] loses
+/// that slice of the day, which is exactly what "retry, never drop" forbids.
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingWindow {
     /// The window itself.
@@ -32,15 +37,6 @@ pub struct PendingWindow {
     pub attempts: u32,
     /// When the next attempt is allowed, if the last one failed.
     pub retry_after: Option<DateTime<Utc>>,
-}
-
-/// Why a window left the queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Settled {
-    /// Summarised and written to the timeline.
-    Summarised,
-    /// Contained no samples, so there was nothing to summarise.
-    Empty,
 }
 
 /// The real-time summarisation queue.
@@ -97,14 +93,23 @@ impl SummaryScheduler {
     /// Windows whose backoff has not elapsed are skipped without losing their
     /// place: order is preserved so the timeline is built in time order even
     /// when one window is being retried.
+    /// A window with no samples is settled here and never handed out: there is
+    /// nothing to summarise, and passing it to a caller would spend a perception
+    /// call per idle window.
     pub fn next_due(&mut self, now: DateTime<Utc>) -> Option<PendingWindow> {
-        let idx = self
-            .queue
-            .iter()
-            .position(|p| p.retry_after.is_none_or(|t| now >= t))?;
-        let mut p = self.queue.remove(idx)?;
-        p.attempts += 1;
-        Some(p)
+        loop {
+            let idx = self
+                .queue
+                .iter()
+                .position(|p| p.retry_after.is_none_or(|t| now >= t))?;
+            let mut p = self.queue.remove(idx)?;
+            if p.window.sample_count == 0 {
+                self.settled += 1;
+                continue;
+            }
+            p.attempts += 1;
+            return Some(p);
+        }
     }
 
     /// Record that a window was summarised, advancing the rolling context.
@@ -113,21 +118,25 @@ impl SummaryScheduler {
         self.settled += 1;
     }
 
-    /// Record that a window contained nothing to summarise.
-    pub fn settled_empty(&mut self) {
-        self.settled += 1;
-    }
-
     /// Record a failed attempt and requeue the window with backoff.
     ///
-    /// The window returns to the FRONT so time order is preserved: appending it
-    /// would let later windows overtake it and produce a timeline whose entries
-    /// arrive out of order.
+    /// The window is reinserted at its position in TIME, not at the front. A
+    /// front-push is correct only for a window that came from the head; one
+    /// taken from deeper in the queue jumps ahead of its own predecessors, and
+    /// the inversion compounds with each failure. During an outage spanning
+    /// several windows that rebuilds the timeline backwards and threads the
+    /// rolling context in reverse, breaking FR-016.
     pub fn failed(&mut self, mut pending: PendingWindow, now: DateTime<Utc>) {
         self.failures += 1;
         let backoff = Self::backoff_for(pending.attempts);
         pending.retry_after = Some(now + backoff);
-        self.queue.push_front(pending);
+        let key = (pending.window.start_wall, pending.window.sequence);
+        let idx = self
+            .queue
+            .iter()
+            .position(|p| (p.window.start_wall, p.window.sequence) > key)
+            .unwrap_or(self.queue.len());
+        self.queue.insert(idx, pending);
     }
 
     /// Exponential backoff, capped so a long outage does not push a retry past
@@ -250,7 +259,42 @@ mod tests {
     }
 
     #[test]
+    fn several_windows_failing_in_one_outage_still_drain_in_time_order() {
+        // The single-window test above cannot distinguish a front-push from a
+        // time-ordered reinsert. With three windows down in one outage a
+        // front-push drains them [2,1,0] — the timeline is rebuilt BACKWARDS and
+        // the rolling context threads in reverse, so every prompt in that
+        // stretch carries the wrong predecessor (FR-016).
+        let mut s = SummaryScheduler::new();
+        for i in 0..3u64 {
+            let from = (i as i64) * 600;
+            s.enqueue(win(i, from, from + 600, 4));
+        }
+
+        // provider is down: each window is taken and fails, in time order
+        for _ in 0..3 {
+            let p = s.next_due(at(1_800)).expect("all three are due");
+            s.failed(p, at(1_800));
+        }
+        assert_eq!(s.pending(), 3, "a failure requeues, never drops");
+
+        // provider recovers well after every backoff has elapsed
+        let mut drained = Vec::new();
+        while let Some(p) = s.next_due(at(100_000)) {
+            drained.push(p.window.sequence);
+            s.succeeded(&summary(p.window.sequence as usize));
+        }
+        assert_eq!(drained, vec![0, 1, 2], "an outage must not reverse the timeline");
+    }
+
+    #[test]
     fn backoff_grows_but_is_capped() {
+        // "grows and is capped" is satisfied by a LINEAR schedule too, which
+        // hammers a down provider far harder than documented. Pin the doubling.
+        assert_eq!(SummaryScheduler::backoff_for(0), chrono::Duration::seconds(30));
+        assert_eq!(SummaryScheduler::backoff_for(1), chrono::Duration::seconds(60));
+        assert_eq!(SummaryScheduler::backoff_for(2), chrono::Duration::seconds(120));
+        assert_eq!(SummaryScheduler::backoff_for(3), chrono::Duration::seconds(240));
         let a = SummaryScheduler::backoff_for(1);
         let b = SummaryScheduler::backoff_for(3);
         assert!(b > a, "backoff must grow with attempts");
@@ -305,12 +349,21 @@ mod tests {
     fn an_empty_window_settles_without_being_summarised() {
         // A window with no samples has nothing to describe. It must still be
         // accounted for, or the count of what happened to each window is wrong.
+        // The scheduler must do this ITSELF. The previous version of this test
+        // called settled_empty() by hand and so verified only its own
+        // choreography: every empty-window behaviour could be deleted and it
+        // still passed.
         let mut s = SummaryScheduler::new();
         s.enqueue(win(0, 0, 600, 0));
-        let due = s.next_due(at(600)).unwrap();
-        assert_eq!(due.window.sample_count, 0);
-        s.settled_empty();
-        assert_eq!(s.settled_count(), 1);
+        s.enqueue(win(1, 600, 1200, 4));
+
+        let due = s.next_due(at(1_200)).expect("the window with samples is due");
+        assert_eq!(
+            due.window.sequence, 1,
+            "an empty window must never be handed out: summarising it spends a \
+             perception call to describe nothing"
+        );
+        assert_eq!(s.settled_count(), 1, "but it is still accounted for");
         assert_eq!(s.pending(), 0);
         assert!(s.context().is_empty(), "an empty window contributes no narrative");
     }

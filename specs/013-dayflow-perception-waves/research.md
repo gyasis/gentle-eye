@@ -1204,3 +1204,77 @@ Waves had been overlapping — Wave 5 was built while Wave 4 was under review, a
 noted the commit landing mid-review. The rule is now strictly serial: **build → review → wait →
 fix → verify → next wave.** No wave opens while another is being checked. Wave 5 therefore owes
 its own review before Wave 6.
+
+
+---
+
+## R21 — Wave 5 review: a documented invariant with no test, and a query that denied its own record (2026-08-26)
+
+Verdict **FAIL**, four confirmed. Both HIGH findings were bugs the tests were shaped
+around rather than aimed at.
+
+### F1 — `push_front` is correct for exactly one window
+
+`failed()` requeued to the FRONT, and the doc, the module header and the commit message all
+claimed this preserved time order. It does — **only** for a window taken from the head. One
+taken from deeper in the queue jumps ahead of its own predecessors, and the inversion
+**compounds per failure**: three windows failing in one outage drained `[2,1,0]`.
+
+That reverses the timeline AND threads the rolling context backwards, so window 2's summary
+seeds the prompt for window 1 and then window 0 — FR-016 says each chunk receives the
+**preceding** chunk's context, and every prompt in that stretch had the wrong one.
+
+The test could not have caught it: it drove a **single** failing window, for which front and
+time-ordered are indistinguishable. The mutation `push_front` ← survived with zero failures.
+Fixed by reinserting at the window's position in time, with a regression test that fails
+**three** windows concurrently. **A retry invariant needs at least two concurrent failures to
+be observable at all** — one is always ambiguous.
+
+### F2 — the range query denied a record it contained
+
+`WHERE start_time >= from AND start_time < to` is start-time *containment*. The headline query
+is "what was I doing at 2pm", asked as a narrow range — so an activity that began at 1:50 and
+ran through 2pm was **invisible**, and `ask_day` answered `"No activity was recorded"`. FR-018's
+guard against invention inverted into denial.
+
+Fixed to overlap (`end_time > from AND start_time < to`), kept half-open so an entry that merely
+abuts the range start does not leak in. Both directions mutation-proven — the second matters as
+much as the first, since over-wide overlap describes the wrong minute just as confidently.
+
+### F3 — the doc described handling that did not exist, and the test performed it
+
+`enqueue`'s doc said an empty window "is settled immediately by `next_due`". `next_due` never
+looked at `sample_count`. The test asserted a literal it had itself supplied and then **called
+`settled_empty()` by hand** — verifying its own choreography, not the scheduler's behaviour. The
+whole empty-window path could be deleted and it still passed, while a caller trusting the doc
+would spend a perception call describing nothing, once per idle window. Fixed by making the doc
+true: `next_due` settles empties and never hands one out.
+
+### F4 — "grows and is capped" also describes a linear schedule
+
+The mutation exponential → linear survived. The assertions pinned only monotonicity and the
+30-minute ceiling, both of which linear satisfies, while hammering a down provider far harder
+than documented. Now pinned at 30/60/120/240 s.
+
+### S1/S2 — the prompt
+
+Times were rendered `%H:%M` in **UTC with no date**: on any non-UTC machine the labels are
+offset from the clock the user means by "2pm", and a midnight-spanning range produces two
+indistinguishable `02:00` rows. Now local time with the date.
+
+`build_day_prompt` also interpolated `app`/`activity`/`summary` **raw**. That text is a model's
+summary of **OCR of the user's screen** — so anything on screen reaches the prompt. A newline
+inside a field forged extra timestamped rows or a second `QUESTION:` line. Now the question comes
+first, the record is fenced, and every field is flattened.
+
+Worth stating as a standing property: **the perception path makes screen content into prompt
+content.** Every later wave that renders an entry into a prompt inherits this, and the assertion
+must be structural — "no field can start a new LINE with a marker" — not a substring count, since
+harmless prose may legitimately contain the word.
+
+### The harness caught itself twice
+
+R20's rule paid off immediately. Both guards fired on real setup faults: the throwaway worktree
+was at `HEAD` and lacked the uncommitted fixes (patterns did not apply), then lacked the
+untracked `.tooling/` toolchain (no result lines). Under the old harness both would have printed
+"survived" and sent me chasing fixes for code that was already correct.
