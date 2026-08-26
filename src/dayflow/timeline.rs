@@ -206,3 +206,218 @@ mod tests {
         assert_eq!(mid[0].activity, "b");
     }
 }
+
+// ─── T024: grounded day-level Q&A ──────────────────────────────────────────
+
+/// An answer about a day, and the entries it was built from.
+///
+/// The entries are returned, not just cited, so a caller can SHOW its working.
+/// An answer whose `grounding` is empty but whose `answer` is confident prose is
+/// the failure this type exists to make visible.
+#[derive(Debug, Clone)]
+pub struct DayAnswer {
+    /// The answer text.
+    pub answer: String,
+    /// The entries it was grounded on, in time order.
+    pub grounding: Vec<TimelineEntry>,
+}
+
+impl DayAnswer {
+    /// Whether this answer rests on any recorded evidence.
+    pub fn is_grounded(&self) -> bool {
+        !self.grounding.is_empty()
+    }
+}
+
+/// The exact text returned when a range holds no entries.
+///
+/// A fixed string rather than a model call: with nothing to ground on, asking a
+/// model produces plausible invention, and for a record of someone's day an
+/// invented answer is worse than no answer (FR-018).
+pub const NO_RECORD: &str = "No activity was recorded for that period.";
+
+/// Build the grounding prompt for a day-level question.
+///
+/// The entries are rendered with their REAL time ranges. Never summarise the
+/// ranges or round them: a user asking "what was I doing at 2pm" is asking about
+/// a specific minute, and the entry boundaries are the only thing that answers it.
+pub fn build_day_prompt(question: &str, entries: &[TimelineEntry]) -> String {
+    let mut p = String::from(
+        "Answer the question using ONLY the recorded activity below. \
+         If the record does not contain the answer, say so plainly. \
+         Do not speculate about what the user might have been doing.\n\n\
+         RECORDED ACTIVITY:\n",
+    );
+    for e in entries {
+        p.push_str(&format!(
+            "- {} to {} | {:?} | {} | {} | {}\n",
+            e.start_time.format("%H:%M"),
+            e.end_time.format("%H:%M"),
+            e.category,
+            e.app,
+            e.activity,
+            e.summary
+        ));
+    }
+    p.push_str(&format!("\nQUESTION: {question}\n"));
+    p
+}
+
+/// Ask a question about a time range, grounded strictly on stored entries.
+///
+/// `answerer` receives the prompt and returns the model's reply. It is a
+/// parameter so the grounding rules — which are the part that must not be got
+/// wrong — are testable without a model.
+///
+/// Returns [`NO_RECORD`] without calling `answerer` when the range is empty.
+pub fn ask_day<S, F>(
+    store: &S,
+    question: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    answerer: F,
+) -> Result<DayAnswer, StorageError>
+where
+    S: TimelineStore + ?Sized,
+    F: FnOnce(&str) -> String,
+{
+    let entries = store.query_range(from, to)?;
+    if entries.is_empty() {
+        // Nothing to ground on. Do NOT ask the model: with no evidence it
+        // produces plausible invention, and a fabricated account of someone's
+        // day is worse than an admission of ignorance.
+        return Ok(DayAnswer { answer: NO_RECORD.to_string(), grounding: Vec::new() });
+    }
+    let answer = answerer(&build_day_prompt(question, &entries));
+    Ok(DayAnswer { answer, grounding: entries })
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use super::*;
+    use crate::storage::database::init_in_memory;
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_787_500_000 + secs, 0).unwrap()
+    }
+
+    fn store() -> SqliteTimelineStore {
+        SqliteTimelineStore::new(Arc::new(Mutex::new(init_in_memory().unwrap())))
+    }
+
+    fn entry(from: i64, to: i64, activity: &str) -> TimelineEntry {
+        TimelineEntry {
+            id: Uuid::new_v4(),
+            recording_id: Uuid::new_v4(),
+            start_time: at(from),
+            end_time: at(to),
+            category: ActivityCategory::Coding,
+            app: "editor".into(),
+            activity: activity.into(),
+            summary: format!("worked on {activity}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_range_says_so_and_never_asks_the_model() {
+        // FR-018. With no evidence a model invents, and a fabricated account of
+        // someone's day is worse than admitting there is no record.
+        let s = store();
+        let mut called = false;
+        let a = ask_day(&s, "what was I doing at 2pm?", at(0), at(10_000), |_| {
+            called = true;
+            "You were deep in a refactor.".into()
+        })
+        .unwrap();
+
+        assert!(!called, "the model must NOT be consulted with nothing to ground on");
+        assert_eq!(a.answer, NO_RECORD);
+        assert!(!a.is_grounded());
+        assert!(a.grounding.is_empty());
+    }
+
+    #[test]
+    fn an_answer_is_grounded_on_the_entries_that_cover_the_range() {
+        let s = store();
+        s.insert_entry(&entry(0, 600, "the sampler")).unwrap();
+        s.insert_entry(&entry(600, 1200, "the gate")).unwrap();
+        s.insert_entry(&entry(50_000, 50_600, "something else entirely")).unwrap();
+
+        let a = ask_day(&s, "what was I doing?", at(0), at(1_200), |_| "answer".into()).unwrap();
+        assert!(a.is_grounded());
+        assert_eq!(a.grounding.len(), 2, "only entries inside the range");
+        assert!(a.grounding.iter().all(|e| e.start_time < at(1_200)));
+    }
+
+    #[test]
+    fn the_prompt_carries_the_real_time_ranges() {
+        // "What was I doing at 2pm" is a question about a specific minute; the
+        // entry boundaries are the only thing that answers it.
+        let entries = vec![entry(0, 600, "the sampler")];
+        let p = build_day_prompt("what was I doing?", &entries);
+        assert!(p.contains("the sampler"), "the activity must reach the model");
+        assert!(p.contains(" to "), "and its time range: {p}");
+        assert!(
+            p.contains("ONLY the recorded activity"),
+            "the prompt must constrain the model to the record"
+        );
+        assert!(
+            p.to_lowercase().contains("do not speculate"),
+            "and forbid invention explicitly"
+        );
+    }
+
+    #[test]
+    fn grounding_is_returned_so_a_caller_can_show_its_working() {
+        // An answer with confident prose and an EMPTY grounding list is the
+        // failure this type makes visible.
+        let s = store();
+        s.insert_entry(&entry(0, 600, "the scheduler")).unwrap();
+        let a = ask_day(&s, "?", at(0), at(600), |_| "you wrote the scheduler".into()).unwrap();
+        assert!(a.is_grounded());
+        assert_eq!(a.grounding[0].activity, "the scheduler");
+    }
+
+    #[test]
+    fn entries_reach_the_model_in_time_order() {
+        let s = store();
+        // inserted out of order on purpose
+        s.insert_entry(&entry(1_200, 1_800, "third")).unwrap();
+        s.insert_entry(&entry(0, 600, "first")).unwrap();
+        s.insert_entry(&entry(600, 1_200, "second")).unwrap();
+
+        let mut seen = String::new();
+        ask_day(&s, "?", at(0), at(2_000), |p| {
+            seen = p.to_string();
+            "ok".into()
+        })
+        .unwrap();
+        let (f, sec, t) = (
+            seen.find("first").unwrap(),
+            seen.find("second").unwrap(),
+            seen.find("third").unwrap(),
+        );
+        assert!(f < sec && sec < t, "a day must be narrated in time order");
+    }
+
+    #[test]
+    fn a_range_covering_only_a_gap_is_not_answered_from_neighbours() {
+        // The subtle one: entries exist on either side, but nothing covers the
+        // asked-about window. Answering from the neighbours would describe a
+        // period the user was demonstrably not recorded doing anything in.
+        let s = store();
+        s.insert_entry(&entry(0, 600, "morning")).unwrap();
+        s.insert_entry(&entry(50_000, 50_600, "evening")).unwrap();
+
+        let mut called = false;
+        let a = ask_day(&s, "what about mid-afternoon?", at(10_000), at(20_000), |_| {
+            called = true;
+            "invented".into()
+        })
+        .unwrap();
+        assert!(!called);
+        assert_eq!(a.answer, NO_RECORD);
+    }
+}

@@ -24,6 +24,7 @@ pub mod gate;
 pub mod idle;
 pub mod models;
 pub mod sampler;
+pub mod scheduler;
 pub mod window;
 pub mod retention;
 pub mod summarizer;

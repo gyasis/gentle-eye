@@ -103,15 +103,15 @@ correct ranges; confirm status distinguishes healthy / paused / off / degraded.
 **Independent test**: with a stub provider and a fast clock, entries exist before `stop`; a
 question returns an answer citing stored entries.
 
-- [ ] T021 [US2] New `src/dayflow/scheduler.rs` (was T242) — a tokio task that summarizes each closed segment and writes its `TimelineEntry` immediately, channel-based and concurrency-safe with the capture loop (FR-014).
+- [x] T021 [US2] New `src/dayflow/scheduler.rs` (was T242) — a tokio task that summarizes each closed segment and writes its `TimelineEntry` immediately, channel-based and concurrency-safe with the capture loop (FR-014).
       `> DONE:` a running session with a stub provider produces entries BEFORE stop; a fast-clock test asserts it.
-- [ ] T022 [US2] Retry, don't drop — a segment whose summarization fails stays `summarized = false` and is retried; capture keeps producing meanwhile.
+- [x] T022 [US2] Retry, don't drop — a segment whose summarization fails stays `summarized = false` and is retried; capture keeps producing meanwhile.
       `> DONE:` with the provider unreachable, capture continues, the segment is marked unsummarized, and a later retry succeeds; nothing is silently skipped.
-- [ ] T023 [US2] Return pause intervals as `gaps` alongside entries from `query_range` in `src/dayflow/timeline.rs`, so a gap is a recorded fact rather than missing data.
+- [x] T023 [US2] Return pause intervals as `gaps` alongside entries from `query_range` in `src/dayflow/timeline.rs`, so a gap is a recorded fact rather than missing data.
       `> DONE:` a range spanning a pause returns the entries plus the gap with its cause; parameters stay bound, never interpolated.
-- [ ] T024 [S] [US2] `ask_day(question)` in `src/dayflow/timeline.rs` (was T243) — grounded strictly on `query_range` entries, and stating it has no record when the range is empty (FR-018).
+- [x] T024 [S] [US2] `ask_day(question)` in `src/dayflow/timeline.rs` (was T243) — grounded strictly on `query_range` entries, and stating it has no record when the range is empty (FR-018).
       `> DONE:` seeded entries yield a grounded answer; an empty range yields an explicit no-record answer, never an invented one; `cargo check` + tests green.
-- [ ] T025 [P] [US2] Integration coverage in `tests/dayflow_timeline.rs` — live-write ordering, range queries, gaps, empty-range grounding.
+- [x] T025 [P] [US2] Integration coverage in `tests/dayflow_timeline.rs` — live-write ordering, range queries, gaps, empty-range grounding.
       `> DONE:` all US2 acceptance scenarios from `spec.md` are asserted.
 
 ## Phase 5: User Story 3 — Affordable, private perception (P2)
