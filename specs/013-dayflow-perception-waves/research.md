@@ -1278,3 +1278,57 @@ R20's rule paid off immediately. Both guards fired on real setup faults: the thr
 was at `HEAD` and lacked the uncommitted fixes (patterns did not apply), then lacked the
 untracked `.tooling/` toolchain (no result lines). Under the old harness both would have printed
 "survived" and sent me chasing fixes for code that was already correct.
+
+
+---
+
+## R22 — Wave 5 re-review: fixing half an invariant, and a test that could not fail (2026-08-26)
+
+Re-review verdict **PASS WITH NOTES** — every F-fix held, but three residuals, and two of
+them are lessons about the SHAPE of a fix rather than the fix itself.
+
+### The fix repaired the failure path and left the arrival path broken
+
+R21 made `failed()` reinsert in time order. But `enqueue` still `push_back`ed, so **the sorted
+queue that reinsert relies on was never established.** Windows do not arrive sorted: a window
+closes on its END while the queue is keyed by its START, and sequence counters are **per
+display**, so a short pause-truncated window on one display closes before a longer window that
+began earlier on another. Demonstrated on the fixed source: hand-out order `[start 1000,
+start 900]` — **out of time order, with no failure involved at all.**
+
+The generalisation: **when a fix establishes an invariant, find every path that can violate
+it, not just the one the bug arrived through.** A sorted insert on one path is not an ordering
+guarantee. Both paths now go through one `insert_in_time_order` seam, so the queue has exactly
+one ordering rule — the same single-seam discipline R-DR4d forced on chunk reads.
+
+The order key also omitted `display_id`. Since sequences are per display, two displays' first
+windows both carry sequence 0 and **tie**, making their relative order whatever the scan
+happens to do.
+
+### A test whose scenario was symmetric enough to prove nothing
+
+`push_back` **survived** my regression test. The test failed *all three* windows — and when
+every window fails once, push_back rotates the queue exactly back into sorted order, so it
+cannot distinguish push_back from a correct sorted insert. A **partial** outage breaks the
+symmetry (push_back drains `[2,0,1]`), and that is the test that was missing.
+
+This is a distinct failure mode from R20's tautology and worth naming separately: **a scenario
+so uniform that the wrong implementation coincidentally produces the right answer.** The tell is
+a test that does the same thing to every element. Vary one.
+
+### `is_control()` does not mean "cannot forge a line"
+
+`flatten()` mapped control chars to spaces and I called the injection channel closed. **U+2028
+LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are categories Zl/Zp, not Cc**, so they passed
+straight through into the prompt. Worse, Rust's `str::lines()` does not split on them either —
+so my structural assertion stayed green while the bypass was live. The test and the bug shared
+the same blind spot, which is why a *test* passing is never on its own evidence that a
+*property* holds. Now flattened along with the bidi overrides (Cf), and asserted directly.
+
+### Saying plainly when a fix closed nothing
+
+`#[must_use]` on `PendingWindow` was decorative: `next_due` returns an `Option`, which std
+already marks, and the real hazard — a caller that BINDS the window and then early-returns — is
+invisible to the attribute. It is now documented as unenforced rather than counted as a fix.
+Recording a non-fix as a fix is worse than leaving the item open, because it removes it from the
+list without removing the risk.

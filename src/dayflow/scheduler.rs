@@ -25,10 +25,13 @@ use crate::dayflow::window::ClosedWindow;
 
 /// A window waiting to be summarised.
 ///
-/// `#[must_use]`: dropping one taken from [`SummaryScheduler::next_due`] without
-/// calling [`SummaryScheduler::succeeded`] or [`SummaryScheduler::failed`] loses
-/// that slice of the day, which is exactly what "retry, never drop" forbids.
-#[must_use]
+/// Dropping one taken from [`SummaryScheduler::next_due`] without calling
+/// [`SummaryScheduler::succeeded`] or [`SummaryScheduler::failed`] loses that
+/// slice of the day — exactly what "retry, never drop" forbids. NOT enforced:
+/// `next_due` returns an `Option`, which std already marks `#[must_use]`, and
+/// the real hazard is a caller that BINDS the window and then early-returns,
+/// which no attribute can see. Closing it properly needs a drop-guard or an
+/// in-flight slot that `succeeded`/`failed` clear.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingWindow {
     /// The window itself.
@@ -64,8 +67,34 @@ impl SummaryScheduler {
     /// A window with no samples is queued too — it is settled immediately by
     /// [`SummaryScheduler::next_due`] rather than silently dropped, so the count
     /// of what happened to every window stays complete.
+    /// Windows are inserted in TIME order, not arrival order. They do not arrive
+    /// sorted: sequence counters are per display, and a window closes on its END
+    /// while the queue is keyed by its START — so a short pause-truncated window
+    /// on one display can close before a longer window that began earlier on
+    /// another. A blind `push_back` therefore hands windows out in the wrong
+    /// order with no failure involved at all, and [`SummaryScheduler::failed`]'s
+    /// sorted reinsert cannot repair an order `enqueue` never established.
     pub fn enqueue(&mut self, window: ClosedWindow) {
-        self.queue.push_back(PendingWindow { window, attempts: 0, retry_after: None });
+        self.insert_in_time_order(PendingWindow { window, attempts: 0, retry_after: None });
+    }
+
+    /// Insert at the window's position in time. Single seam, so the queue has
+    /// exactly one ordering rule.
+    fn insert_in_time_order(&mut self, pending: PendingWindow) {
+        let key = Self::order_key(&pending);
+        let idx = self
+            .queue
+            .iter()
+            .position(|p| Self::order_key(p) > key)
+            .unwrap_or(self.queue.len());
+        self.queue.insert(idx, pending);
+    }
+
+    /// `display_id` is part of the key: sequences are per display, so two
+    /// displays' first windows both carry sequence 0 and would otherwise tie,
+    /// making their relative order arbitrary.
+    fn order_key(p: &PendingWindow) -> (DateTime<Utc>, u32, u64) {
+        (p.window.start_wall, p.window.display_id, p.window.sequence)
     }
 
     /// How many windows are waiting.
@@ -130,13 +159,7 @@ impl SummaryScheduler {
         self.failures += 1;
         let backoff = Self::backoff_for(pending.attempts);
         pending.retry_after = Some(now + backoff);
-        let key = (pending.window.start_wall, pending.window.sequence);
-        let idx = self
-            .queue
-            .iter()
-            .position(|p| (p.window.start_wall, p.window.sequence) > key)
-            .unwrap_or(self.queue.len());
-        self.queue.insert(idx, pending);
+        self.insert_in_time_order(pending);
     }
 
     /// Exponential backoff, capped so a long outage does not push a retry past
@@ -285,6 +308,78 @@ mod tests {
             s.succeeded(&summary(p.window.sequence as usize));
         }
         assert_eq!(drained, vec![0, 1, 2], "an outage must not reverse the timeline");
+    }
+
+    #[test]
+    fn a_partial_outage_still_drains_in_time_order() {
+        // The all-fail test above cannot tell a sorted reinsert from a plain
+        // push_back: when EVERY window fails once, push_back rotates the queue
+        // exactly back into sorted order. Leaving one window un-failed breaks
+        // that symmetry — push_back drains [2,0,1].
+        let mut s = SummaryScheduler::new();
+        for i in 0..3u64 {
+            let from = (i as i64) * 600;
+            s.enqueue(win(i, from, from + 600, 4));
+        }
+
+        for _ in 0..2 {
+            let p = s.next_due(at(1_800)).expect("windows 0 and 1 are due");
+            s.failed(p, at(1_800));
+        }
+        // window 2 is left pending, never attempted
+
+        let mut drained = Vec::new();
+        while let Some(p) = s.next_due(at(100_000)) {
+            drained.push(p.window.sequence);
+            s.succeeded(&summary(p.window.sequence as usize));
+        }
+        assert_eq!(drained, vec![0, 1, 2], "a retried window must not land behind a fresh one");
+    }
+
+    #[test]
+    fn windows_arriving_out_of_order_are_still_handed_out_in_time_order() {
+        // Windows do NOT arrive sorted, with no failure involved: a window
+        // closes on its END while the queue is keyed by its START, and sequence
+        // counters are per display. A short pause-truncated window on display 0
+        // can therefore close before a longer window that BEGAN earlier on
+        // display 1.
+        let mut s = SummaryScheduler::new();
+        let mut late_start = win(0, 1_000, 1_100, 3);
+        late_start.display_id = 0;
+        let mut early_start = win(0, 900, 1_500, 3);
+        early_start.display_id = 1;
+
+        s.enqueue(late_start); // closes first...
+        s.enqueue(early_start); // ...but began later
+
+        let first = s.next_due(at(2_000)).unwrap();
+        assert_eq!(
+            first.window.start_wall,
+            at(900),
+            "the earlier-starting window must come first however it arrived"
+        );
+    }
+
+    #[test]
+    fn two_displays_first_windows_do_not_tie() {
+        // Sequences are per display, so both displays' first window is sequence
+        // 0. Without display_id in the key they compare equal and their relative
+        // order is whatever the insert scan happens to do.
+        let mut s = SummaryScheduler::new();
+        let mut b = win(0, 600, 1_200, 2);
+        b.display_id = 1;
+        let mut a = win(0, 600, 1_200, 2);
+        a.display_id = 0;
+        s.enqueue(b);
+        s.enqueue(a);
+
+        let one = s.next_due(at(2_000)).unwrap();
+        let two = s.next_due(at(2_000)).unwrap();
+        assert_eq!(
+            (one.window.display_id, two.window.display_id),
+            (0, 1),
+            "identical start times must break ties deterministically by display"
+        );
     }
 
     #[test]
