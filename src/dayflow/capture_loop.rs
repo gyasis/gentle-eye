@@ -36,7 +36,7 @@ use crate::dayflow::sampler::{DropReason, SampleDrop, SampleRecord, SampleReques
 use crate::dayflow::models::{ChunkRef, TimelineEntry};
 use crate::dayflow::scheduler::SummaryScheduler;
 use crate::dayflow::summarizer::ChunkSummarizer;
-use crate::dayflow::source::{Availability, CaptureSource};
+use crate::dayflow::source::{Availability, CaptureSource, SourceIdentity};
 use crate::dayflow::window::ClosedWindow;
 use crate::regions::Region;
 
@@ -138,6 +138,26 @@ impl CaptureLoop {
     pub fn with_max_attempts(mut self, attempts: u32) -> Self {
         self.max_attempts = attempts;
         self
+    }
+
+    /// Every source's identity, ordinal and CURRENT availability.
+    ///
+    /// A retired source is still described — a session that lost its window
+    /// must be able to say so, and dropping it from the list would make a dead
+    /// source indistinguishable from one that was never configured.
+    pub fn describe(&self) -> Vec<(SourceIdentity, u32, Availability)> {
+        self.sources
+            .iter()
+            .map(|s| {
+                let ordinal = s.ordinal();
+                let a = if self.retired.contains(&ordinal) {
+                    Availability::Ended
+                } else {
+                    s.availability()
+                };
+                (s.identity(), ordinal, a)
+            })
+            .collect()
     }
 
     /// The source ordinals still being asked.

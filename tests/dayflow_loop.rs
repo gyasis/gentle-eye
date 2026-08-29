@@ -1038,3 +1038,437 @@ fn a_new_session_does_not_inherit_the_old_sessions_whole_frame_count() {
          one session's whole-frame reads to another"
     );
 }
+
+// ── T012/T013: watch one specific thing ──────────────────────────────────────
+
+use gentle_eye::dayflow::source::window::{WindowLocator, WindowSource, WindowState};
+use gentle_eye::dayflow::source::NamedTargetSource;
+use gentle_eye::target::model::{NormRect, Target, TargetSource};
+use std::sync::Mutex as StdMutex;
+
+/// A locator the test drives: it answers whatever state the test set.
+struct ScriptedLocator {
+    state: Arc<StdMutex<WindowState>>,
+}
+
+impl WindowLocator for ScriptedLocator {
+    fn locate(&self, _label: &str) -> WindowState {
+        self.state.lock().unwrap().clone()
+    }
+}
+
+/// A source that yields caller-supplied frames verbatim, so a test can control
+/// exactly which PIXELS change between ticks.
+struct ScriptedFrames {
+    frames: Vec<SourceFrame>,
+    cursor: usize,
+    ordinal: u32,
+}
+
+impl CaptureSource for ScriptedFrames {
+    fn next_frame(&mut self) -> Result<SourceFrame, SourceError> {
+        let f = self
+            .frames
+            .get(self.cursor)
+            .cloned()
+            .ok_or_else(|| SourceError::new("script exhausted"))?;
+        self.cursor += 1;
+        Ok(f)
+    }
+    fn regions_for(&self, _f: &SourceFrame) -> Option<Vec<Region>> {
+        Some(Vec::new())
+    }
+    fn availability(&self) -> Availability {
+        if self.cursor < self.frames.len() { Availability::Available } else { Availability::Ended }
+    }
+    fn identity(&self) -> SourceIdentity {
+        SourceIdentity::new("scripted", self.ordinal.to_string())
+    }
+    fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+}
+
+/// A 64x64 frame: textured everywhere, with the top-left 32x32 quadrant filled
+/// from `inside` and the rest from `outside`.
+fn quadrant_frame(inside: u8, outside: u8) -> SourceFrame {
+    const W: usize = 64;
+    const H: usize = 64;
+    let mut bgra = vec![0u8; W * H * 4];
+    for (i, px) in bgra.chunks_mut(4).enumerate() {
+        let (x, y) = ((i % W) as u8, (i / W) as u8);
+        let seed = if (x as usize) < 32 && (y as usize) < 32 { inside } else { outside };
+        px[0] = x.wrapping_mul(7).wrapping_add(seed);
+        px[1] = y.wrapping_mul(11).wrapping_add(seed);
+        px[2] = (x ^ y).wrapping_mul(3).wrapping_add(seed);
+        px[3] = 255;
+    }
+    SourceFrame { bgra, width: W as u32, height: H as u32 }
+}
+
+/// A window session records ONLY that window. A change elsewhere on the desktop
+/// produces no sample — asserted on what reached disk, not on intent.
+#[test]
+fn a_change_outside_the_window_produces_no_sample() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+
+    // Frame 1 establishes the baseline. Frames 2 and 3 change ONLY the outside.
+    let frames = vec![
+        quadrant_frame(10, 10),
+        quadrant_frame(10, 200),
+        quadrant_frame(10, 90),
+    ];
+    let inner = Box::new(ScriptedFrames { frames, cursor: 0, ordinal: 0 });
+    let state = Arc::new(StdMutex::new(WindowState::Visible(PixelRect {
+        x: 0,
+        y: 0,
+        w: 32,
+        h: 32,
+    })));
+    let win = WindowSource::new(
+        inner,
+        Box::new(ScriptedLocator { state: Arc::clone(&state) }),
+        "terminal",
+        0,
+    );
+    let mut lp = CaptureLoop::new(vec![Box::new(win)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let mut kept = Vec::new();
+    for k in 1..=3 {
+        let t = lp.tick(&mut run, at(k * 30));
+        for s in &t.sources {
+            if let Some(p) = s.record.as_ref().and_then(|r| r.path.clone()) {
+                kept.push(p);
+            }
+        }
+    }
+
+    assert_eq!(
+        kept.len(),
+        1,
+        "the desktop changed twice outside the window and produced {} samples — \
+         the session is recording more than the window it was pointed at",
+        kept.len()
+    );
+
+    // And the reason is the CONTENT, not luck: the crop really is 32x32.
+    let img = image::open(&kept[0]).expect("the kept sample is a readable image");
+    assert_eq!((img.width(), img.height()), (32, 32), "the sample is not the window's crop");
+}
+
+/// The converse: a change INSIDE the window is recorded. Without this, the test
+/// above passes for a source that records nothing at all.
+#[test]
+fn a_change_inside_the_window_is_recorded() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let frames = vec![
+        quadrant_frame(10, 10),
+        quadrant_frame(200, 10),
+        quadrant_frame(90, 10),
+    ];
+    let inner = Box::new(ScriptedFrames { frames, cursor: 0, ordinal: 0 });
+    let state = Arc::new(StdMutex::new(WindowState::Visible(PixelRect { x: 0, y: 0, w: 32, h: 32 })));
+    let win = WindowSource::new(
+        inner,
+        Box::new(ScriptedLocator { state }),
+        "terminal",
+        0,
+    );
+    let mut lp = CaptureLoop::new(vec![Box::new(win)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let mut kept = 0;
+    for k in 1..=3 {
+        for s in &lp.tick(&mut run, at(k * 30)).sources {
+            if s.record.as_ref().and_then(|r| r.path.as_ref()).is_some() {
+                kept += 1;
+            }
+        }
+    }
+    assert_eq!(kept, 3, "changes inside the window must be recorded, got {kept}");
+}
+
+/// A named target drives a session, and its identity is the target's NAME —
+/// editing the rectangle must not split the day's record in two.
+#[test]
+fn a_named_target_drives_a_session_and_keeps_its_identity() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let frames = vec![
+        quadrant_frame(10, 10),
+        quadrant_frame(200, 10),
+    ];
+    let inner = Box::new(ScriptedFrames { frames, cursor: 0, ordinal: 0 });
+    // Top-left quarter, normalised.
+    let target = Target::new(
+        "qa-panel",
+        TargetSource::Display { index: 0 },
+        NormRect::new(0.0, 0.0, 0.5, 0.5),
+    );
+    let src = NamedTargetSource::new(inner, &target, 0);
+    let before = src.identity();
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let mut kept = Vec::new();
+    for k in 1..=2 {
+        for s in &lp.tick(&mut run, at(k * 30)).sources {
+            if let Some(p) = s.record.as_ref().and_then(|r| r.path.clone()) {
+                kept.push(p);
+            }
+        }
+    }
+    assert!(!kept.is_empty(), "the target produced no samples");
+    let img = image::open(&kept[0]).expect("readable");
+    assert_eq!((img.width(), img.height()), (32, 32), "the target crop is not half the frame");
+
+    // The same target with a MOVED rectangle is the same source.
+    let moved = Target::new(
+        "qa-panel",
+        TargetSource::Display { index: 0 },
+        NormRect::new(0.25, 0.25, 0.5, 0.5),
+    );
+    let after = NamedTargetSource::new(
+        Box::new(ScriptedFrames { frames: vec![quadrant_frame(1, 1)], cursor: 0, ordinal: 0 }),
+        &moved,
+        0,
+    )
+    .identity();
+    assert_eq!(before.hash(), after.hash(), "moving a target must not start a new identity");
+}
+
+// ── T014: three failure modes, three different outcomes ──────────────────────
+
+/// Minimised, a transient inner failure, and quit must NOT collapse into one
+/// another. Collapsing them makes a minimised window read as a fault, or a dead
+/// source read as quiet-on-purpose (FR-113).
+///
+/// SCOPE NOTE: the DONE line said "three DIFFERENT gap causes". Per D014-9 a
+/// per-source failure is a DROP, not a gap — a gap claims capture stopped,
+/// which is false while other sources produce. So this asserts three different
+/// OUTCOMES (availability, retry, and what is recorded), which is the same
+/// distinction the DONE line was reaching for and is actually implementable.
+#[test]
+fn minimised_transient_and_quit_are_three_different_outcomes() {
+    use gentle_eye::dayflow::window::PauseCause;
+
+    let dir = tempfile::tempdir().unwrap();
+    let rect = gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 32, h: 32 };
+
+    // ── minimised: occluded, retried, no gap-ending ──
+    let (mut run, _c) = run_for(vec![0]);
+    let state = Arc::new(StdMutex::new(WindowState::Minimised));
+    let win = WindowSource::new(
+        Box::new(ScriptedFrames { frames: vec![quadrant_frame(5, 5)], cursor: 0, ordinal: 0 }),
+        Box::new(ScriptedLocator { state: Arc::clone(&state) }),
+        "term",
+        0,
+    );
+    let mut lp = CaptureLoop::new(vec![Box::new(win)], Sampler::new(DeltaConfig::default()), dir.path());
+    let t = lp.tick(&mut run, at(30));
+    let minimised = t.sources[0].failure.expect("minimised must fail the frame");
+    assert_eq!(minimised, Availability::Occluded);
+    assert!(t.retired.is_empty(), "a minimised window must NOT be retired — it will come back");
+    assert_eq!(minimised.gap_cause(), Some(PauseCause::SourceOccluded));
+    assert!(minimised.retryable());
+
+    // It is still asked on the next tick, and RECOVERS when restored.
+    *state.lock().unwrap() = WindowState::Visible(rect);
+    let t2 = lp.tick(&mut run, at(60));
+    assert!(t2.sources[0].failure.is_none(), "a restored window must produce again");
+
+    // ── quit: ended, retired, never asked again ──
+    let (mut run2, _c) = run_for(vec![0]);
+    let gone = Arc::new(StdMutex::new(WindowState::Gone));
+    let win2 = WindowSource::new(
+        Box::new(ScriptedFrames { frames: vec![quadrant_frame(5, 5)], cursor: 0, ordinal: 0 }),
+        Box::new(ScriptedLocator { state: gone }),
+        "term",
+        0,
+    );
+    let mut lp2 = CaptureLoop::new(vec![Box::new(win2)], Sampler::new(DeltaConfig::default()), dir.path());
+    let q = lp2.tick(&mut run2, at(30));
+    let quit = q.sources[0].failure.expect("a quit window must fail the frame");
+    assert_eq!(quit, Availability::Ended);
+    assert_eq!(q.retired, vec![0], "a quit window must be retired");
+    assert_eq!(quit.gap_cause(), Some(PauseCause::SourceEnded));
+    assert!(!quit.retryable());
+
+    // ── transient inner failure: the window is fine, the capture hiccuped ──
+    let (mut run3, _c) = run_for(vec![0]);
+    let visible = Arc::new(StdMutex::new(WindowState::Visible(rect)));
+    let win3 = WindowSource::new(
+        // An exhausted script fails the frame while the window is still there.
+        Box::new(ScriptedFrames { frames: Vec::new(), cursor: 0, ordinal: 0 }),
+        Box::new(ScriptedLocator { state: visible }),
+        "term",
+        0,
+    );
+    let mut lp3 = CaptureLoop::new(vec![Box::new(win3)], Sampler::new(DeltaConfig::default()), dir.path());
+    let tr = lp3.tick(&mut run3, at(30));
+    let transient = tr.sources[0].failure.expect("a failed inner capture must fail the frame");
+    assert_eq!(
+        transient,
+        Availability::Occluded,
+        "an inner capture failure must not retire a window that is still on screen"
+    );
+    assert!(tr.retired.is_empty());
+
+    // The three are genuinely distinguishable, not three names for one thing.
+    assert_ne!(minimised.gap_cause(), quit.gap_cause());
+    assert_ne!(minimised.retryable(), quit.retryable());
+    // And a per-source failure is recorded as a DROP, never as a session gap.
+    assert_eq!(lp3.drops().len(), 1);
+    assert_eq!(lp3.drops()[0].reason, DropReason::SourceUnavailable);
+}
+
+// ── T015: status says WHAT the record is a record of ─────────────────────────
+
+/// `status` names the session's source and its live availability, on every
+/// surface. Without it a timeline cannot say whether it recorded the whole
+/// desktop, one window, or a stream — and `displays` cannot answer, because
+/// under D014-2 the ordinal occupies that field for every source kind.
+#[test]
+fn status_names_the_source_and_tracks_its_availability() {
+    use gentle_eye::dayflow::http;
+    use gentle_eye::dayflow::service::DayflowService;
+    use gentle_eye::dayflow::timeline::SqliteTimelineStore;
+
+    let store = Arc::new(SqliteTimelineStore::new(Arc::new(std::sync::Mutex::new(
+        gentle_eye::storage::database::init_in_memory().expect("db"),
+    ))));
+    let svc = DayflowService::new(store, DayflowConfig::default());
+    svc.start(DayflowMode::Session, vec![0], Utc::now()).expect("starts");
+    assert!(svc.status(Utc::now()).unwrap().sources.is_empty(), "nothing captured yet");
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(StdMutex::new(WindowState::Visible(
+        gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 32, h: 32 },
+    )));
+    let shared = Arc::clone(&state);
+    svc.start_capture(
+        Box::new(move || {
+            let frames: Vec<SourceFrame> =
+                (0..400).map(|i| quadrant_frame((i as u8).wrapping_mul(90), 7)).collect();
+            vec![Box::new(WindowSource::new(
+                Box::new(ScriptedFrames { frames, cursor: 0, ordinal: 0 }),
+                Box::new(ScriptedLocator { state: shared }),
+                "my-terminal",
+                0,
+            )) as Box<dyn CaptureSource>]
+        }),
+        Arc::new(FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 }),
+        dir.path().to_path_buf(),
+        std::time::Duration::from_millis(5),
+    )
+    .expect("capture starts");
+
+    // Wait until the thread has published what it is capturing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && svc.status(Utc::now()).unwrap().sources.is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let named = svc.status(Utc::now()).unwrap();
+    assert_eq!(named.sources.len(), 1, "status did not name the source");
+    assert_eq!(named.sources[0].kind, "window", "status says the wrong KIND of record");
+    assert_eq!(named.sources[0].name, "my-terminal", "status does not say WHICH window");
+    assert_eq!(named.sources[0].availability, Availability::Available);
+
+    // Minimise it: availability must FOLLOW, not stay frozen at start.
+    *state.lock().unwrap() = WindowState::Minimised;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut seen = Availability::Available;
+    while std::time::Instant::now() < deadline {
+        seen = svc.status(Utc::now()).unwrap().sources[0].availability;
+        if seen != Availability::Available {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    svc.stop_capture().expect("stops");
+    assert_eq!(
+        seen,
+        Availability::Occluded,
+        "status still reports the window Available after it was minimised — \
+         availability is published once at start, not tracked"
+    );
+
+    // On every surface: HTTP and the serialised struct the MCP/CLI emit.
+    let (code, body) = http::route("GET", "/dayflow/status", "", &svc);
+    assert_eq!(code, "200 OK");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["sources"][0]["kind"], "window", "HTTP omitted the source: {body}");
+    assert_eq!(v["sources"][0]["name"], "my-terminal");
+    let mcp = serde_json::to_value(svc.status(Utc::now()).unwrap()).unwrap();
+    assert_eq!(mcp["sources"][0]["name"], "my-terminal");
+}
+
+/// Regions come back in WINDOW-LOCAL coordinates. The frame handed downstream
+/// is the crop, so a region left in screen coordinates addresses the wrong
+/// pixels of it — and the crop still succeeds, so the wrong text is extracted
+/// with nothing erroring anywhere.
+#[test]
+fn window_regions_are_translated_into_the_crops_coordinates() {
+    /// An inner source reporting one region at a known SCREEN position.
+    struct WithRegion;
+    impl CaptureSource for WithRegion {
+        fn next_frame(&mut self) -> Result<SourceFrame, SourceError> {
+            Ok(quadrant_frame(3, 9))
+        }
+        fn regions_for(&self, _f: &SourceFrame) -> Option<Vec<Region>> {
+            Some(vec![
+                // Inside the window (window is 16,16 .. 48,48).
+                Region::new(
+                    gentle_eye::target::model::PixelRect { x: 20, y: 24, w: 8, h: 8 },
+                    RegionSource::Wm,
+                    Granularity::Pane,
+                    1.0,
+                ),
+                // Outside via the LOWER bound (before the window's origin).
+                Region::new(
+                    gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 4, h: 4 },
+                    RegionSource::Wm,
+                    Granularity::Pane,
+                    1.0,
+                ),
+                // Outside via the UPPER bound: starts inside but OVERFLOWS the
+                // window's far edge (window is 16,16..48,48; this ends at 52).
+                // Without this the lower-bound check alone satisfies the test
+                // and a widened upper bound survives — which it did.
+                Region::new(
+                    gentle_eye::target::model::PixelRect { x: 44, y: 44, w: 8, h: 8 },
+                    RegionSource::Wm,
+                    Granularity::Pane,
+                    1.0,
+                ),
+            ])
+        }
+        fn availability(&self) -> Availability { Availability::Available }
+        fn identity(&self) -> SourceIdentity { SourceIdentity::new("inner", "x") }
+        fn ordinal(&self) -> u32 { 0 }
+    }
+
+    let rect = gentle_eye::target::model::PixelRect { x: 16, y: 16, w: 32, h: 32 };
+    let win = WindowSource::new(
+        Box::new(WithRegion),
+        Box::new(ScriptedLocator { state: Arc::new(StdMutex::new(WindowState::Visible(rect))) }),
+        "term",
+        0,
+    );
+    let frame = quadrant_frame(3, 9);
+    let regions = win.regions_for(&frame).expect("the inner source has a cascade");
+
+    assert_eq!(
+        regions.len(),
+        1,
+        "a region outside the window must be dropped — both the one before its \
+         origin AND the one overflowing its far edge"
+    );
+    assert_eq!(
+        (regions[0].bbox.x, regions[0].bbox.y),
+        (4, 8),
+        "the region is still in SCREEN coordinates — cropping it out of the \
+         window's frame would read the wrong pixels, silently"
+    );
+    assert_eq!((regions[0].bbox.w, regions[0].bbox.h), (8, 8), "the size must not change");
+}

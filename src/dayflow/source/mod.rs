@@ -14,8 +14,12 @@
 //! kind would edit the driver by construction.
 
 pub mod display;
+pub mod target;
+pub mod window;
 
 pub use display::DisplaySource;
+pub use target::NamedTargetSource;
+pub use window::{WindowLocator, WindowSource, WindowState};
 
 use crate::dayflow::sampler::RawFrame;
 use crate::dayflow::window::PauseCause;

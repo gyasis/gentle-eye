@@ -36,6 +36,15 @@ pub struct DayflowStatus {
     pub started_at: Option<DateTime<Utc>>,
     /// Displays being captured.
     pub displays: Vec<u32>,
+    /// What this session is a record OF: each source's kind, name and current
+    /// availability.
+    ///
+    /// A timeline is worthless if you cannot tell whether it recorded the whole
+    /// desktop, one window, or a stream. `displays` alone cannot say: under
+    /// D014-2 the ordinal occupies that field for EVERY source kind, so a
+    /// window session and a display session are indistinguishable there.
+    #[serde(default)]
+    pub sources: Vec<SourceStatus>,
     /// Samples that will be read as WHOLE FRAMES because no usable region
     /// sidecar reached disk beside them.
     ///
@@ -62,6 +71,7 @@ impl DayflowStatus {
             session_id: None,
             started_at: None,
             displays: Vec::new(),
+            sources: Vec::new(),
             samples_read_whole: 0,
             liveness: None,
         }
@@ -130,6 +140,23 @@ pub struct DayflowService {
     capture: Mutex<Option<CaptureHandle>>,
     /// Whole-frame reads, shared with the capture loop on its own thread.
     read_whole: Arc<std::sync::atomic::AtomicU64>,
+    /// What the running session is capturing, republished by the capture thread
+    /// each tick so availability is live rather than whatever it was at start.
+    sources: Arc<Mutex<Vec<SourceStatus>>>,
+}
+
+/// One source in a running session, as a surface reports it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SourceStatus {
+    /// Which kind — `display`, `window`, `target`, `input`.
+    pub kind: String,
+    /// The kind's own name for it: a display index, a window label, a target
+    /// name, a stream URL.
+    pub name: String,
+    /// Its position in the session's source list (the `display_id` field).
+    pub ordinal: u32,
+    /// Whether it is producing right now.
+    pub availability: crate::dayflow::source::Availability,
 }
 
 /// A capture thread and its stop signal.
@@ -156,6 +183,7 @@ impl DayflowService {
             config,
             capture: Mutex::new(None),
             read_whole: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sources: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -182,6 +210,10 @@ impl DayflowService {
         // this reset, session B's status reports session A's whole-frame reads
         // as its own, and an operator debugs a degradation that is not there.
         self.read_whole.store(0, std::sync::atomic::Ordering::SeqCst);
+        // Same reason the counter resets: every other status field is
+        // session-scoped, and a stale source list would name the PREVIOUS
+        // session's window as this one's subject.
+        self.sources.lock().unwrap_or_else(|p| p.into_inner()).clear();
         *guard = Some(run);
         Ok(id)
     }
@@ -238,6 +270,7 @@ impl DayflowService {
         let delta = self.config.delta.clone();
         let run = Arc::clone(&self.run);
         let read_whole = Arc::clone(&self.read_whole);
+        let sources_pub = Arc::clone(&self.sources);
         let store = Arc::clone(&self.store);
         let join = std::thread::spawn(move || {
             let sources = build_sources();
@@ -292,6 +325,24 @@ impl DayflowService {
                                     lp.tick(active, now);
                                 }),
                             );
+                            // Republish what we are capturing, WITH live
+                            // availability. Published every tick rather than at
+                            // start: a window that minimised at 10am must not
+                            // still read Available at 4pm.
+                            {
+                                let mut published =
+                                    sources_pub.lock().unwrap_or_else(|p| p.into_inner());
+                                *published = lp
+                                    .describe()
+                                    .into_iter()
+                                    .map(|(id, ordinal, availability)| SourceStatus {
+                                        kind: id.kind.to_string(),
+                                        name: id.key,
+                                        ordinal,
+                                        availability,
+                                    })
+                                    .collect();
+                            }
                             if tick.is_err() {
                                 // Deliberate halt, not a retry: whatever made
                                 // this tick panic will make the next one panic.
@@ -397,6 +448,11 @@ impl DayflowService {
                 session_id: Some(run.session_id()),
                 started_at: Some(run.started_at()),
                 displays: run.displays().to_vec(),
+                sources: self
+                    .sources
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
                 samples_read_whole: self.read_whole.load(std::sync::atomic::Ordering::SeqCst),
                 liveness: Some(run.liveness(now)),
             },
