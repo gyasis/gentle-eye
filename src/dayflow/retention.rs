@@ -23,9 +23,14 @@ use crate::dayflow::errors::DayflowError;
 /// How long each tier keeps its artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetentionConfig {
-    /// Raw samples are kept this long before they may be shrunk.
+    /// How long raw samples are kept before AGE alone will shrink them.
+    ///
+    /// Not a floor: budget pressure shrinks a summarised window of any age.
+    /// Stating it as a guarantee would be a promise the eviction path does not
+    /// keep — the only real floor is `summarized`.
     pub hot: Duration,
-    /// The shrunk artifact is kept this long before it may be dropped.
+    /// How long the shrunk artifact is kept before age alone will drop it.
+    /// Same caveat as [`RetentionConfig::hot`].
     pub warm: Duration,
     /// Total bytes the raw + warm artifacts may occupy.
     pub budget_bytes: u64,
@@ -79,14 +84,41 @@ pub struct SegmentRecord {
 }
 
 impl SegmentRecord {
+    /// The durable identity: display and sequence, never the filename.
+    pub fn key(&self) -> (u32, u64) {
+        (self.display_id, self.sequence)
+    }
+
+    /// Bytes a shrink would actually free.
+    ///
+    /// NET of the timelapse it writes to the same disk. Crediting the full
+    /// `raw_bytes` lets the plan declare the budget met while real usage lands
+    /// up to the SC-008 ceiling over it — self-correcting only on the next run,
+    /// and then by dropping warm artifacts that should never have been needed.
+    pub fn freed_by_shrink(&self) -> u64 {
+        self.raw_bytes.saturating_sub((self.raw_bytes as f64 * WARM_BUDGET_RATIO) as u64)
+    }
+
     /// The tier this window is in right now.
     ///
-    /// Read from what is ON DISK, not from age: a window whose raw samples are
-    /// gone is warm however recent it is, and one that was never shrunk is hot
-    /// however old. Deriving the tier from age instead would report a state the
-    /// filesystem does not have.
+    /// Derived from the RECORD of what is on disk, not from age: a window whose
+    /// raw samples are gone is warm however recent it is, and one never shrunk
+    /// is hot however old. Deriving it from age would report a state the
+    /// filesystem does not have — which retention then acts on by deleting.
+    ///
+    /// "Record of", not the disk itself: this reads the struct's own fields, so
+    /// it is only as true as whoever maintains them. That is why [`shrink`]
+    /// takes `&mut self` and updates the record itself rather than trusting a
+    /// caller to remember — a stale record schedules a shrink whose encode
+    /// reads files that are already gone.
     pub fn tier(&self) -> Tier {
         if !self.raw.is_empty() {
+            // Raw AND a warm artifact means a crash between writing the
+            // timelapse and clearing the samples. Hot is the safe reading — the
+            // raw frames are still the better record — and [`shrink`] deletes
+            // the stale timelapse before writing its replacement, so the
+            // half-finished one cannot be orphaned on disk forever with no
+            // record pointing at it.
             Tier::Hot
         } else if self.warm_artifact.is_some() {
             Tier::Warm
@@ -129,16 +161,30 @@ pub enum Refusal {
     TooRecent,
     /// There is nothing in that tier to reclaim.
     NothingToReclaim,
+    /// Reclaiming it was not necessary — the budget was already satisfied.
+    WithinBudget,
 }
 
 /// One reclaim decision, with the reason it was made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
-    /// The window.
+    /// Which display the window came from.
+    ///
+    /// Part of the key, not decoration: sequences are per display (the daemon
+    /// keeps a counter each), so display 0 and display 1 both emit 0, 1, 2 …
+    /// Keying decisions on `sequence` alone silently collapsed the two on every
+    /// multi-monitor machine — one window per colliding sequence was never
+    /// actioned, its bytes were credited to the budget anyway, and the ledger
+    /// reported it as merely too recent.
+    pub display_id: u32,
+    /// The window, within that display.
     pub sequence: u64,
     /// What retention decided.
     pub action: Action,
 }
+
+/// The durable identity of a window, as retention keys it.
+type WindowKey = (u32, u64);
 
 /// What retention decided to do with a window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,14 +225,15 @@ pub fn plan(
     order.sort_by_key(|s| (s.closed_at, s.sequence));
 
     // Pass 1 — age. What has simply timed out of its tier.
-    let mut planned: std::collections::HashMap<u64, Action> = std::collections::HashMap::new();
+    let mut planned: std::collections::HashMap<WindowKey, Action> =
+        std::collections::HashMap::new();
     for s in &order {
         if s.may_shrink(now, cfg) {
-            freed += s.raw_bytes;
-            planned.insert(s.sequence, Action::Shrink);
+            freed += s.freed_by_shrink();
+            planned.insert(s.key(), Action::Shrink);
         } else if s.may_drop_warm(now, cfg) {
             freed += s.warm_bytes;
-            planned.insert(s.sequence, Action::DropWarm);
+            planned.insert(s.key(), Action::DropWarm);
         }
     }
 
@@ -202,7 +249,7 @@ pub fn plan(
             if total.saturating_sub(freed) <= cfg.budget_bytes {
                 break;
             }
-            if planned.contains_key(&s.sequence) || s.tier() != tier {
+            if planned.contains_key(&s.key()) || s.tier() != tier {
                 continue;
             }
             // The gate. An unsummarised window's raw samples are the ONLY
@@ -214,12 +261,12 @@ pub fn plan(
             }
             match tier {
                 Tier::Hot => {
-                    freed += s.raw_bytes;
-                    planned.insert(s.sequence, Action::Shrink);
+                    freed += s.freed_by_shrink();
+                    planned.insert(s.key(), Action::Shrink);
                 }
                 Tier::Warm => {
                     freed += s.warm_bytes;
-                    planned.insert(s.sequence, Action::DropWarm);
+                    planned.insert(s.key(), Action::DropWarm);
                 }
                 Tier::Cold => {}
             }
@@ -227,16 +274,21 @@ pub fn plan(
     }
 
     for s in segments {
-        let action = planned.remove(&s.sequence).unwrap_or_else(|| {
+        let action = planned.remove(&s.key()).unwrap_or_else(|| {
             Action::Keep(if !s.summarized {
                 Refusal::NotSummarized
             } else if s.tier() == Tier::Cold {
                 Refusal::NothingToReclaim
+            } else if total.saturating_sub(freed) <= cfg.budget_bytes {
+                // Not "too recent" — it simply was not needed. Reporting the
+                // wrong reason is the same class of lie the return-everything
+                // design exists to prevent.
+                Refusal::WithinBudget
             } else {
                 Refusal::TooRecent
             })
         });
-        decisions.push(Decision { sequence: s.sequence, action });
+        decisions.push(Decision { display_id: s.display_id, sequence: s.sequence, action });
     }
     decisions
 }
@@ -292,7 +344,7 @@ pub const WARM_BUDGET_RATIO: f64 = 0.10;
 /// Refuses a window that was not summarised, whatever its age: shrinking
 /// discards the frames the summary is made from.
 pub fn shrink<F>(
-    segment: &SegmentRecord,
+    segment: &mut SegmentRecord,
     extracted_text: &str,
     validator: &crate::security::path_validator::PathValidator,
     mut encode: F,
@@ -322,6 +374,9 @@ where
     // to save nothing.
     let ceiling = (segment.raw_bytes as f64 * WARM_BUDGET_RATIO) as u64;
     if bytes > ceiling {
+        // The encode already wrote it. Leaving it behind accumulates
+        // over-ceiling files inside the module whose job is freeing space.
+        let _ = reclaim_file(&timelapse, validator);
         return Err(DayflowError::Retention(format!(
             "timelapse for window {} is {bytes} bytes, over the {ceiling} ceiling \
              ({:.0}% of {} raw) — refusing to delete the raw samples for it",
@@ -335,6 +390,22 @@ where
     for p in &segment.raw {
         reclaim_file(p, validator)?;
     }
+
+    // A leftover timelapse from a crashed earlier attempt would otherwise be
+    // orphaned: nothing would point at it, so retention could never delete it.
+    if let Some(stale) = segment.warm_artifact.take() {
+        if stale != timelapse {
+            reclaim_file(&stale, validator)?;
+        }
+    }
+
+    // The record is updated HERE rather than by the caller. A caller that
+    // forgot would leave a record whose tier lies about the disk, and the next
+    // plan would schedule a shrink whose encode reads files already deleted.
+    segment.raw.clear();
+    segment.raw_bytes = 0;
+    segment.warm_artifact = Some(timelapse.clone());
+    segment.warm_bytes = bytes;
 
     Ok(WarmArtifact { timelapse, text: extracted_text.to_string(), bytes })
 }
@@ -375,7 +446,14 @@ mod tests {
     }
 
     fn action_for(d: &[Decision], sequence: u64) -> &Action {
-        &d.iter().find(|x| x.sequence == sequence).expect("a decision per segment").action
+        on_display(d, 0, sequence)
+    }
+
+    fn on_display(d: &[Decision], display_id: u32, sequence: u64) -> &Action {
+        &d.iter()
+            .find(|x| x.display_id == display_id && x.sequence == sequence)
+            .expect("a decision per segment")
+            .action
     }
 
     #[test]
@@ -408,7 +486,11 @@ mod tests {
     fn a_summarised_window_shrinks_once_it_is_old_enough() {
         let segments = vec![seg(1, 0, true)];
         // Not yet: hot is 3600s.
-        assert_eq!(*action_for(&plan(&segments, at(100), &cfg(u64::MAX)), 1), Action::Keep(Refusal::TooRecent));
+        assert_eq!(
+            *action_for(&plan(&segments, at(100), &cfg(u64::MAX)), 1),
+            Action::Keep(Refusal::WithinBudget),
+            "not old enough AND not needed — the budget reason is the true one"
+        );
         // Now.
         assert_eq!(*action_for(&plan(&segments, at(4_000), &cfg(u64::MAX)), 1), Action::Shrink);
     }
@@ -425,10 +507,10 @@ mod tests {
         // Budget forces exactly one raw shrink: total 210MB, budget 150MB.
         let d = plan(&segments, at(500), &cfg(150 * 1024 * 1024));
         assert_eq!(*action_for(&d, 2), Action::Shrink, "the OLDER raw goes first");
-        assert_eq!(*action_for(&d, 3), Action::Keep(Refusal::TooRecent), "the newer stays");
+        assert_eq!(*action_for(&d, 3), Action::Keep(Refusal::WithinBudget), "the newer stays");
         assert_eq!(
             *action_for(&d, 1),
-            Action::Keep(Refusal::TooRecent),
+            Action::Keep(Refusal::WithinBudget),
             "the warm artifact is not touched while raw remains reclaimable"
         );
     }
@@ -454,8 +536,8 @@ mod tests {
         let d = plan(&segments, at(50), &cfg(u64::MAX));
         assert_eq!(d.len(), segments.len());
         assert_eq!(*action_for(&d, 1), Action::Keep(Refusal::NotSummarized));
-        assert_eq!(*action_for(&d, 2), Action::Keep(Refusal::TooRecent));
-        assert_eq!(*action_for(&d, 3), Action::Keep(Refusal::TooRecent));
+        assert_eq!(*action_for(&d, 2), Action::Keep(Refusal::WithinBudget));
+        assert_eq!(*action_for(&d, 3), Action::Keep(Refusal::WithinBudget));
     }
 
     #[test]
@@ -511,15 +593,160 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn two_displays_sharing_a_sequence_are_two_different_windows() {
+        // Sequences are PER DISPLAY — the daemon keeps a counter each — so
+        // display 0 and display 1 both emit 0, 1, 2… Keying decisions on
+        // `sequence` alone collapsed them: one window per colliding sequence
+        // was never actioned, its bytes were credited to the budget anyway,
+        // and the ledger reported it as merely too recent.
+        let a = SegmentRecord { display_id: 0, ..seg(7, 0, true) };
+        let b = SegmentRecord { display_id: 1, ..seg(7, 0, true) };
+
+        let d = plan(&[a, b], at(10_000), &cfg(u64::MAX));
+        assert_eq!(d.len(), 2, "two windows, two decisions");
+        assert_eq!(*on_display(&d, 0, 7), Action::Shrink, "display 0's window is handled");
+        assert_eq!(*on_display(&d, 1, 7), Action::Shrink, "and so is display 1's");
+    }
+
+    #[test]
+    fn a_warm_artifact_expires_by_age_alone_with_the_budget_untouched() {
+        // The "fortnight of timelapses" policy. Every other warm-drop assertion
+        // goes through the BUDGET path, so deleting this branch entirely left
+        // the whole `cfg.warm` policy with zero verification — and the mutation
+        // survived the suite.
+        let segments = vec![warm(1, 0, true)];
+        let big_budget = cfg(u64::MAX);
+
+        assert_eq!(
+            *action_for(&plan(&segments, at(1_000), &big_budget), 1),
+            Action::Keep(Refusal::WithinBudget),
+            "before its warm window elapses"
+        );
+        assert_eq!(
+            *action_for(&plan(&segments, at(8_000), &big_budget), 1),
+            Action::DropWarm,
+            "after it, with no budget pressure at all"
+        );
+    }
+
+    #[test]
+    fn age_reclaim_counts_toward_the_budget_so_nothing_extra_is_taken() {
+        // The two passes share `freed`. Without that, pass 2 believes nothing
+        // has been reclaimed and takes a second, younger window it did not need
+        // — over-evicting silently. Every earlier test used a budget of
+        // u64::MAX or 1, so this interaction was never exercised.
+        let old_enough = seg(1, 0, true);      // 100MB, age-expired
+        let young = seg(2, 9_500, true);       // 100MB, far too recent
+        let segments = vec![old_enough, young];
+
+        // Total 200MB. Shrinking window 1 frees 90MB (net of its timelapse),
+        // which brings us under a 150MB budget.
+        let d = plan(&segments, at(10_000), &cfg(150 * 1024 * 1024));
+        assert_eq!(*action_for(&d, 1), Action::Shrink, "the age-expired one goes");
+        assert_eq!(
+            *action_for(&d, 2),
+            Action::Keep(Refusal::WithinBudget),
+            "and the young one is NOT taken as well"
+        );
+    }
+
+    #[test]
+    fn a_shrink_is_credited_net_of_the_timelapse_it_writes() {
+        // Crediting the full raw_bytes lets the plan declare the budget met
+        // while real usage lands up to the SC-008 ceiling over it — correcting
+        // itself only next run, and then by dropping warm artifacts that should
+        // never have been needed.
+        let s = seg(1, 0, true);
+        assert!(s.freed_by_shrink() < s.raw_bytes, "the timelapse stays on the same disk");
+        assert_eq!(
+            s.freed_by_shrink(),
+            s.raw_bytes - (s.raw_bytes as f64 * WARM_BUDGET_RATIO) as u64
+        );
+    }
+
+    #[test]
+    fn a_window_holding_both_raw_and_warm_bytes_is_accounted_for_correctly() {
+        // Every fixture had one tier or the other, so any raw/warm confusion in
+        // the accounting was undetectable. A record with both is what a crash
+        // between writing the timelapse and clearing the samples leaves behind.
+        let mixed = SegmentRecord {
+            warm_artifact: Some(PathBuf::from("/tmp/half-done.mp4")),
+            warm_bytes: 7 * 1024 * 1024,
+            ..seg(1, 0, true)
+        };
+        assert_eq!(mixed.tier(), Tier::Hot, "raw frames are the better record");
+        assert_eq!(mixed.bytes(), mixed.raw_bytes + mixed.warm_bytes, "both counted");
+        assert!(
+            mixed.freed_by_shrink() < mixed.bytes(),
+            "shrinking it cannot free the warm bytes it is also holding"
+        );
+    }
+
+    #[test]
+    fn a_stale_timelapse_is_removed_rather_than_orphaned() {
+        // Overwriting `warm_artifact` without deleting the old file leaves it
+        // on disk with nothing pointing at it — so retention, whose whole job
+        // is freeing space, could never reclaim it.
+        let dir = tempfile::tempdir().unwrap();
+        let v = crate::security::path_validator::PathValidator::new(dir.path());
+        let stale = dir.path().join("stale.mp4");
+        std::fs::write(&stale, b"orphan-me").unwrap();
+
+        let mut s = SegmentRecord {
+            warm_artifact: Some(stale.clone()),
+            warm_bytes: 1,
+            ..tmp_segment(dir.path(), 1, true, 3)
+        };
+        let fresh = dir.path().join("fresh.mp4");
+        std::fs::write(&fresh, b"x").unwrap();
+        shrink(&mut s, "t", &v, |_| Ok((fresh.clone(), 1_000))).unwrap();
+
+        assert!(!stale.exists(), "the half-finished timelapse is reclaimed");
+        assert!(fresh.exists());
+        assert_eq!(s.warm_artifact.as_deref(), Some(fresh.as_path()));
+    }
+
+    #[test]
+    fn an_over_ceiling_timelapse_is_not_left_on_disk() {
+        // The encode already wrote it. Leaving it behind accumulates
+        // over-ceiling files inside the module whose job is freeing space.
+        let dir = tempfile::tempdir().unwrap();
+        let v = crate::security::path_validator::PathValidator::new(dir.path());
+        let mut s = tmp_segment(dir.path(), 1, true, 5);
+        let big = dir.path().join("too-big.mp4");
+        std::fs::write(&big, b"x").unwrap();
+
+        assert!(shrink(&mut s, "t", &v, |_| Ok((big.clone(), 4_000_000))).is_err());
+        assert!(!big.exists(), "the rejected timelapse is cleaned up");
+        assert!(s.raw.iter().all(|p| p.exists()), "and the raw samples still survive");
+    }
+
+    #[test]
+    fn the_tier_and_age_boundaries_are_inclusive() {
+        // `age == hot` and `remaining == budget` are the values a real sweep
+        // hits every cycle, and neither was exercised.
+        let s = seg(1, 0, true);
+        let c = cfg(u64::MAX);
+        assert!(!s.may_shrink(at(3_599), &c), "one second short");
+        assert!(s.may_shrink(at(3_600), &c), "exactly at the boundary DOES shrink");
+
+        // remaining == budget is within budget, not over it
+        let segments = vec![seg(1, 0, true)];
+        let exactly = plan(&segments, at(100), &cfg(100 * 1024 * 1024));
+        assert_eq!(*action_for(&exactly, 1), Action::Keep(Refusal::WithinBudget));
+    }
+
     #[test]
     fn shrinking_replaces_the_raw_samples_and_keeps_the_text() {
         let dir = tempfile::tempdir().unwrap();
         let v = crate::security::path_validator::PathValidator::new(dir.path());
-        let s = tmp_segment(dir.path(), 1, true, 5);
+        let mut s = tmp_segment(dir.path(), 1, true, 5);
         let lapse = dir.path().join("w1.mp4");
         std::fs::write(&lapse, vec![0u8; 200_000]).unwrap();
 
-        let art = shrink(&s, "the text that was on screen", &v, |_| Ok((lapse.clone(), 200_000)))
+        let art = shrink(&mut s, "the text that was on screen", &v, |_| Ok((lapse.clone(), 200_000)))
             .expect("a summarised window shrinks");
 
         assert_eq!(art.text, "the text that was on screen", "the text is what a timeline is asked");
@@ -535,23 +762,27 @@ mod tests {
         // save nothing.
         let dir = tempfile::tempdir().unwrap();
         let v = crate::security::path_validator::PathValidator::new(dir.path());
-        let s = tmp_segment(dir.path(), 2, true, 5); // 5 MB raw
+        let mut s = tmp_segment(dir.path(), 2, true, 5); // 5 MB raw
+        let raw_before = s.raw_bytes;
 
         let ok = dir.path().join("small.mp4");
         std::fs::write(&ok, b"x").unwrap();
-        let art = shrink(&s, "t", &v, |_| Ok((ok.clone(), 400_000))).unwrap();
+        let art = shrink(&mut s, "t", &v, |_| Ok((ok.clone(), 400_000))).unwrap();
         assert!(
-            (art.bytes as f64) <= s.raw_bytes as f64 * WARM_BUDGET_RATIO,
-            "{} vs {}",
-            art.bytes,
-            s.raw_bytes
+            (art.bytes as f64) <= raw_before as f64 * WARM_BUDGET_RATIO,
+            "{} vs {raw_before}",
+            art.bytes
         );
+        // and the record maintains itself — the caller cannot forget
+        assert_eq!(s.tier(), Tier::Warm);
+        assert_eq!(s.raw_bytes, 0);
+        assert_eq!(s.warm_bytes, art.bytes);
 
         // and an oversized one is refused with the raw samples INTACT
-        let s2 = tmp_segment(dir.path(), 3, true, 5);
+        let mut s2 = tmp_segment(dir.path(), 3, true, 5);
         let big = dir.path().join("big.mp4");
         std::fs::write(&big, b"x").unwrap();
-        let err = shrink(&s2, "t", &v, |_| Ok((big.clone(), 4_000_000)));
+        let err = shrink(&mut s2, "t", &v, |_| Ok((big.clone(), 4_000_000)));
         assert!(err.is_err());
         assert!(
             s2.raw.iter().all(|p| p.exists()),
@@ -563,9 +794,9 @@ mod tests {
     fn shrinking_an_unsummarised_window_is_refused_and_costs_it_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let v = crate::security::path_validator::PathValidator::new(dir.path());
-        let s = tmp_segment(dir.path(), 4, false, 3);
+        let mut s = tmp_segment(dir.path(), 4, false, 3);
         let mut encoded = false;
-        let err = shrink(&s, "t", &v, |_| {
+        let err = shrink(&mut s, "t", &v, |_| {
             encoded = true;
             Ok((dir.path().join("x.mp4"), 1))
         });
@@ -580,8 +811,8 @@ mod tests {
         // until a verified replacement exists.
         let dir = tempfile::tempdir().unwrap();
         let v = crate::security::path_validator::PathValidator::new(dir.path());
-        let s = tmp_segment(dir.path(), 5, true, 4);
-        let err = shrink(&s, "t", &v, |_| {
+        let mut s = tmp_segment(dir.path(), 5, true, 4);
+        let err = shrink(&mut s, "t", &v, |_| {
             Err(DayflowError::Retention("ffmpeg exploded".into()))
         });
         assert!(err.is_err());
@@ -613,7 +844,7 @@ mod tests {
             let i = segments.iter().position(|s| s.sequence == d.sequence).unwrap();
             let lapse = dir.path().join(format!("w{}.mp4", d.sequence));
             std::fs::write(&lapse, b"x").unwrap();
-            let art = shrink(&segments[i], "kept text", &v, |_| Ok((lapse.clone(), 100_000))).unwrap();
+            let art = shrink(&mut segments[i], "kept text", &v, |_| Ok((lapse.clone(), 100_000))).unwrap();
             segments[i].raw.clear();
             segments[i].raw_bytes = 0;
             segments[i].warm_bytes = art.bytes;
@@ -628,8 +859,16 @@ mod tests {
             assert_eq!(s.tier(), Tier::Hot);
             assert!(s.raw.iter().all(|p| p.exists()), "window {} lost data", s.sequence);
         }
-        // And nothing vanished from the ledger.
-        assert_eq!(segments.len(), 6);
+        // And the ledger accounts for every window — asserted against a fresh
+        // plan rather than against `segments.len()`, which is a local Vec that
+        // was never resized and so could not have failed.
+        let after_plan = plan(&segments, plan_now, &cfg(1));
+        assert_eq!(after_plan.len(), 6);
+        let keys: std::collections::HashSet<_> =
+            after_plan.iter().map(|d| (d.display_id, d.sequence)).collect();
+        assert_eq!(keys.len(), 6, "six distinct windows, none collapsed");
+        // Every remaining action is a warm drop or a refusal — the raw is gone.
+        assert!(after_plan.iter().all(|d| d.action != Action::Shrink));
     }
 
     #[test]

@@ -2020,3 +2020,68 @@ acts on that state by deleting.
 returning only its actions makes "nothing was reclaimed" and "everything was refused"
 indistinguishable — which are precisely the two answers an operator needs to tell apart when the
 disk fills up anyway.
+
+
+## R34 — Wave 9 review: I broke my own identity rule one wave after writing it (2026-08-26)
+
+Verdict **FAIL**, and the headline finding is a rule I had written down in R30 and then violated in
+the next module I touched.
+
+### The identity was documented, and I keyed on half of it
+
+`SegmentRecord`'s own field doc says the durable identity is `(session, display, sequence) — never
+the filename`, `ChunkRef` says the same, and `daemon.rs` keeps a **per-display** sequence counter.
+`plan` keyed its bookkeeping on `sequence` alone.
+
+On any multi-monitor machine display 0 and display 1 both emit sequences 0, 1, 2… so the two
+collapse: **one window per colliding sequence is never actioned**, its bytes are credited to the
+budget anyway (so the planner believes it freed space it did not), and the ledger reports it as
+merely "too recent". Three failures from one missing field, and the third is the exact lie the
+return-a-decision-for-everything design exists to prevent.
+
+**Writing the rule down did not stop me applying it.** R30 was about `Region` identity; this is
+`SegmentRecord` identity, in a different module, a week later — and the shape is identical.
+Documenting an invariant on the type does not enforce it at the use site, and a composite key is
+the kind of thing that reads fine when half of it is missing.
+
+### Two whole policies with no test at all
+
+Deleting the age-based **warm expiry** branch entirely survived the suite: every warm-drop assertion
+went through the BUDGET path, so the whole "fortnight of timelapses" policy was unverified.
+
+And removing pass 1's contribution to `freed` also survived: every test used a budget of `u64::MAX`
+or ~1 byte, so **"age reclaim alone satisfies the budget"** — the interaction between the two passes
+— was never exercised. The mutant over-evicts a young window it did not need.
+
+**Both gaps come from fixtures clustered at the extremes.** A budget of `MAX` or `1` never lands in
+the region where the logic is interesting, which is the middle. Same family as R32's two-element
+fixtures: the values that make a test easy to write are the values that make it prove least.
+
+### An accounting credit that was never real
+
+A shrink credited the full `raw_bytes` while writing a timelapse of up to 10% of that onto the same
+disk. The plan could therefore declare the budget met while real usage landed over it — correcting
+itself only on the next run, and then by dropping warm artifacts that should never have been needed.
+Credited net now.
+
+### Structure that let a caller lie
+
+`shrink` deleted the raw samples and left the caller to clear `raw`/`raw_bytes` by hand — as my own
+end-to-end test did, in four lines. A caller that forgot would leave a record whose `tier()` claims
+Hot while the files are gone, and the next plan would schedule a shrink whose encode reads deleted
+files. It takes `&mut` and maintains the record itself now.
+
+**A function that requires the caller to fix up state afterwards is a function with an undocumented
+second half.** The `&` signature made the hazard invisible; `&mut` makes the ownership obvious.
+
+Related, from the same review: a crash between writing the timelapse and clearing the samples
+leaves BOTH set. `tier()` reads Hot (the raw frames are the better record), and shrink now deletes
+the stale timelapse before writing its replacement — otherwise nothing points at it and retention,
+whose whole job is freeing space, can never reclaim it. The SC-008 refusal path also now removes the
+oversized file the encode already wrote.
+
+### And a doc that promised a floor the code does not keep
+
+`RetentionConfig.hot` said raw samples are "kept this long before they may be shrunk". Budget
+pressure shrinks a summarised window of any age. The only real floor is `summarized`, and the doc
+now says so.
