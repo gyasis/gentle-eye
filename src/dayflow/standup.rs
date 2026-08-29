@@ -84,9 +84,14 @@ impl Standup {
 
 /// Build the digest for `entries` over `[from, to)`.
 ///
-/// Entries are used as given: clipping them to the range would invent durations
-/// the recorder never observed, and the range is the caller's question, not a
-/// claim about what was captured.
+/// Entries are CLIPPED to the range before any duration is counted. The store's
+/// query is overlap-based, so an entry that began before `from` arrives whole —
+/// and counting all of it would attribute activity from before the range to a
+/// digest of it. Clipping removes time, never invents it: the part inside the
+/// range is time the recorder observed AND the caller asked about, and only
+/// that part is counted. An entry left with nothing inside the range still
+/// appears in its category's entry count, but contributes no seconds and no
+/// activity label — a digest of a range should not name work done outside it.
 pub fn digest(entries: &[TimelineEntry], from: DateTime<Utc>, to: DateTime<Utc>) -> Standup {
     /// What one category accumulates: the category, its intervals, and each
     /// activity label with the time it carried.
@@ -124,8 +129,13 @@ pub fn digest(entries: &[TimelineEntry], from: DateTime<Utc>, to: DateTime<Utc>)
         slot.entries += 1;
         if secs > 0 {
             slot.intervals.push((start, end));
+            // The label rides with the time. An entry that contributed no
+            // seconds inside the range must not contribute its activity name
+            // either: "what did I do between 2 and 3" answered with something
+            // done entirely before 2 is wrong even at zero weight. Unreachable
+            // through the overlap-based store query, but `digest` is public.
+            slot.labels.push((e.activity.clone(), secs));
         }
-        slot.labels.push((e.activity.clone(), secs));
     }
 
     // UNION, not sum. Windows are per DISPLAY, so a two-monitor session
@@ -422,6 +432,57 @@ mod tests {
         assert_eq!(d.recorded_seconds, 0);
         assert_eq!(d.categories[0].seconds, 0, "no time…");
         assert_eq!(d.categories[0].entries, 1, "…but it is not silently dropped");
+    }
+
+    #[test]
+    fn an_interval_contained_in_an_earlier_one_does_not_shrink_the_union() {
+        // The surviving mutant: making the merge-extend unconditional lets a
+        // CONTAINED interval pull the running window's end BACKWARDS, so the
+        // next interval looks disjoint and already-counted time is counted
+        // short. [0,7200] + [100,200] + [300,7300] is 7300 seconds of coverage;
+        // the mutant reports 7200. Every earlier fixture used identical,
+        // adjacent or disjoint intervals, none of which can tell the two apart.
+        let entries = vec![
+            entry(0, 7_200, ActivityCategory::Coding, "editor"),
+            entry(100, 200, ActivityCategory::Coding, "terminal"),
+            entry(300, 7_300, ActivityCategory::Coding, "editor"),
+        ];
+        let d = digest(&entries, at(0), at(10_000));
+        assert_eq!(d.recorded_seconds, 7_300, "a contained interval must not shrink the merge");
+        assert_eq!(d.categories[0].seconds, 7_300);
+    }
+
+    #[test]
+    fn a_partial_overlap_extends_the_union_past_the_first_interval() {
+        // The other direction: never extending at all. [0,100] + [50,150]
+        // covers 150 seconds; a union that ignores the overhang reports 100.
+        // Identical-interval fixtures (the two-display tests) never fire the
+        // extend branch, so this is the first fixture in which it must.
+        let entries = vec![
+            entry(0, 100, ActivityCategory::Comms, "slack"),
+            entry(50, 150, ActivityCategory::Comms, "email"),
+        ];
+        let d = digest(&entries, at(0), at(1_000));
+        assert_eq!(d.recorded_seconds, 150, "the overhang past the first interval counts");
+    }
+
+    #[test]
+    fn a_zero_second_entry_contributes_no_activity_label() {
+        // An entry wholly outside the range keeps its place in the entry count
+        // (it is data the store handed over) but must not put its activity name
+        // into a digest of a range it did no work in: "what did I do between
+        // 2 and 3" answered with yesterday's task is wrong even at zero weight.
+        let entries = vec![
+            entry(0, 600, ActivityCategory::Coding, "yesterdays-task"),
+            entry(10_000, 11_000, ActivityCategory::Coding, "todays-task"),
+        ];
+        let d = digest(&entries, at(10_000), at(20_000));
+        assert_eq!(d.categories[0].entries, 2, "both entries are counted");
+        assert_eq!(
+            d.categories[0].activities,
+            vec!["todays-task".to_string()],
+            "only the activity that carried time inside the range is named"
+        );
     }
 
     #[test]
