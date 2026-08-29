@@ -10,6 +10,7 @@
 //! `GentleEyeServer`'s wiring — no duplicated logic).
 
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use gentle_eye::capture::display::{DisplayConfig, DisplayManager};
 use gentle_eye::config::AppConfig;
 use gentle_eye::contracts::traits::{RecordingConfig, RecordingStatus, TimeRange};
@@ -77,6 +78,7 @@ async fn main() -> ExitCode {
         "screenshot" => run_screenshot(rest).await,
         "segment" => run_segment(rest).await,
         "regions" => run_regions(rest).await,
+        "dayflow" => run_dayflow(rest).await,
         "redpen-list" => run_redpen_list(rest).await,
         "redpen-analyze" => run_redpen_analyze(rest).await,
         "help" | "-h" | "--help" => {
@@ -1093,4 +1095,94 @@ async fn run_serve() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `gentle-eye dayflow <start|stop|status|timeline|ask>`.
+///
+/// A thin adapter over the ONE service, exactly like the MCP tools: it parses
+/// argv, calls the service, prints JSON. No decision is made here, because a
+/// decision made in one surface is a decision the other two do not make.
+async fn run_dayflow(args: &[String]) -> Result<()> {
+    let server = GentleEyeServer::new().await?;
+    let df = server.dayflow();
+    let sub = args.first().map(String::as_str).unwrap_or("status");
+    let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
+
+    match sub {
+        "start" => {
+            let mode = match flag(rest, "--mode").as_deref() {
+                None | Some("session") => gentle_eye::dayflow::models::DayflowMode::Session,
+                Some("daemon") => gentle_eye::dayflow::models::DayflowMode::Daemon,
+                Some(other) => return Err(anyhow!("unknown mode '{other}': use session or daemon")),
+            };
+            let displays = match flag(rest, "--displays") {
+                Some(list) => list
+                    .split(',')
+                    .map(|s| s.trim().parse::<u32>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow!("bad --displays: {e}"))?,
+                None => vec![0],
+            };
+            let id = df.start(mode, displays, Utc::now())?;
+            println!("{}", serde_json::json!({ "session_id": id.to_string() }));
+        }
+        "stop" => {
+            let closed = df.stop(Utc::now())?;
+            println!("{}", serde_json::json!({ "windows_closed": closed.len() }));
+        }
+        "status" => {
+            let status = df.status(Utc::now())?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            // EXIT 0 EVEN WHEN DEGRADED. A degraded session is running, just
+            // not producing; exiting non-zero would make every script treat a
+            // recoverable state as a crash, and the state is already in the
+            // payload for anything that wants to act on it.
+        }
+        "timeline" => {
+            let (from, to) = parse_cli_range(rest)?;
+            let entries = df.timeline(from, to)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "from": from.to_rfc3339(),
+                    "to": to.to_rfc3339(),
+                    "entries": entries,
+                }))?
+            );
+        }
+        "ask" => {
+            let question = rest
+                .iter()
+                .find(|a| !a.starts_with("--"))
+                .ok_or_else(|| anyhow!("usage: gentle-eye dayflow ask \"<question>\""))?;
+            let (from, to) = parse_cli_range(rest)?;
+            let answer = df.ask(question, from, to, |prompt| {
+                format!("[no model configured for ask]\n{prompt}")
+            })?;
+            println!("{}", serde_json::to_string_pretty(&answer)?);
+        }
+        other => return Err(anyhow!("unknown dayflow subcommand '{other}'")),
+    }
+    Ok(())
+}
+
+/// The same range defaulting the other surfaces use — today so far.
+fn parse_cli_range(args: &[String]) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+    let parse = |s: &str| -> Result<DateTime<Utc>> {
+        Ok(DateTime::parse_from_rfc3339(s)
+            .map_err(|e| anyhow!("bad timestamp '{s}': {e}"))?
+            .with_timezone(&Utc))
+    };
+    let to = match flag(args, "--to") {
+        Some(s) => parse(&s)?,
+        None => Utc::now(),
+    };
+    let from = match flag(args, "--from") {
+        Some(s) => parse(&s)?,
+        None => to.date_naive().and_hms_opt(0, 0, 0).map(|d| d.and_utc()).unwrap_or(to),
+    };
+    if from > to {
+        return Err(anyhow!("range starts after it ends: {from} > {to}"));
+    }
+    Ok((from, to))
 }

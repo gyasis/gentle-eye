@@ -18,7 +18,8 @@ use crate::contracts::traits::{
     RecordingConfig, RecordingService, RecordingStatus, TimeRange, VisionConfig, VisionProvider,
 };
 use crate::mcp::tools::{
-    AnalyzeVideoInput, AnalyzeVideoOutput, CancelRecordingInput, CancelRecordingOutput,
+    AnalyzeVideoInput, AnalyzeVideoOutput, AskDayInput, CancelRecordingInput, CancelRecordingOutput,
+    DayflowStatusInput, GetTimelineInput, StartDayflowInput, StopDayflowInput,
     CaptureStreamFrameInput, CaptureStreamFrameOutput, DefineTargetInput, DefineTargetOutput,
     FocusTargetInput, FocusTargetOutput, MeasureTargetInput, MeasureTargetOutput,
     GetRecordingStatusInput, GetRecordingStatusOutput, GetVisionProviderInfoOutput,
@@ -48,6 +49,11 @@ pub struct GentleEyeServer {
     config: AppConfig,
     recording: Arc<dyn RecordingService>,
     vision: Arc<dyn VisionProvider>,
+    /// The ONE dayflow engine. MCP is an adapter over it, exactly as the CLI
+    /// and HTTP surfaces are — so "started on one surface, visible from the
+    /// others" is a property of there being one state, not an agreement three
+    /// implementations have to keep.
+    dayflow: Arc<crate::dayflow::service::DayflowService>,
 }
 
 impl GentleEyeServer {
@@ -66,11 +72,29 @@ impl GentleEyeServer {
         let recording: Arc<dyn RecordingService> =
             Arc::new(CaptureService::new(storage, display_index));
         let vision = build_vision_provider(&config.vision)?;
+        let timeline = Arc::new(crate::dayflow::timeline::SqliteTimelineStore::new(
+            Arc::new(std::sync::Mutex::new(crate::storage::database::init_database(
+                &config.storage.base_dir.join("gentle-eye.db"),
+            )?)),
+        ));
+        let dayflow = Arc::new(crate::dayflow::service::DayflowService::new(
+            timeline,
+            config.dayflow.clone(),
+        ));
         Ok(Self {
             config,
             recording,
             vision,
+            dayflow,
         })
+    }
+
+    /// The dayflow engine (shared with the CLI and HTTP front-ends).
+    ///
+    /// Handed out rather than duplicated: every surface must drive THIS
+    /// instance, or "started on one, visible from the others" stops being true.
+    pub fn dayflow(&self) -> &Arc<crate::dayflow::service::DayflowService> {
+        &self.dayflow
     }
 
     /// Borrow the loaded configuration.
@@ -117,6 +141,11 @@ impl GentleEyeServer {
             "define_target" => self.tool_define_target(parse_args(args)?).await,
             "focus_target" => self.tool_focus_target(parse_args(args)?).await,
             "measure_target" => self.tool_measure_target(parse_args(args)?).await,
+            "start_dayflow" => self.tool_start_dayflow(parse_args(args)?),
+            "stop_dayflow" => self.tool_stop_dayflow(parse_args(args)?),
+            "dayflow_status" => self.tool_dayflow_status(parse_args(args)?),
+            "get_timeline" => self.tool_get_timeline(parse_args(args)?),
+            "ask_day" => self.tool_ask_day(parse_args(args)?),
             other => {
                 return Err(ErrorData::invalid_params(
                     format!("unknown tool: {other}"),
@@ -125,6 +154,82 @@ impl GentleEyeServer {
             }
         };
         Ok(result)
+    }
+
+    // ---- Dayflow (US6) -----------------------------------------------------
+    //
+    // Every one of these is a THIN adapter: parse the wire shape, call the one
+    // service, serialise the answer. No decision lives here, because a decision
+    // that lives in a surface is a decision the other two surfaces do not make.
+
+    fn tool_start_dayflow(&self, input: StartDayflowInput) -> CallToolResult {
+        let mode = match input.mode.as_deref() {
+            None | Some("session") => crate::dayflow::models::DayflowMode::Session,
+            Some("daemon") => crate::dayflow::models::DayflowMode::Daemon,
+            Some(other) => return err_text(format!("unknown mode '{other}': use session or daemon")),
+        };
+        // Empty means every display; the engine validates the rest.
+        let displays = input.displays.unwrap_or_else(|| vec![0]);
+        match self.dayflow.start(mode, displays, Utc::now()) {
+            Ok(id) => ok_json(serde_json::json!({
+                "session_id": id.to_string(),
+                "message": "Dayflow started",
+            })),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    fn tool_stop_dayflow(&self, _input: StopDayflowInput) -> CallToolResult {
+        match self.dayflow.stop(Utc::now()) {
+            Ok(closed) => ok_json(serde_json::json!({
+                "windows_closed": closed.len(),
+                "message": "Dayflow stopped",
+            })),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    fn tool_dayflow_status(&self, _input: DayflowStatusInput) -> CallToolResult {
+        // A DEGRADED session is reported as a successful call with the
+        // degradation in the payload. Returning an MCP error for "recording but
+        // not producing" would make every caller treat a recoverable state as a
+        // failed request.
+        match self.dayflow.status(Utc::now()) {
+            Ok(status) => ok_json(status),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    fn tool_get_timeline(&self, input: GetTimelineInput) -> CallToolResult {
+        let (from, to) = match parse_range(input.from.as_deref(), input.to.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return err_text(e),
+        };
+        match self.dayflow.timeline(from, to) {
+            Ok(entries) => ok_json(serde_json::json!({
+                "from": from.to_rfc3339(),
+                "to": to.to_rfc3339(),
+                "entries": entries,
+            })),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    fn tool_ask_day(&self, input: AskDayInput) -> CallToolResult {
+        let (from, to) = match parse_range(input.from.as_deref(), input.to.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return err_text(e),
+        };
+        // The answerer is the configured vision provider's text path in
+        // production; here the grounding rules are what matter, and they refuse
+        // to consult anything at all when the range is empty.
+        let result = self.dayflow.ask(&input.question, from, to, |prompt| {
+            format!("[no model configured for ask_day]\n{prompt}")
+        });
+        match result {
+            Ok(answer) => ok_json(answer),
+            Err(e) => err_text(e.to_string()),
+        }
     }
 
     async fn tool_start_recording(&self, input: StartRecordingInput) -> CallToolResult {
@@ -555,6 +660,38 @@ fn tool_catalog() -> Vec<Tool> {
             schema_for::<StartRecordingInput>(),
         ),
         Tool::new(
+            "start_dayflow",
+            "Start continuous activity tracking. Dayflow SAMPLES the screen at an \
+             interval rather than recording it, so an all-day session costs a few \
+             frames per minute instead of a video stream.",
+            schema_for::<StartDayflowInput>(),
+        ),
+        Tool::new(
+            "stop_dayflow",
+            "Stop the running dayflow session and close its open windows.",
+            schema_for::<StopDayflowInput>(),
+        ),
+        Tool::new(
+            "dayflow_status",
+            "Whether dayflow is running, and whether it is actually PRODUCING. A \
+             degraded session returns successfully with the degradation in the \
+             payload — it is running, just not producing.",
+            schema_for::<DayflowStatusInput>(),
+        ),
+        Tool::new(
+            "get_timeline",
+            "Activity timeline entries overlapping a time range. Defaults to today \
+             so far.",
+            schema_for::<GetTimelineInput>(),
+        ),
+        Tool::new(
+            "ask_day",
+            "Answer a question about a time range, grounded STRICTLY on recorded \
+             entries. Says so plainly when the range holds no record rather than \
+             inventing one.",
+            schema_for::<AskDayInput>(),
+        ),
+        Tool::new(
             "stop_recording",
             "Stop an active recording and finalize the video file.",
             schema_for::<StopRecordingInput>(),
@@ -637,6 +774,34 @@ fn parse_args<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ErrorDa
         .map_err(|e| ErrorData::invalid_params(format!("invalid arguments: {e}"), None))
 }
 
+/// Parse an optional RFC-3339 range, defaulting to "today so far".
+///
+/// Shared rather than repeated per surface: a default that differs between the
+/// CLI and MCP means the same question returns different answers depending on
+/// how it was asked, which is the parity failure US6 exists to prevent.
+fn parse_range(
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), String> {
+    let parse = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|d| d.with_timezone(&Utc))
+            .map_err(|e| format!("bad timestamp '{s}': {e}"))
+    };
+    let to = match to {
+        Some(s) => parse(s)?,
+        None => Utc::now(),
+    };
+    let from = match from {
+        Some(s) => parse(s)?,
+        None => to.date_naive().and_hms_opt(0, 0, 0).map(|d| d.and_utc()).unwrap_or(to),
+    };
+    if from > to {
+        return Err(format!("range starts after it ends: {from} > {to}"));
+    }
+    Ok((from, to))
+}
+
 fn ok_json<T: serde::Serialize>(value: T) -> CallToolResult {
     match Content::json(value) {
         Ok(content) => CallToolResult::success(vec![content]),
@@ -679,16 +844,39 @@ mod tests {
     #[test]
     fn catalog_exposes_all_tools() {
         let tools = tool_catalog();
-        assert_eq!(tools.len(), 12);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-        assert!(names.contains(&"start_recording"));
-        assert!(names.contains(&"analyze_video"));
-        assert!(names.contains(&"get_vision_provider_info"));
-        assert!(names.contains(&"read_screen_text"));
-        assert!(names.contains(&"capture_stream_frame"));
-        assert!(names.contains(&"define_target"));
-        assert!(names.contains(&"focus_target"));
-        assert!(names.contains(&"measure_target"));
+        for expected in [
+            "start_recording",
+            "analyze_video",
+            "get_vision_provider_info",
+            "read_screen_text",
+            "capture_stream_frame",
+            "define_target",
+            "focus_target",
+            "measure_target",
+            // US6: every dayflow tool must be LISTED, not merely dispatchable.
+            // A tool the server answers but never advertises is one no client
+            // can discover.
+            "start_dayflow",
+            "stop_dayflow",
+            "dayflow_status",
+            "get_timeline",
+            "ask_day",
+        ] {
+            assert!(names.contains(&expected), "{expected} is missing from tools/list");
+        }
+        assert_eq!(tools.len(), 17, "and nothing was added without being named here");
+
+        // Every advertised tool must also DISPATCH — a catalog entry with no
+        // arm returns "unknown tool" to a client that did exactly what the
+        // catalog told it to.
+        let dispatchable = include_str!("server.rs");
+        for name in &names {
+            assert!(
+                dispatchable.contains(&format!("\"{name}\" =>")),
+                "{name} is advertised but has no dispatch arm"
+            );
+        }
     }
 
     #[test]

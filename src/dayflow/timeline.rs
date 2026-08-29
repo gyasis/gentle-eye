@@ -291,7 +291,7 @@ mod tests {
 /// The entries are returned, not just cited, so a caller can SHOW its working.
 /// An answer whose `grounding` is empty but whose `answer` is confident prose is
 /// the failure this type exists to make visible.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DayAnswer {
     /// The answer text.
     pub answer: String,

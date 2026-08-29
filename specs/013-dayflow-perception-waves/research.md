@@ -2130,3 +2130,56 @@ before it can end over budget, so an unplanned summarised segment exists only be
 met. Age is never the binding constraint — pass 2 ignores it — so labelling a window "too recent"
 would name something that was not protecting it. The variant is deleted rather than left advertising
 a state that cannot occur.
+
+
+## R36 — Wave 10 (US6): parity is a property of having one state, not an agreement (2026-08-26)
+
+Three surfaces — MCP, CLI, HTTP — over one `DayflowService`. The design choice worth recording is
+that T044's parity requirement is met **structurally**: there is one state and one set of
+transitions, and each surface only translates between its wire format and those calls.
+
+The alternative — three implementations that agree by convention — fails the moment one is changed
+alone, and it fails in the worst possible way for a user: *"the CLI says running and the dashboard
+says stopped"* is a contradiction they have no way to resolve. Three passing isolated tests are
+exactly what that looks like from the inside, which is why the parity tests drive the surfaces
+**against each other** rather than each on its own.
+
+Two shared decisions had to move out of the surfaces to make that true: the "today so far" default
+for a missing range (a default that differed per surface makes the same question return different
+answers depending on how it was asked), and the degraded-is-still-success rule.
+
+### A degraded session is a success on every surface
+
+Running-but-not-producing returns 200 on HTTP, exit 0 on the CLI, and a successful tool result on
+MCP — with the degradation in the payload. A 503 makes every monitor treat a recoverable state as
+an outage; a non-zero exit makes every script treat it as a crash. The state is already in the body
+for anything that wants to act on it.
+
+`is_degraded` delegates to `DayflowHealth::is_fault`, which already draws the distinction that
+matters: **a pause and an off switch are quiet on purpose**. Re-deriving "unhealthy" as "not
+Healthy" would have made every lunch break look like a broken recorder — and the mutation doing
+exactly that was killed by the pause test.
+
+### A behaviour no test can reach is a behaviour nothing defends
+
+The 503 mutation **survived** at first, because a session is only degraded once it has been quiet
+longer than its interval, and `route` read the clock itself — so no test could drive it into that
+state at all. Adding `route_at(.., now)` made the case reachable, and the mutation died immediately.
+
+**When a rule is time-dependent, the clock has to be a parameter or the rule is undefended by
+construction.** This is the same shape as the fixtures clustered at the extremes (R34): the state
+the test can easily produce is not the state where the logic lives.
+
+### `+` is a space, and a timestamp is not a form field
+
+`from=2026-08-26T00:00:00+00:00` arrives as `... 00:00` — correct form-decoding, and a genuine trap
+for an API whose main parameters are timestamps. It is refused loudly with the mangled value quoted,
+rather than parsed leniently into some other instant, because a lenient parse would answer
+confidently about the wrong hour. Documented at `percent_decode`, and both forms are tested.
+
+### And a catalog entry with no dispatch arm
+
+The tool-list test now asserts that every advertised tool has a dispatch arm, not just that the
+count matches. A tool the server answers but never advertises is undiscoverable; one it advertises
+but cannot dispatch returns "unknown tool" to a client that did exactly what the catalog told it to.
+Both are silent until someone tries.

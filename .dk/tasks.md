@@ -180,13 +180,13 @@ does not.
 
 **Independent test**: start → status → timeline through each surface against the same state.
 
-- [ ] T041 [US6] MCP tools in `src/mcp/tools.rs` + `src/mcp/server.rs` (was T270) — `start_dayflow`, `stop_dayflow`, `dayflow_status`, `get_timeline`, `ask_day` per `contracts/mcp-tools.md`, with schemars schemas.
+- [x] T041 [US6] MCP tools in `src/mcp/tools.rs` + `src/mcp/server.rs` (was T270) — `start_dayflow`, `stop_dayflow`, `dayflow_status`, `get_timeline`, `ask_day` per `contracts/mcp-tools.md`, with schemars schemas.
       `> DONE:` `tools/list` shows all five; a `call_tool` round-trip for each returns valid JSON against a stub provider.
-- [ ] T042 [P] [US6] CLI subcommands in `src/bin/gentle-eye.rs` (was T271) per `contracts/cli.md`. `status` reporting `degraded` still exits 0.
+- [x] T042 [P] [US6] CLI subcommands in `src/bin/gentle-eye.rs` (was T271) per `contracts/cli.md`. `status` reporting `degraded` still exits 0.
       `> DONE:` each subcommand prints valid JSON; a degraded status exits 0 with the degradation in the payload.
-- [ ] T043 [P] [US6] HTTP endpoints in `src/api.rs` (was T272) per `contracts/http.md`, no new dependency; a degraded recorder still returns 200.
+- [x] T043 [P] [US6] HTTP endpoints in **`src/dayflow/http.rs`** (the spec said `src/api.rs`; that file is the library-facing convenience API, not a server, so the routes live with the rest of dayflow) (was T272) per `contracts/http.md`, no new dependency; a degraded recorder still returns 200.
       `> DONE:` each endpoint returns correct JSON on the hand-rolled server; a live curl test passes.
-- [ ] T044 [S] [US6] Parity — all three surfaces drive the same engine and report the same state (was T273).
+- [x] T044 [S] [US6] Parity — all three surfaces drive the same engine and report the same state (was T273).
       `> DONE:` a session started on one surface is visible from the other two; `cargo check` + clippy `-D warnings` = 0.
 
 ## Phase 9: User Story 7 — Yesterday in one screen (P3)
