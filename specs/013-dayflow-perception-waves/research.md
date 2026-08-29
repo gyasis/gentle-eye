@@ -1605,3 +1605,47 @@ blind spot moved rather than closing.
 present or not · content scrolled, extended, edited, jittered, or replaced · window small or large.
 Each new fixture should name which cell it occupies, so a gap is visible as an empty cell instead
 of being discovered by the next reviewer.
+
+
+## R27 — T029 residency: the owed measurement, taken (2026-08-26)
+
+R5 said *"do not implement the keep-warm ping until this is settled"* and named the check owed at
+T029: load the ACTUAL text tier through the governor and read ITS `expires_at`. Taken today
+against the live lane.
+
+| measurement | value |
+|---|---|
+| `deepseek-ocr:latest` cold load | **3.74 s** (`load_duration`) |
+| warm re-call | **0.18 s** — 20× |
+| resident size | 7.4 GB |
+| governor's default window for THIS model | **~50 s** |
+| explicit `keep_alive: "10m"` in the request | **honoured** — `/api/ps` then reports `expires_in=10.0 min` |
+
+### This inverts R5's inversion
+
+R5 saw `qwen3-coder:30b` resident with `expires_at` ~6 hours out and concluded the cold-load
+premise "largely evaporates". That figure does not generalise: it is **per-model / per-request,
+not a global lane setting**. The text tier's own default window is ~50 seconds — SHORTER than the
+coarse 3-minute sampling interval (D10), so under the default policy **every single sample pays
+the 3.74 s cold load**, and a 15-minute segment of 5 samples pays it five times.
+
+**The lesson is narrower than "measure": one model's residency tells you nothing about another's.**
+R5 read a number off the model that happened to be loaded and reasoned about a different one.
+
+### And it makes T029 much smaller than planned
+
+Because `keep_alive` is honoured per request, residency needs **no background pinger, no extra
+thread, and no wasted keep-warm calls**. It is a parameter on the calls Dayflow is already making,
+which also means the model unloads on its own when sampling stops — the failure mode of a pinger
+(holding 7.4 GB on a shared box after the session dies) cannot occur.
+
+The three-valued knob therefore becomes:
+
+| policy | `keep_alive` sent | for |
+|---|---|---|
+| `Resident` | interval × 2 + margin | fine-grained focused sessions where 3.74 s per sample matters |
+| `OnDemand` (default) | omitted — governor's own window | coarse all-day tracking, where 3.74 s per 3 min is 2% overhead |
+| `Off` | `"0"` — unload immediately | leave the shared box free; pay the load every time |
+
+Default `OnDemand`, because the coarse cadence is the default and 2% is not worth holding 7.4 GB
+of someone else's memory.

@@ -124,17 +124,17 @@ request escalates exactly once, with a logged reason.
 
 - [x] T026 [P] [US3] New `src/dayflow/perception.rs` (was T300) — a `PerceptionRouter` over two configured `VisionProvider` instances (text tier, reason tier), dispatching on an explicit caller-supplied request kind, never by sniffing the prompt.
       `> DONE:` a stub-provider test proves a text request never touches the reason tier; `cargo check` green.
-- [ ] T027 [US3] Crop before extract (was T301) — feed the text tier full-resolution region crops from the region cascade, never a downscaled full frame (FR-011). Reuse the existing target/measure path; no new detection code.
+- [x] T027 [US3] Crop before extract (was T301) — feed the text tier full-resolution region crops from the region cascade, never a downscaled full frame (FR-011). Reuse the existing target/measure path; no new detection code.
       `> DONE:` a two-pane frame yields per-pane text in correct order and a test asserts the full-frame column-scramble does NOT occur.
 - [x] T028 [US3] Log every escalation with its reason and serving tier (FR-007/010).
       `> DONE:` a semantic request emits exactly one escalation record naming the reason; a normal recording interval emits none.
-- [ ] T029 [US3] Residency policy (was T331) — keep the text tier warm while a recording is active, using the unload window measured in T006; record per-segment latency including any reload (FR-008/013). Three-valued knob: resident / on-demand / off.
+- [x] T029 [US3] Residency policy (was T331) — keep the text tier warm while a recording is active, using the unload window measured in T006; record per-segment latency including any reload (FR-008/013). Three-valued knob: resident / on-demand / off.
       `> DONE:` a multi-segment run records per-segment latency; with residency on, no segment pays a cold load; the knob is documented.
 - [x] T030 [US3] Give Dayflow's internal perception traffic its own rate-limit key and budget derived from interval, display count and `max_regions_per_segment`, leaving the interactive `analyze_video` 10/min ceiling untouched. See the plan's Complexity Tracking — the limiter currently has no call sites anywhere in the repo.
       `> DONE:` a test proves Dayflow's traffic cannot exhaust the interactive bucket and vice versa; the region cap bounds work at the source.
 - [x] T031 [S] [US3] Route the summarizer through the router (was T302) so per-segment perception uses the text tier by default and escalates only for category and meaning.
       `> DONE:` a text query resolves without a vision model, a semantic query escalates once, both covered by tests; `cargo check` + clippy `-D warnings` = 0.
-- [ ] T032 [P] [US3] Integration coverage in `tests/dayflow_perception.rs`, including an assertion that the demoted tesseract path is never used as the text tier.
+- [x] T032 [P] [US3] Integration coverage in `tests/dayflow_perception.rs`, including an assertion that the demoted tesseract path is never used as the text tier.
       `> DONE:` all US3 acceptance scenarios from `spec.md` are asserted.
 - [x] T052 [US3] Content intent — rolling OCR aggregation in `src/dayflow/perception.rs`, ported from videolocr's `OCRAggregator` (research R13): a 5-block history, `SequenceMatcher`-style overlap at 0.85, APPENDING to the matched block instead of creating a new one. Runs only when `intent.aggregates_text()`.
       `> DONE:` a scrolling pane sampled repeatedly yields ONE growing block, not N near-duplicates; under Activity intent the aggregator is never invoked; `cargo check` green.

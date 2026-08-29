@@ -462,6 +462,129 @@ pub fn aggregator_for(intent: DayflowIntent) -> Option<TextAggregator> {
     intent.aggregates_text().then(TextAggregator::new)
 }
 
+// ─── T027: crop before extract (FR-011) ───────────────────────────────────
+
+/// Crop a captured frame to its regions, at FULL resolution, in reading order.
+///
+/// **Never send the whole frame downscaled.** A 4K screen shrunk to fit a
+/// model's input is unreadable as text — and worse than unreadable, it is
+/// SILENTLY unreadable: the model returns confident nonsense rather than an
+/// error. Two side-by-side panes downscaled together also let the model read
+/// straight across the gutter, interleaving two documents line by line into
+/// text that looks plausible and belongs to neither.
+///
+/// So the text tier sees one full-resolution crop per region, and the caller
+/// keeps them apart. `max_regions` bounds the work at the source, which is what
+/// the perception budget is derived from.
+pub fn crop_regions(
+    frame: &Path,
+    regions: &[crate::regions::Region],
+    out_dir: &Path,
+    max_regions: usize,
+) -> Result<Vec<std::path::PathBuf>, DayflowError> {
+    let img = image::open(frame)
+        .map_err(|e| DayflowError::Invalid(format!("open {}: {e}", frame.display())))?;
+    let (fw, fh) = (img.width(), img.height());
+
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| DayflowError::Internal(format!("create {}: {e}", out_dir.display())))?;
+
+    let mut out = Vec::new();
+    for (n, r) in regions.iter().take(max_regions).enumerate() {
+        // Regions are screen-absolute and may extend past this frame (a window
+        // straddling two displays, or a stale region after a resize). Clamp
+        // rather than fail: a partial crop still carries text, and refusing the
+        // whole segment over one bad box loses the others too.
+        let x = r.bbox.x.min(fw.saturating_sub(1));
+        let y = r.bbox.y.min(fh.saturating_sub(1));
+        let w = r.bbox.w.min(fw - x);
+        let h = r.bbox.h.min(fh - y);
+        if w == 0 || h == 0 {
+            tracing::warn!(region = n, "region does not intersect the frame; skipped");
+            continue;
+        }
+
+        let cropped = img.clone().crop(x, y, w, h);
+        let path = out_dir.join(format!("r{n:02}_{x}_{y}_{w}x{h}.png"));
+        cropped
+            .save(&path)
+            .map_err(|e| DayflowError::Internal(format!("write {}: {e}", path.display())))?;
+        out.push(path);
+    }
+    Ok(out)
+}
+
+// ─── T029: residency policy (FR-008/013) ──────────────────────────────────
+
+/// How long the text tier should be kept loaded between samples.
+///
+/// **Measured, not assumed** (research R27): the text tier costs **3.74 s** to
+/// load cold against **0.18 s** warm, and the governor's own window for it is
+/// about **50 seconds** — SHORTER than the coarse 3-minute cadence, so under the
+/// default every sample pays the cold load.
+///
+/// The governor honours an explicit `keep_alive` per request, so this needs no
+/// background pinger and no keep-warm calls: it rides the requests Dayflow
+/// already makes. That also means the model unloads by itself when sampling
+/// stops, so the pinger's failure mode — holding 7.4 GB on a shared machine
+/// after the session died — cannot happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Residency {
+    /// Hold the tier across the gap between samples. For fine-grained focused
+    /// sessions, where 3.74 s on every sample is a real share of the work.
+    Resident,
+    /// Let the governor decide. The default: at the coarse cadence a cold load
+    /// is ~2% overhead, which is not worth holding 7.4 GB of a shared box.
+    #[default]
+    OnDemand,
+    /// Unload immediately after each call, paying the load every time, to leave
+    /// the machine free for other work.
+    Off,
+}
+
+impl Residency {
+    /// The `keep_alive` value to send with a perception request, if any.
+    ///
+    /// `Resident` asks for twice the interval plus a margin: exactly one
+    /// interval would race the next sample against its own expiry, and a sample
+    /// that arrives a second late would find the tier cold anyway — paying the
+    /// memory cost of residency AND the latency cost of a reload.
+    pub fn keep_alive(self, interval: std::time::Duration) -> Option<String> {
+        match self {
+            Self::Resident => Some(format!("{}s", interval.as_secs().saturating_mul(2) + 30)),
+            Self::OnDemand => None,
+            Self::Off => Some("0".to_string()),
+        }
+    }
+}
+
+/// What one segment's perception actually cost.
+///
+/// Recorded per segment (FR-013) INCLUDING any reload, because the reload is
+/// the thing residency exists to avoid: a latency figure that excluded it would
+/// report the policy as free.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentLatency {
+    /// Window sequence this covers.
+    pub sequence: u64,
+    /// Samples read by the text tier.
+    pub samples: usize,
+    /// Total wall time for the segment's perception.
+    pub total: std::time::Duration,
+    /// Of which was spent loading a cold model.
+    pub cold_load: std::time::Duration,
+}
+
+impl SegmentLatency {
+    /// Whether this segment paid for a cold model load.
+    ///
+    /// The threshold is well below the measured 3.74 s cold load and well above
+    /// the 0.18 s warm path, so it cannot confuse the two.
+    pub fn paid_a_cold_load(&self) -> bool {
+        self.cold_load >= std::time::Duration::from_millis(500)
+    }
+}
+
 // ─── T031: routing per-segment summarisation through the ladder ───────────
 
 /// Summarise one segment through the perception ladder.
@@ -846,6 +969,145 @@ mod tests {
         assert_eq!(dayflow_budget(60, 2, 3), 120, "600/60 -> 10 x 2 displays x 3 regions x 2");
 
         assert!(dayflow_budget(0, 0, 0) > 0, "degenerate config must not deadlock");
+    }
+
+    // ─── T027 / T029 ──────────────────────────────────────────────────────
+
+    fn two_pane_frame(dir: &Path) -> std::path::PathBuf {
+        // A 400x200 frame: left pane solid red, right pane solid blue, with a
+        // black gutter between. Colour stands in for text — what matters is
+        // that a crop of the left pane must contain NO blue, which is the
+        // pixel-level form of "the model never read across the gutter".
+        let mut img = image::RgbaImage::new(400, 200);
+        for (x, _y, px) in img.enumerate_pixels_mut() {
+            *px = if x < 190 {
+                image::Rgba([255, 0, 0, 255])
+            } else if x < 210 {
+                image::Rgba([0, 0, 0, 255])
+            } else {
+                image::Rgba([0, 0, 255, 255])
+            };
+        }
+        let p = dir.join("frame.png");
+        img.save(&p).unwrap();
+        p
+    }
+
+    fn region_at(x: u32, y: u32, w: u32, h: u32) -> crate::regions::Region {
+        crate::regions::Region::new(
+            crate::target::model::PixelRect { x, y, w, h },
+            crate::regions::Source::Wm,
+            crate::regions::Granularity::Pane,
+            0.8,
+        )
+    }
+
+    #[test]
+    fn each_pane_is_cropped_at_full_resolution_and_never_read_across_the_gutter() {
+        let dir = tempfile::tempdir().unwrap();
+        let frame = two_pane_frame(dir.path());
+        let regions = vec![region_at(0, 0, 190, 200), region_at(210, 0, 190, 200)];
+
+        let crops = crop_regions(&frame, &regions, &dir.path().join("crops"), 8).unwrap();
+        assert_eq!(crops.len(), 2, "one crop per pane, in reading order");
+
+        let left = image::open(&crops[0]).unwrap().to_rgba8();
+        let right = image::open(&crops[1]).unwrap().to_rgba8();
+
+        // FULL resolution: the crop is the region's real size, not a downscale.
+        assert_eq!((left.width(), left.height()), (190, 200));
+        assert_eq!((right.width(), right.height()), (190, 200));
+
+        // The column scramble: a downscaled full frame lets a model read
+        // straight across the gutter and interleave two documents into text
+        // that looks plausible and belongs to neither.
+        assert!(
+            left.pixels().all(|p| p.0[2] == 0),
+            "the left pane's crop must contain nothing from the right pane"
+        );
+        assert!(
+            right.pixels().all(|p| p.0[0] == 0),
+            "and vice versa"
+        );
+    }
+
+    #[test]
+    fn a_region_hanging_off_the_frame_is_clamped_not_fatal() {
+        // Regions are screen-absolute and can outlive the frame they are
+        // applied to — a window straddling two displays, or a stale box after a
+        // resize. Refusing the whole segment over one bad box would lose the
+        // good regions too.
+        let dir = tempfile::tempdir().unwrap();
+        let frame = two_pane_frame(dir.path());
+        let regions = vec![
+            region_at(300, 100, 400, 400), // hangs off both edges
+            region_at(0, 0, 100, 100),     // fine
+            region_at(9_000, 9_000, 50, 50), // entirely outside
+        ];
+
+        let crops = crop_regions(&frame, &regions, &dir.path().join("crops"), 8).unwrap();
+        assert_eq!(crops.len(), 3, "the off-frame box clamps to a 1px sliver, not an error");
+        let clamped = image::open(&crops[0]).unwrap();
+        assert_eq!((clamped.width(), clamped.height()), (100, 100), "clamped to the frame");
+    }
+
+    #[test]
+    fn the_region_cap_bounds_the_work_at_the_source() {
+        // This is the same number the perception budget is derived from, so a
+        // cap that did not bind would make the budget a fiction.
+        let dir = tempfile::tempdir().unwrap();
+        let frame = two_pane_frame(dir.path());
+        let regions: Vec<_> = (0..20).map(|i| region_at(i * 10, 0, 50, 50)).collect();
+        let crops = crop_regions(&frame, &regions, &dir.path().join("crops"), 4).unwrap();
+        assert_eq!(crops.len(), 4, "never more than max_regions crops");
+    }
+
+    #[test]
+    fn residency_rides_the_request_instead_of_a_background_pinger() {
+        // Measured (R27): the governor honours an explicit keep_alive, so
+        // residency needs no extra thread and no keep-warm calls — and the tier
+        // therefore unloads by itself when sampling stops, which a pinger
+        // holding 7.4 GB after a dead session would not.
+        let interval = std::time::Duration::from_secs(180);
+
+        assert_eq!(
+            Residency::Resident.keep_alive(interval).as_deref(),
+            Some("390s"),
+            "twice the interval plus margin: exactly one interval races the \
+             next sample against its own expiry"
+        );
+        assert_eq!(
+            Residency::OnDemand.keep_alive(interval),
+            None,
+            "the default sends nothing and lets the governor decide"
+        );
+        assert_eq!(Residency::Off.keep_alive(interval).as_deref(), Some("0"));
+        assert_eq!(Residency::default(), Residency::OnDemand);
+
+        // A finer cadence asks to be held for less wall time, not more.
+        let fine = Residency::Resident.keep_alive(std::time::Duration::from_secs(60));
+        assert_eq!(fine.as_deref(), Some("150s"));
+    }
+
+    #[test]
+    fn segment_latency_distinguishes_a_cold_load_from_a_warm_one() {
+        // Measured: 3.74 s cold against 0.18 s warm. A latency figure that
+        // excluded the reload would report residency as free.
+        let cold = SegmentLatency {
+            sequence: 1,
+            samples: 5,
+            total: std::time::Duration::from_millis(4_600),
+            cold_load: std::time::Duration::from_millis(3_740),
+        };
+        let warm = SegmentLatency {
+            sequence: 2,
+            samples: 5,
+            total: std::time::Duration::from_millis(900),
+            cold_load: std::time::Duration::from_millis(180),
+        };
+        assert!(cold.paid_a_cold_load());
+        assert!(!warm.paid_a_cold_load(), "the warm path must not read as a reload");
+        assert!(cold.total > warm.total);
     }
 
     // ─── T052/T053: content aggregation ───────────────────────────────────
