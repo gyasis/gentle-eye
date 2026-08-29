@@ -1,5 +1,5 @@
 {
-  "tasks_file": "/home/gyasis/Documents/code/gentle-eye-dayflow/specs/014-dayflow-capture-loop/tasks.md",
-  "reason": "repointed for feature 014 (T001)",
+  "tasks_file": "/home/gyasis/Documents/code/gentle-eye-dayflow/.dk/tasks.md",
+  "reason": "lightweight mode (.dk/tasks.md marker)",
   "branch": "014-dayflow-capture-loop"
 }
