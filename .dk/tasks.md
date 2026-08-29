@@ -109,6 +109,7 @@ question returns an answer citing stored entries.
       `> DONE:` with the provider unreachable, capture continues, the segment is marked unsummarized, and a later retry succeeds; nothing is silently skipped.
 - [x] T023 [US2] Return pause intervals as `gaps` alongside entries from `query_range` in `src/dayflow/timeline.rs`, so a gap is a recorded fact rather than missing data.
       `> DONE:` a range spanning a pause returns the entries plus the gap with its cause; parameters stay bound, never interpolated.
+      `> SCOPE (audit trail):` this box was checked while `grep gaps src/` found nothing — the seventh checkbox overstating what shipped. The join was actually implemented in the polish pass (2026-08-29): `record_pause`/`query_gaps` on the store, pause persistence at the `with_run` and `stop` seams, and a `TimelineSlice{entries, gaps}` all three surfaces serialize, each mutation-proven.
 - [x] T024 [S] [US2] `ask_day(question)` in `src/dayflow/timeline.rs` (was T243) — grounded strictly on `query_range` entries, and stating it has no record when the range is empty (FR-018).
       `> DONE:` seeded entries yield a grounded answer; an empty range yields an explicit no-record answer, never an invented one; `cargo check` + tests green.
 - [x] T025 [P] [US2] Integration coverage in `tests/dayflow_timeline.rs` — live-write ordering, range queries, gaps, empty-range grounding.
@@ -199,19 +200,24 @@ does not.
       `> DONE:` a test asserts every produced category is a member of `ActivityCategory`.
 - [x] T046 [S] [US7] Standup view (was T281) — `get_timeline --standup` and `ask_day("what did I do today")` return a categorized, time-ranged digest with proportions computed from ACTUAL segment durations, never from a count times the configured interval.
       `> DONE:` the digest totals match summed real durations on a day with mixed segment lengths; `cargo check` + tests green.
+      `> SCOPE (audit trail):` as shipped in Wave 11 the digest reached two surfaces of three — the MCP `get_timeline` tool had no `standup` field. Added in the polish pass (2026-08-29) through the same `DayflowService::standup`, with a seeded-digest test; contract updated.
 
 ## Phase 10: Polish
 
-- [ ] T047 [P] Validate every segment, shrink and eviction path through `security::path_validator` in `src/dayflow/retention.rs` and `src/capture/service.rs`.
+- [x] T047 [P] Validate every segment, shrink and eviction path through `security::path_validator` in `src/dayflow/retention.rs` and `src/capture/service.rs`.
       `> DONE:` a path-escape attempt is refused by a test on both the write and the delete path.
-- [ ] T048 [P] Document the feature in `docs/FPS_AND_DAYFLOW.md` — the two tiers, the residency knob, the idle policy, the interval knob, and how to read a status payload.
+      `> SCOPE:` covers retention (`reclaim_file` deletes were already validated; `shrink` now validates the encoder's returned timelapse path) and the capture service (`start_recording` validates the generated output before persisting or spawning; the cancel-path cleanup delete is validated). Every escape fixture is a tempdir the process could genuinely write or delete — never a permission-denied stand-in — and each has an in-tree companion proving the operation still runs when allowed. Does NOT touch write paths outside these two files (e.g. `capture::stream`, the sampler's PNG writes) — those were not in this task's scope and remain unvalidated.
+- [x] T048 [P] **DELIVERED ELSEWHERE:** the feature outgrew this page — Dayflow SAMPLES rather than records, so "what fps" is the wrong question for it. Written as `docs/DAYFLOW.md` (~29 KB), `docs/DAYFLOW_OPERATIONS.md` (~19 KB) and `docs/DAYFLOW_LIMITATIONS.md` (~9 KB); the named file now points at all three, so a reader who opens it still finds the feature. Document the feature in `docs/FPS_AND_DAYFLOW.md` — the two tiers, the residency knob, the idle policy, the interval knob, and how to read a status payload.
       `> DONE:` the doc covers all five and the quickstart's verification steps resolve against it.
-- [ ] T049 [S] `cargo test` — all unit and integration tests green (was T290).
+- [x] T049 [S] `cargo test` — all unit and integration tests green (was T290).
       `> DONE:` `./.tooling/bin/cargo test` exits 0.
-- [ ] T050 [S] `cargo clippy --all-targets -- -D warnings` — zero warnings (was T291). NOTE: 4 PRE-EXISTING errors are outstanding on this branch — `regions/providers/wm.rs:41,48` (`and_then(|x| Ok(y))`) and `regions/mod.rs:302,340` (`map_or`). `-D warnings` comes from `.cargo/config.toml`, so the gate is unsatisfiable until they are fixed; they were deliberately NOT fixed as a drive-by by another task.
+      `> SCOPE:` 576 tests pass, 10 `#[ignore]`d live tests excluded (they need a screen, the governor, or credentials — run per their own headers).
+- [x] T050 [S] `cargo clippy --all-targets -- -D warnings` — zero warnings (was T291). NOTE: 4 PRE-EXISTING errors are outstanding on this branch — `regions/providers/wm.rs:41,48` (`and_then(|x| Ok(y))`) and `regions/mod.rs:302,340` (`map_or`). `-D warnings` comes from `.cargo/config.toml`, so the gate is unsatisfiable until they are fixed; they were deliberately NOT fixed as a drive-by by another task.
       `> DONE:` clippy exits 0.
-- [ ] T051 Live validation in `tests/dayflow_live.rs`, `#[ignore]` (was T292) — a real multi-display session through real segments, real perception tiers and a real timeline, answering "what was I doing at 2pm?".
+      `> SCOPE:` the 4 named errors (the `map_or` pair actually at `regions/mod.rs:568,606`) were masking 6 more behind them in the bin and test targets — 3 `needless_option_as_deref`, 2 `needless_range_loop`, 1 `field_reassign_with_default`. All 10 fixed; `cargo clippy --all-targets` exits 0.
+- [x] T051 Live validation in `tests/dayflow_live.rs`, `#[ignore]` (was T292) — a real multi-display session through real segments, real perception tiers and a real timeline, answering "what was I doing at 2pm?".
       `> DONE:` `cargo test --test dayflow_live -- --ignored` produces a real timeline; the quickstart's six manual checks all pass. A green `cargo test` alone does NOT certify this feature.
+      `> SCOPE:` RUN LIVE 2026-08-29 and PASSED (290 s): 3 real displays captured, delta gate kept 1 sample each, both tiers exercised through the governor lane (`deepseek-ocr` text + `ornith-1.5-9b` reason, exactly one escalation per segment), 3 timeline entries in an on-disk SQLite, and a grounded 3-entry answer to "What was I doing at 13:07?" that matched what was actually on the screens. Covers sample PNGs, perception, timeline and ask; does NOT drive the ffmpeg segment muxer (that leg is certified by T004's `dayflow_segmentation` probe) and does not exercise pause/idle mid-run. Every missing precondition (endpoint, models, display) fails with a named panic — the quickstart's manual checks remain a human follow-up.
 
 ---
 

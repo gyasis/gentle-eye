@@ -1,5 +1,18 @@
 # FPS & Dayflow — how to choose a capture frame rate
 
+> **Looking for the Dayflow feature itself?** It is documented in full elsewhere,
+> because it outgrew this page: Dayflow SAMPLES the screen rather than recording
+> it, so "what fps" is the wrong question for it.
+>
+> | document | covers |
+> |---|---|
+> | **[DAYFLOW.md](DAYFLOW.md)** | what it is and is not, the two intents, the perception ladder, the timeline, retention, the digest, and how to read a status payload |
+> | **[DAYFLOW_OPERATIONS.md](DAYFLOW_OPERATIONS.md)** | every command and route, every config knob, troubleshooting |
+> | **[DAYFLOW_LIMITATIONS.md](DAYFLOW_LIMITATIONS.md)** | what is not built yet, and why |
+>
+> This page remains the guide for choosing an fps for ordinary **recording**.
+
+
 gentle-eye captures the screen at a configurable frame rate. The *right* fps
 depends almost entirely on **how long you intend to record** — short clips want
 smooth motion, all-day "dayflow" sessions want an aggressive timelapse so the
