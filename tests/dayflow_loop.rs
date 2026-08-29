@@ -157,6 +157,17 @@ fn a_failing_source_does_not_stop_the_others() {
     assert_eq!(drops.len(), 1, "exactly one drop");
     assert_eq!(drops[0].display_id, 1);
     assert_eq!(drops[0].reason, DropReason::SourceUnavailable);
+
+    // And the RUN must know about the hole: the sampler's ledger has to be
+    // synced into the run each tick, or `status` liveness reports zero
+    // frames_dropped forever while sources fail every interval — the
+    // false-green `sync_drops_from`'s own doc names, which is what happened
+    // until the W4 gate connected it.
+    assert_eq!(
+        run.frames_dropped(),
+        1,
+        "the drop was recorded in the sampler but never synced into the run"
+    );
 }
 
 /// An ENDED source is retired and never asked again; an OCCLUDED one is retried.

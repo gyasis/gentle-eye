@@ -289,6 +289,13 @@ impl CaptureLoop {
             self.scheduler.enqueue(window.clone());
         }
 
+        // The wire `sync_drops_from` exists for, actually connected: its own
+        // doc warns that "a caller that samples and never syncs would report
+        // zero holes while dropping frames" — which is exactly what this loop
+        // did until the W4 gate. Without this line, `status` liveness reports
+        // frames_dropped = 0 forever, however many intervals the sources lose.
+        run.sync_drops_from(&self.sampler);
+
         outcome
     }
 }
