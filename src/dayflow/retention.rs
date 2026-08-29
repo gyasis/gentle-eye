@@ -369,6 +369,22 @@ where
 
     let (timelapse, bytes) = encode(&segment.raw)?;
 
+    // The WRITE path is validated like the delete path. "The encoder is our
+    // own closure" is no more a safety argument than "the path came from our
+    // own records" is for deletes: the timelapse destination is built from
+    // configuration and records other processes write. A path outside the
+    // capture directory refuses the shrink — raw samples intact — rather than
+    // install a record pointing outside the tree retention manages. The stray
+    // file itself is deliberately left where the encoder put it: deleting
+    // outside the root is exactly what the validator forbids.
+    if let Err(e) = validator.validate(&timelapse) {
+        return Err(DayflowError::Retention(format!(
+            "refusing timelapse for window {} at {}: {e}",
+            segment.sequence,
+            timelapse.display()
+        )));
+    }
+
     // SC-008 checked HERE, before anything is deleted. A timelapse bigger than
     // the budget means the encode did not do what shrinking is for, and
     // deleting the raw frames on the strength of it would spend the only copy
@@ -1036,6 +1052,32 @@ mod tests {
         for s in segments.iter().filter(|s| !s.summarized) {
             assert!(s.raw.iter().all(|p| p.exists()), "window {} lost data", s.sequence);
         }
+    }
+
+    #[test]
+    fn a_timelapse_written_outside_the_capture_directory_refuses_the_shrink() {
+        // The WRITE-path twin of the delete test below. The escape target is a
+        // directory this process could genuinely write to — with no validation
+        // the shrink would complete, install the outside path in the record,
+        // and delete the raw samples. So completing-vs-refusing is the CODE
+        // deciding, not the OS.
+        let dir = tempfile::tempdir().unwrap();
+        let v = crate::security::path_validator::PathValidator::new(dir.path());
+        let mut s = tmp_segment(dir.path(), 1, true, 3);
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().join("escaped.mp4");
+        std::fs::write(&outside, b"x").unwrap();
+
+        let err = shrink(&mut s, "t", &v, |_| Ok((outside.clone(), 1_000)));
+        assert!(err.is_err(), "a timelapse outside the capture dir must refuse the shrink");
+        assert!(
+            err.unwrap_err().to_string().contains("refusing timelapse"),
+            "refused as an escape, not as some later failure"
+        );
+        assert!(s.raw.iter().all(|p| p.exists()), "the raw samples are untouched");
+        assert_eq!(s.warm_artifact, None, "the record never points outside the tree");
+        assert!(outside.exists(), "and the stray file is left, never deleted outside the root");
     }
 
     #[test]
