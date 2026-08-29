@@ -1702,6 +1702,76 @@ fn a_minimised_window_pauses_the_session_and_recovery_counts_its_first_frame() {
     assert_eq!(w.start_wall, at(60), "the window must open AT the recovery frame, not after it");
 }
 
+/// A frame arriving says NOTHING about the user's state: source recovery must
+/// lift only a `SourceOccluded` pause, never an `Idle` one. Frames keep
+/// changing while the user is away — that is the whole reason `Idle` exists —
+/// so a loop that resumed any automatic pause on any frame would un-pause an
+/// idle session on its very next tick, silently deleting idleness from the
+/// record.
+#[test]
+fn a_frame_does_not_lift_an_idle_pause() {
+    use gentle_eye::dayflow::window::PauseCause;
+
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+
+    // Drive the idle detector over its threshold (300s) + dwell (30s): first
+    // sighting arms the transition, the second fires it.
+    let idle = Some(std::time::Duration::from_secs(400));
+    let step = std::time::Duration::from_secs(30);
+    run.tick_idle(idle, step, at(30));
+    run.tick_idle(idle, step, at(60));
+    assert_eq!(
+        run.pauses_seen().last().map(|p| p.cause),
+        Some(PauseCause::Idle),
+        "fixture failure: the detector did not pause — the assertions below prove nothing"
+    );
+
+    // A producing source ticks while the user is idle.
+    let src = ScriptedFrames { frames: vec![quadrant_frame(5, 5)], cursor: 0, ordinal: 0 };
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
+    lp.tick(&mut run, at(90));
+
+    assert!(
+        run.pauses_seen().last().is_some_and(|p| p.to.is_none()),
+        "a frame lifted the IDLE pause — recovery must be scoped to SourceOccluded"
+    );
+}
+
+/// A retired source stays `Ended` in `describe()`, even when its window
+/// REAPPEARS under the same label: the contract says an ended source is never
+/// restarted, so the status surface must not advertise it Available while the
+/// loop will never ask it again — that is a liveness lie in the other
+/// direction.
+#[test]
+fn a_retired_source_is_described_as_ended_even_if_its_window_reappears() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let rect = gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 32, h: 32 };
+    let state = Arc::new(StdMutex::new(WindowState::Gone));
+    let win = WindowSource::new(
+        Box::new(ScriptedFrames { frames: vec![quadrant_frame(5, 5)], cursor: 0, ordinal: 0 }),
+        Box::new(ScriptedLocator { state: Arc::clone(&state) }),
+        "term",
+        0,
+    );
+    let mut lp = CaptureLoop::new(vec![Box::new(win)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let t = lp.tick(&mut run, at(30));
+    assert_eq!(t.retired, vec![0], "fixture failure: the gone window was not retired");
+
+    // The "same" window comes back — a NEW window with a matching label. The
+    // locator now says Visible, but the loop will never ask this source again.
+    *state.lock().unwrap() = WindowState::Visible(rect);
+    let described = lp.describe();
+    assert_eq!(
+        described[0].2,
+        Availability::Ended,
+        "describe() reports a retired source by its live locator answer — \
+         status would say Available for a source the loop never asks"
+    );
+}
+
 /// One occluded source AMONG PRODUCERS is a per-source drop, never a session
 /// gap — a gap claims capture stopped, which is false while the other source
 /// records (D014-9's first row, guarding the any/all boundary in the loop).
