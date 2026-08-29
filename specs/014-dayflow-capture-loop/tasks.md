@@ -22,7 +22,7 @@ line says so.
 
 - [x] T001 Repoint dev-kid at this feature: `dev-kid.yml` (`branch: 014-dayflow-capture-loop`) and `.dk/context.json` → `specs/014-dayflow-capture-loop/tasks.md`.
       `> DONE:` `python3 ~/.dev-kid/cli/resolver.py resolve` prints the 014 task file, not the 013 one. dev-kid's resolver reads `.dk/context.json` FIRST — a stale pointer silently runs the previous feature's tasks to completion and reports success.
-- [ ] T002 [P] Create the module skeleton: `src/dayflow/source/mod.rs` re-exported from `src/dayflow/mod.rs`, and empty `tests/dayflow_source.rs` / `tests/dayflow_loop.rs`.
+- [x] T002 [P] Create the module skeleton: `src/dayflow/source/mod.rs` re-exported from `src/dayflow/mod.rs`, and empty `tests/dayflow_source.rs` / `tests/dayflow_loop.rs`.
       `> DONE:` `cargo check` green with the new modules declared and nothing else changed.
 
 ## Phase 2: Foundational — the source abstraction (blocks every user story)

@@ -27,6 +27,7 @@ pub mod models;
 pub mod sampler;
 pub mod scheduler;
 pub mod service;
+pub mod source;
 pub mod standup;
 pub mod window;
 pub mod perception;
