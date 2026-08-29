@@ -163,7 +163,9 @@ pub enum DayflowHealth {
     Paused,
     /// The user turned capture off.
     Off,
-    /// Running, not paused, and producing NOTHING. This is the fault case.
+    /// Producing NOTHING with no benign explanation: running unpaused in
+    /// silence, or paused by a source that ENDED and can never come back on
+    /// its own. This is the fault case.
     Degraded,
     /// The session ended.
     Stopped,
@@ -274,7 +276,26 @@ impl DayflowLiveness {
         } else {
             match paused_cause {
                 Some(PauseCause::UserOff) => DayflowHealth::Off,
-                Some(_) => DayflowHealth::Paused,
+                // Exhaustive on purpose — no `Some(_)` arm. A wildcard here is
+                // the "variant added but omitted" trap this file's taxonomy
+                // macro exists to prevent: when `SourceOccluded`/`SourceEnded`
+                // were added to `PauseCause`, a catch-all silently read both as
+                // a benign pause. A new cause must fail to compile until its
+                // health is DECIDED.
+                //
+                // `SourceEnded` is the fault case, not a pause. It is not
+                // automatic (`PauseCause::is_automatic`) and carries no user
+                // intent, so the session will never produce again by itself —
+                // reporting Paused would read a dead source as quiet on
+                // purpose, which FR-113 forbids conflating, and a whole day
+                // could pass before anyone noticed.
+                Some(PauseCause::SourceEnded) => DayflowHealth::Degraded,
+                Some(
+                    PauseCause::Idle
+                    | PauseCause::Locked
+                    | PauseCause::DisplaySleep
+                    | PauseCause::SourceOccluded,
+                ) => DayflowHealth::Paused,
                 None => {
                     // Staleness is measured from the later of "last produced" and
                     // "started producing". Without the second term a freshly
@@ -619,7 +640,12 @@ mod liveness_tests {
     #[test]
     fn a_deliberate_pause_is_never_reported_as_a_fault() {
         // FR-032. Identical silence to the degraded case — only the cause differs.
-        for cause in [PauseCause::Idle, PauseCause::Locked, PauseCause::DisplaySleep] {
+        for cause in [
+            PauseCause::Idle,
+            PauseCause::Locked,
+            PauseCause::DisplaySleep,
+            PauseCause::SourceOccluded,
+        ] {
             let l = assess(99_999, Some(700), Some(cause), false);
             assert!(
                 !l.health.is_fault(),
@@ -627,6 +653,30 @@ mod liveness_tests {
             );
             assert!(!l.health.expects_output(), "a paused recorder is not expected to produce");
         }
+    }
+
+    #[test]
+    fn a_dead_source_is_a_fault_a_covered_one_is_not() {
+        // FR-113: unavailable, occluded and ended must not be conflated. An
+        // occluded source lifts on its own (`is_automatic`), so it is a pause.
+        // An ended source never lifts and nobody asked for it, so Paused would
+        // read a dead session as quiet on purpose — the operator would learn
+        // the truth a whole lost day later. The `Some(_)` catch-all this test
+        // replaced did exactly that.
+        let covered = assess(5_000, Some(700), Some(PauseCause::SourceOccluded), false);
+        assert_eq!(covered.health, DayflowHealth::Paused);
+        assert!(!covered.health.is_fault(), "occluded is quiet, not broken (FR-032)");
+
+        let dead = assess(5_000, Some(700), Some(PauseCause::SourceEnded), false);
+        assert_eq!(dead.health, DayflowHealth::Degraded);
+        assert!(
+            dead.health.is_fault(),
+            "an ended source cannot resume; silence about it is how a day is lost"
+        );
+        assert_ne!(
+            covered.health, dead.health,
+            "the two source states must be distinguishable from health alone"
+        );
     }
 
     #[test]
@@ -672,6 +722,8 @@ mod liveness_tests {
             Some(PauseCause::Locked),
             Some(PauseCause::DisplaySleep),
             Some(PauseCause::UserOff),
+            Some(PauseCause::SourceOccluded),
+            Some(PauseCause::SourceEnded),
         ] {
             for stopped in [true, false] {
                 let l = assess(999_999, Some(0), pause, stopped);

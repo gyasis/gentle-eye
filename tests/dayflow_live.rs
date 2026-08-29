@@ -42,6 +42,7 @@ use gentle_eye::dayflow::models::{ChunkRef, DayflowMode, RollingContext};
 use gentle_eye::dayflow::perception::PerceptionRouter;
 use gentle_eye::dayflow::sampler::{RawFrame, Sampler};
 use gentle_eye::dayflow::scheduler::entry_from;
+use gentle_eye::dayflow::source::display::tightly_packed;
 use gentle_eye::dayflow::service::DayflowService;
 use gentle_eye::dayflow::summarizer::{ChunkSummarizer, RoutedChunkSummarizer};
 use gentle_eye::dayflow::timeline::SqliteTimelineStore;
@@ -108,21 +109,6 @@ async fn preflight(endpoint: &str, text: &str, reason: &str) {
              (models present: {names:?})\n"
         );
     }
-}
-
-/// Copy a possibly stride-padded BGRA capture into tightly packed rows.
-fn tightly_packed(frame: &[u8], width: usize, height: usize) -> Vec<u8> {
-    let stride = frame.len().checked_div(height).unwrap_or(width * 4);
-    let row = width * 4;
-    if stride == row {
-        return frame.to_vec();
-    }
-    let mut out = Vec::with_capacity(row * height);
-    for y in 0..height {
-        let start = y * stride;
-        out.extend_from_slice(&frame[start..start + row]);
-    }
-    out
 }
 
 /// Strip a reasoning model's `<think>…</think>` preamble, if present.
