@@ -36,6 +36,16 @@ pub struct DayflowStatus {
     pub started_at: Option<DateTime<Utc>>,
     /// Displays being captured.
     pub displays: Vec<u32>,
+    /// Samples that will be read as WHOLE FRAMES because no usable region
+    /// sidecar reached disk beside them.
+    ///
+    /// Surfaced because the path FAILS OPEN by design: a missing sidecar is
+    /// read as "no regions" and the segment quietly summarises whole frames.
+    /// Nothing errors, every test passes, and crop-before-extract is simply
+    /// absent — so the only way this degradation is visible at all is a number
+    /// someone can look at (FR-103, 013/R29).
+    #[serde(default)]
+    pub samples_read_whole: u64,
     /// Liveness — whether it is actually producing, not merely alive.
     ///
     /// `None` when nothing is running, which is NOT a fault: a stopped session
@@ -52,6 +62,7 @@ impl DayflowStatus {
             session_id: None,
             started_at: None,
             displays: Vec::new(),
+            samples_read_whole: 0,
             liveness: None,
         }
     }
@@ -117,6 +128,8 @@ pub struct DayflowService {
     config: DayflowConfig,
     /// The running capture thread, when a session is driving itself.
     capture: Mutex<Option<CaptureHandle>>,
+    /// Whole-frame reads, shared with the capture loop on its own thread.
+    read_whole: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A capture thread and its stop signal.
@@ -142,6 +155,7 @@ impl DayflowService {
             store,
             config,
             capture: Mutex::new(None),
+            read_whole: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -206,6 +220,7 @@ impl DayflowService {
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let delta = self.config.delta.clone();
         let run = Arc::clone(&self.run);
+        let read_whole = Arc::clone(&self.read_whole);
         let store = Arc::clone(&self.store);
         let join = std::thread::spawn(move || {
             let sources = build_sources();
@@ -213,7 +228,11 @@ impl DayflowService {
                 sources,
                 crate::dayflow::sampler::Sampler::new(delta),
                 sample_dir,
-            );
+            )
+            // Share the SERVICE's counter: the loop lives on this thread and
+            // `status()` is called from another, so a loop-private counter
+            // would always read zero to every surface.
+            .with_read_whole_counter(read_whole);
             // The summarizer is async (the perception ladder); this thread is
             // not. A current-thread runtime keeps the capture thread the sole
             // owner of the loop (D014-10) while still able to await it.
@@ -361,6 +380,7 @@ impl DayflowService {
                 session_id: Some(run.session_id()),
                 started_at: Some(run.started_at()),
                 displays: run.displays().to_vec(),
+                samples_read_whole: self.read_whole.load(std::sync::atomic::Ordering::SeqCst),
                 liveness: Some(run.liveness(now)),
             },
         })

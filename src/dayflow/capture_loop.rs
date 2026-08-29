@@ -24,6 +24,8 @@
 //! and `dayflow::r#loop::` at every call site. Named `capture_loop` instead.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 use chrono::DateTime;
@@ -90,6 +92,16 @@ pub struct CaptureLoop {
     sample_dir: PathBuf,
     max_attempts: u32,
     retired: HashSet<u32>,
+    /// Samples that will be read as a WHOLE FRAME because no usable sidecar
+    /// reached disk beside them.
+    ///
+    /// Counted HERE, at capture, not at summarisation: the loop is the only
+    /// place that knows both causes — a source with no cascade, AND a sidecar
+    /// whose write failed. A count taken later would miss the second and
+    /// under-report the degradation it exists to expose.
+    ///
+    /// Shared so the service can report it while the thread owns the loop.
+    read_whole: Arc<AtomicU64>,
 }
 
 impl CaptureLoop {
@@ -106,7 +118,17 @@ impl CaptureLoop {
             sample_dir: sample_dir.into(),
             max_attempts: 2,
             retired: HashSet::new(),
+            read_whole: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Use a caller-owned whole-frame-read counter instead of a private one.
+    ///
+    /// Needed because the loop runs on the capture thread while `status()` is
+    /// answered on another: a private counter would read zero to every surface.
+    pub fn with_read_whole_counter(mut self, counter: Arc<AtomicU64>) -> Self {
+        self.read_whole = counter;
+        self
     }
 
     /// How many acquisition attempts the sampler may make per interval.
@@ -127,6 +149,17 @@ impl CaptureLoop {
     /// The summary queue, so the caller can settle due windows.
     pub fn scheduler(&mut self) -> &mut SummaryScheduler {
         &mut self.scheduler
+    }
+
+    /// A handle to the whole-frame-read counter, for a caller that owns the
+    /// loop on another thread and must still report it.
+    pub fn read_whole_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.read_whole)
+    }
+
+    /// How many samples will be read as whole frames.
+    pub fn samples_read_whole(&self) -> u64 {
+        self.read_whole.load(Ordering::SeqCst)
     }
 
     /// Drops recorded so far.
@@ -190,6 +223,51 @@ impl CaptureLoop {
         entries
     }
 
+    /// Write a kept sample's regions beside it, as the ladder expects.
+    ///
+    /// Only for a sample that reached disk: a skipped or dropped frame has no
+    /// path, and a sidecar with no sample would be read by nothing.
+    ///
+    /// `None` regions write NO file. That is the honest encoding — the ladder
+    /// reads a missing sidecar as "no cascade answered" and counts the
+    /// whole-frame read. Writing an empty array instead would claim the cascade
+    /// ran and found nothing, which is a different fact and would hide the
+    /// degradation `samples_read_whole` exists to surface (D014-3, FR-103).
+    ///
+    /// A write failure is logged, never raised: the sample itself is already
+    /// safe on disk, and losing a segment because its sidecar could not be
+    /// written would trade a degraded read for no data at all. Every gate in
+    /// this pipeline fails open.
+    fn write_sidecar(counter: &AtomicU64, record: &SampleRecord, regions: Option<&[Region]>) {
+        let Some(path) = record.path.as_ref() else {
+            // Nothing on disk: no sidecar to write, and nothing to read whole.
+            return;
+        };
+        let Some(regions) = regions else {
+            // No cascade answered. The missing file IS the honest encoding, and
+            // this sample will be read whole — count it.
+            counter.fetch_add(1, Ordering::SeqCst);
+            return;
+        };
+        let target = crate::dayflow::perception::regions_path(path);
+        match serde_json::to_string(regions) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&target, json) {
+                    // The regions existed but did not reach disk, so the ladder
+                    // will read the whole frame. Same visible outcome as no
+                    // cascade, so it must land in the same counter.
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tracing::warn!(error = %e, path = %target.display(),
+                        "could not write region sidecar; the segment will read whole frames");
+                }
+            }
+            Err(e) => {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tracing::warn!(error = %e, "regions could not be serialised");
+            }
+        }
+    }
+
     /// Take one frame from every live source and advance the pipeline.
     ///
     /// Failure of one source never ends the tick: the others are still asked,
@@ -198,6 +276,7 @@ impl CaptureLoop {
     /// still producing (D014-9).
     pub fn tick(&mut self, run: &mut DayflowRun, now: DateTime<Utc>) -> TickOutcome {
         let mut outcome = TickOutcome::default();
+        let read_whole = Arc::clone(&self.read_whole);
 
         for source in &mut self.sources {
             let ordinal = source.ordinal();
@@ -229,6 +308,13 @@ impl CaptureLoop {
                     );
                     match observed {
                         Ok(record) => {
+                            // T010: write the region sidecar BESIDE the sample
+                            // the gate kept. The ladder has consumed this file
+                            // since 013 and nothing ever produced it — and
+                            // because that read fails open, its absence was
+                            // invisible: whole-frame reads, every test green,
+                            // crop-before-extract entirely absent.
+                            Self::write_sidecar(&read_whole, &record, regions.as_deref());
                             if let Some(closed) = run.on_sample(ordinal, now) {
                                 outcome.closed.push(closed);
                             }

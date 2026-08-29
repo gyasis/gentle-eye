@@ -615,3 +615,244 @@ fn stop_capture_returns_promptly_despite_a_coarse_interval() {
     );
     assert!(!svc.capture_running());
 }
+
+// ── T010: the region sidecar producer ────────────────────────────────────────
+
+use gentle_eye::config::DayflowIntent;
+use gentle_eye::contracts::traits::{AnalysisResult, TimeRange, VisionProvider};
+use gentle_eye::contracts::errors::VisionError;
+use gentle_eye::dayflow::perception::{
+    dayflow_budget, regions_path, summarize_segment_via_ladder, PerceptionRouter, Tier,
+};
+use gentle_eye::regions::{Granularity, Source as RegionSource};
+use gentle_eye::target::model::PixelRect;
+use std::path::Path;
+
+/// Counts calls per tier so "did it crop?" is answerable by arithmetic.
+struct Counting {
+    tier: Tier,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl VisionProvider for Counting {
+    async fn analyze_video(&self, _: &Path, _: &str, _: Option<TimeRange>) -> Result<AnalysisResult, VisionError> {
+        panic!("dayflow samples frames; it must never analyse video")
+    }
+    async fn analyze_image(&self, _image: &Path, _prompt: &str) -> Result<AnalysisResult, VisionError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let text = match self.tier {
+            Tier::Text => "screen text".to_string(),
+            Tier::Reason => {
+                r#"{"category":"coding","app":"editor","activity":"refactor","detail":"d"}"#.into()
+            }
+        };
+        Ok(AnalysisResult {
+            request_id: uuid::Uuid::new_v4(),
+            analysis_text: text,
+            provider: "counting".into(),
+            model_used: "counting".into(),
+            processing_time_ms: 1,
+            token_count: None,
+            completed_at: Utc::now(),
+        })
+    }
+    async fn health_check(&self) -> Result<(), VisionError> { Ok(()) }
+    fn name(&self) -> &'static str { "counting" }
+    fn max_video_size(&self) -> u64 { 0 }
+    fn supports_native_video(&self) -> bool { false }
+    fn model(&self) -> &str { "counting" }
+}
+
+fn boxes(n: u32) -> Vec<Region> {
+    // Distinct, non-overlapping strips inside the 32x32 fake frame.
+    (0..n)
+        .map(|i| {
+            Region::new(
+                PixelRect { x: 0, y: i * 8, w: 32, h: 8 },
+                RegionSource::Wm,
+                Granularity::Pane,
+                1.0,
+            )
+            .on_display(0)
+        })
+        .collect()
+}
+
+/// The producer exists: a sidecar is written beside every KEPT sample, and the
+/// ladder consequently takes CROPS — the text tier is called once per region
+/// per sample, not once per sample. The consumer has existed since 013 with no
+/// producer, and because that read fails open the absence was invisible.
+#[tokio::test]
+async fn the_loop_writes_sidecars_and_the_ladder_crops() {
+    const REGIONS: u32 = 3;
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..6).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    let mut src = FakeSource::new(0, script);
+    src.regions = Some(boxes(REGIONS));
+    let sources: Vec<Box<dyn CaptureSource>> = vec![Box::new(src)];
+    let mut lp = CaptureLoop::new(sources, Sampler::new(DeltaConfig::default()), dir.path());
+
+    // Drive a few ticks and collect the samples the gate actually kept.
+    let mut samples = Vec::new();
+    for k in 1..=3 {
+        let t = lp.tick(&mut run, at(k * 30));
+        for s in &t.sources {
+            if let Some(p) = s.record.as_ref().and_then(|r| r.path.clone()) {
+                samples.push(p);
+            }
+        }
+    }
+    assert!(!samples.is_empty(), "the gate kept no samples — nothing to crop");
+
+    // Every kept sample has its sidecar, and it round-trips.
+    for p in &samples {
+        let side = regions_path(p);
+        assert!(side.exists(), "no sidecar beside {}", p.display());
+        let parsed: Vec<Region> =
+            serde_json::from_str(&std::fs::read_to_string(&side).unwrap()).expect("sidecar parses");
+        assert_eq!(parsed.len(), REGIONS as usize, "sidecar lost regions");
+    }
+
+    // The ladder must now CROP: text calls = samples x regions, plus one reason call.
+    let text = Arc::new(AtomicUsize::new(0));
+    let reason = Arc::new(AtomicUsize::new(0));
+    let router = PerceptionRouter::new(
+        Arc::new(Counting { tier: Tier::Text, calls: Arc::clone(&text) }),
+        Arc::new(Counting { tier: Tier::Reason, calls: Arc::clone(&reason) }),
+        dayflow_budget(60, 1, 64),
+    );
+    let (_summary, latency) =
+        summarize_segment_via_ladder(&router, &samples, "what happened?", 0, REGIONS as usize)
+            .await
+            .expect("ladder runs");
+
+    assert_eq!(
+        text.load(Ordering::SeqCst),
+        samples.len() * REGIONS as usize,
+        "the text tier was called once per SAMPLE, not once per region — the ladder \
+         read whole frames, so the sidecar never reached it"
+    );
+    assert_eq!(reason.load(Ordering::SeqCst), 1, "the reasoning tier runs once per segment");
+    assert_eq!(
+        latency.samples_read_whole, 0,
+        "no sample should have been read whole: every one had a sidecar"
+    );
+    let _ = DayflowIntent::Activity;
+}
+
+/// The converse, and the one that matters for honesty: a source with NO cascade
+/// writes NO sidecar, and the ladder COUNTS the whole-frame read rather than
+/// merely surviving it.
+#[tokio::test]
+async fn a_cascade_less_source_writes_no_sidecar_and_is_counted() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..6).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    let sources: Vec<Box<dyn CaptureSource>> =
+        vec![Box::new(FakeSource::new(0, script).with_no_cascade())];
+    let mut lp = CaptureLoop::new(sources, Sampler::new(DeltaConfig::default()), dir.path());
+
+    let mut samples = Vec::new();
+    for k in 1..=3 {
+        let t = lp.tick(&mut run, at(k * 30));
+        for s in &t.sources {
+            if let Some(p) = s.record.as_ref().and_then(|r| r.path.clone()) {
+                samples.push(p);
+            }
+        }
+    }
+    assert!(!samples.is_empty());
+    for p in &samples {
+        assert!(
+            !regions_path(p).exists(),
+            "a source with no cascade must write NO sidecar — an empty one would claim \
+             the cascade ran and found nothing, hiding the whole-frame read"
+        );
+    }
+
+    let text = Arc::new(AtomicUsize::new(0));
+    let reason = Arc::new(AtomicUsize::new(0));
+    let router = PerceptionRouter::new(
+        Arc::new(Counting { tier: Tier::Text, calls: Arc::clone(&text) }),
+        Arc::new(Counting { tier: Tier::Reason, calls: Arc::clone(&reason) }),
+        dayflow_budget(60, 1, 64),
+    );
+    let (_s, latency) =
+        summarize_segment_via_ladder(&router, &samples, "what happened?", 0, 3)
+            .await
+            .expect("ladder runs");
+
+    assert_eq!(text.load(Ordering::SeqCst), samples.len(), "one whole-frame read per sample");
+    assert_eq!(
+        latency.samples_read_whole,
+        samples.len(),
+        "the degradation must be COUNTED, not merely survived"
+    );
+}
+
+// ── T011: the degradation is VISIBLE, not merely survived ────────────────────
+
+/// A session whose source has no cascade reports a NON-ZERO whole-frame count
+/// in `status`, through every surface.
+///
+/// The sidecar read fails open by design: a missing file is read as "no
+/// regions" and the segment quietly summarises whole frames. Nothing errors and
+/// every test passes — so a number someone can look at is the ONLY thing that
+/// makes crop-before-extract's absence detectable (FR-103, 013/R29).
+#[test]
+fn a_cascade_less_session_reports_whole_frame_reads_on_every_surface() {
+    use gentle_eye::dayflow::http;
+    use gentle_eye::dayflow::service::DayflowService;
+    use gentle_eye::dayflow::timeline::SqliteTimelineStore;
+
+    let store = Arc::new(SqliteTimelineStore::new(Arc::new(std::sync::Mutex::new(
+        gentle_eye::storage::database::init_in_memory().expect("db"),
+    ))));
+    let svc = DayflowService::new(store, DayflowConfig::default());
+    svc.start(DayflowMode::Session, vec![0], Utc::now()).expect("session starts");
+
+    // Baseline: nothing degraded yet.
+    assert_eq!(svc.status(Utc::now()).unwrap().samples_read_whole, 0);
+
+    let dir = tempfile::tempdir().unwrap();
+    svc.start_capture(
+        Box::new(|| {
+            let script: Vec<Option<u8>> = (0..200)
+                .map(|i| Some((i as u8).wrapping_mul(90)))
+                .collect();
+            vec![Box::new(FakeSource::new(0, script).with_no_cascade()) as Box<dyn CaptureSource>]
+        }),
+        Arc::new(FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 }),
+        dir.path().to_path_buf(),
+        std::time::Duration::from_millis(5),
+    )
+    .expect("capture starts");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline
+        && svc.status(Utc::now()).unwrap().samples_read_whole == 0
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    svc.stop_capture().expect("capture stops");
+
+    let n = svc.status(Utc::now()).unwrap().samples_read_whole;
+    assert!(n > 0, "a cascade-less session reported {n} whole-frame reads — the degradation is invisible");
+
+    // Surface 1 — the service call the CLI makes.
+    assert_eq!(svc.status(Utc::now()).unwrap().samples_read_whole, n);
+    // Surface 2 — HTTP.
+    let (code, body) = http::route("GET", "/dayflow/status", "", &svc);
+    assert_eq!(code, "200 OK");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        v["samples_read_whole"].as_u64(),
+        Some(n),
+        "HTTP status omitted the whole-frame count: {body}"
+    );
+    // Surface 3 — MCP serialises the same struct; assert the shape it emits.
+    let mcp = serde_json::to_value(svc.status(Utc::now()).unwrap()).expect("serialises");
+    assert_eq!(mcp["samples_read_whole"].as_u64(), Some(n));
+}
