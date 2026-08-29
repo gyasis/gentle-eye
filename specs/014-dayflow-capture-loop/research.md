@@ -307,3 +307,33 @@ The risk as recorded then: a panic inside the capture thread's tick produces a
 session that reports healthy while having skipped a sample. (Closed by the
 `catch_unwind` resolution above — the false-healthy window is bounded by the
 staleness threshold and the halt is immediately visible in `capture_running`.)
+
+## D014-12 — The governed lane drops connections on a cold model load (measured)
+
+**Measured 2026-08-29**, live, against the Atelier governor
+(`192.168.0.159:8799/llm/ollama`) with three real displays:
+
+| run | models | result |
+|---|---|---|
+| 1 | cold | **FAILED** — `error sending request` on `/api/generate` at `ask_day` |
+| 2 | warm | **PASSED** — grounded answer over 3 entries, 277s |
+
+The pipeline was identical in both runs and correct in both: capture, gate,
+ladder and timeline all produced accurate summaries of the real screens. Only
+the final `ask` call differed. A separate probe measured a **95 s** cold load of
+`ornith-1.5-9b:latest` on that lane.
+
+**Consequence for T024/T025 (the real `ask_day` answerer).** The 013 live test's
+ask path is an ad-hoc `reqwest` client with a FLAT 180 s timeout and NO retry.
+That shape fails exactly as observed: a single flat budget cannot distinguish a
+dead endpoint from a legitimate cold load, and a transport error during a model
+swap is expected behaviour on the governed lane, not an exception.
+
+The production answerer MUST have:
+1. a **split timeout** — short `connect` (~3 s, so a wrong URL fails fast) and a
+   generous `read` (~120 s, so a cold load completes);
+2. **one retry** on a transport error, because the first question after an idle
+   period is precisely when the model is cold — the common case, not the edge.
+
+Without both, a user's first `ask_day` of the day fails while every test passes.
+Reference implementation of the split-timeout shape: `atelier-governor.md` R-AG7.
