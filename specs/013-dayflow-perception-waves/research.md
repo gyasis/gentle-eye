@@ -2278,3 +2278,46 @@ makes the current behaviour survivable rather than correct. Also recorded in the
 **A limitation written down beside the code is worth more than one fixed badly.** Both of these are
 one-line comments that will still be true, and still findable, when someone changes the thing they
 constrain.
+
+
+## R39 — Wave 11 (US7): counting entries is a legibly wrong way to measure a day (2026-08-26)
+
+The standup digest. One property carries the whole feature, and T046 names it: proportions come from
+**real durations**, never from a count times the configured interval.
+
+The counting version is tempting because it is one line and reads as correct. It is wrong because
+**windows genuinely differ in length** — a pause truncates one, an interval change resizes the next,
+a display disconnects mid-window, and the last window of a session ends when the session does. So a
+day with one long meeting and four short interruptions reports, by count, that the interruptions
+were 80% of it; by time, the meeting was 88%. **The ordering inverts.** That is not a rounding
+error, it is a digest that is confidently and legibly wrong, and a reader has no way to tell.
+
+The fixture that pins it has to separate the two axes deliberately — fewer entries with more time
+against more entries with less — and asserts that separation before asserting the outcome, so it
+cannot pass by coincidence the way R30's identity fixture did.
+
+### Recorded time is not the span of the range
+
+A four-hour range holding twenty minutes of entries recorded **twenty minutes**. Reporting the span
+as the total attributes unrecorded time to whatever happened to be nearby. Both numbers are in the
+digest, and when the recorded share drops below half the range the rendering says so **first**,
+before any percentage — a reader who takes the percentages at face value without that line believes
+the day is accounted for.
+
+The inverse matters too, and has its own test: a warning that fires always is noise.
+
+### Entry counts are reported ALONGSIDE durations, never instead
+
+"Eleven short interruptions" and "one long meeting" are different facts and both are useful. The
+digest carries `seconds` and `entries` per category precisely so a reader can see the difference
+that counting alone destroys.
+
+### A hardcoded taxonomy in a prompt drifts silently
+
+The summarizer prompt listed the categories as a string literal. Add a variant to
+`ActivityCategory` and the model is never told about it, so every entry that should carry it comes
+back as `Other` — and **nothing anywhere reports a problem**. Now derived from
+`ActivityCategory::ALL`, with a test asserting the prompt contains every member.
+
+**A literal that restates an enum is a second source of truth with no compiler between them.** The
+same shape as R37's three copies of the range default, in a prompt instead of a function.

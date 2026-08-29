@@ -262,3 +262,66 @@ fn a_paused_session_is_not_reported_as_degraded_on_any_surface() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_ne!(v["liveness"]["health"], "degraded", "{body}");
 }
+
+#[test]
+fn the_standup_digest_reads_the_same_through_every_surface() {
+    // US7's independent test: seed a day, request the standup shape, get a
+    // categorised time-ranged digest — and get the SAME one whichever surface
+    // asks, because the digest is computed once in the service.
+    let svc = service();
+    let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let push = |from_m: i64, to_m: i64, cat: ActivityCategory, what: &str| {
+        svc.insert_entry(&TimelineEntry {
+            id: Uuid::new_v4(),
+            recording_id: Uuid::new_v4(),
+            start_time: base + chrono::Duration::minutes(from_m),
+            end_time: base + chrono::Duration::minutes(to_m),
+            category: cat,
+            app: "app".into(),
+            activity: what.into(),
+            summary: format!("did {what}"),
+            provenance: None,
+        })
+        .unwrap();
+    };
+    // Deliberately mixed lengths: one long meeting, several short interruptions.
+    push(0, 60, ActivityCategory::Meeting, "planning");
+    push(60, 62, ActivityCategory::Comms, "slack");
+    push(62, 64, ActivityCategory::Comms, "slack");
+    push(64, 90, ActivityCategory::Coding, "the ladder");
+
+    let from = base.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let to = (base + chrono::Duration::hours(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (code, body) = http::route(
+        "GET",
+        "/dayflow/standup",
+        &format!("from={from}&to={to}"),
+        &svc,
+    );
+    assert_eq!(code, "200 OK", "{body}");
+    let http_digest: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    let direct = svc
+        .standup(base, base + chrono::Duration::hours(2))
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&direct).unwrap(),
+        http_digest,
+        "the same digest, byte for byte, whichever surface asked"
+    );
+
+    // And the proportions are durations, not counts: two comms entries against
+    // one meeting entry, and the meeting is the bulk of the day.
+    let top = &direct.categories[0];
+    assert_eq!(top.category, ActivityCategory::Meeting);
+    assert_eq!(top.entries, 1);
+    assert!(top.percent > 60.0, "one long entry outweighs several short: {top:?}");
+    let comms = direct
+        .categories
+        .iter()
+        .find(|c| c.category == ActivityCategory::Comms)
+        .unwrap();
+    assert_eq!(comms.entries, 2, "more entries…");
+    assert!(comms.percent < 10.0, "…and far less time: {comms:?}");
+}

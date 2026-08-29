@@ -195,9 +195,9 @@ does not.
 
 **Independent test**: seed a day, request the standup shape, get a categorized time-ranged digest.
 
-- [ ] T045 [US7] Apply the activity-category taxonomy in the summarizer prompt in `src/dayflow/summarizer.rs` (was T280) so every entry carries a category.
+- [x] T045 [US7] Apply the activity-category taxonomy in the summarizer prompt in `src/dayflow/summarizer.rs` (was T280) so every entry carries a category.
       `> DONE:` a test asserts every produced category is a member of `ActivityCategory`.
-- [ ] T046 [S] [US7] Standup view (was T281) — `get_timeline --standup` and `ask_day("what did I do today")` return a categorized, time-ranged digest with proportions computed from ACTUAL segment durations, never from a count times the configured interval.
+- [x] T046 [S] [US7] Standup view (was T281) — `get_timeline --standup` and `ask_day("what did I do today")` return a categorized, time-ranged digest with proportions computed from ACTUAL segment durations, never from a count times the configured interval.
       `> DONE:` the digest totals match summed real durations on a day with mixed segment lengths; `cargo check` + tests green.
 
 ## Phase 10: Polish

@@ -175,6 +175,20 @@ impl DayflowService {
         Ok(self.store.query_range(from, to)?)
     }
 
+    /// The day, categorised (US7).
+    ///
+    /// Lives here rather than in each surface for the same reason
+    /// [`resolve_range`] does: a digest computed differently per surface is a
+    /// day that looks different depending on how you asked about it.
+    pub fn standup(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<crate::dayflow::standup::Standup, DayflowError> {
+        let entries = self.timeline(from, to)?;
+        Ok(crate::dayflow::standup::digest(&entries, from, to))
+    }
+
     /// Answer a question about a range, grounded strictly on stored entries.
     pub fn ask<F>(
         &self,

@@ -148,6 +148,20 @@ pub fn route_at(
                 Err(e) => ("500 Internal Server Error", json_err(&e.to_string())),
             },
         },
+        "/dayflow/standup" => match crate::dayflow::service::resolve_range(
+            param(query, "from").as_deref(),
+            param(query, "to").as_deref(),
+            now,
+        ) {
+            Err(e) => ("400 Bad Request", json_err(&e)),
+            Ok((from, to)) => match service.standup(from, to) {
+                Ok(s) => (
+                    "200 OK",
+                    serde_json::to_string(&s).unwrap_or_else(|_| json_err("serialize")),
+                ),
+                Err(e) => ("500 Internal Server Error", json_err(&e.to_string())),
+            },
+        },
         "/dayflow/ask" => {
             let question = param(query, "question").unwrap_or_default();
             if question.is_empty() {

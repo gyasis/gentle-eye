@@ -1158,6 +1158,22 @@ fn dayflow_command(
         }
         "stop" => serde_json::json!({ "windows_closed": df.stop(now)?.len() }),
         "status" => serde_json::to_value(df.status(now)?)?,
+        "standup" => {
+            let (from, to) = range(rest)?;
+            let s = df.standup(from, to)?;
+            serde_json::json!({
+                "digest": s,
+                "text": gentle_eye::dayflow::standup::render(&s),
+            })
+        }
+        "timeline" if rest.iter().any(|a| a == "--standup") => {
+            let (from, to) = range(rest)?;
+            let s = df.standup(from, to)?;
+            serde_json::json!({
+                "digest": s,
+                "text": gentle_eye::dayflow::standup::render(&s),
+            })
+        }
         "timeline" => {
             let (from, to) = range(rest)?;
             serde_json::json!({

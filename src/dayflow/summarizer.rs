@@ -48,8 +48,13 @@ pub fn build_chunk_prompt(prior: &RollingContext) -> String {
         "You are summarizing one screen-recording chunk into a single activity record.\n\
          CONTEXT SUMMARY FROM PRIOR CHUNKS:\n{context}\n\n\
          Return ONLY a JSON object: \
-         {{\"category\":\"coding|docs|comms|browsing|meeting|idle|other\",\
-         \"app\":\"...\",\"activity\":\"short label\",\"detail\":\"1-2 sentences\"}}"
+         {{\"category\":\"{categories}\",\
+         \"app\":\"...\",\"activity\":\"short label\",\"detail\":\"1-2 sentences\"}}",
+        categories = ActivityCategory::ALL
+            .iter()
+            .map(|c| c.wire_name())
+            .collect::<Vec<_>>()
+            .join("|")
     )
 }
 
@@ -521,6 +526,50 @@ mod tests {
         }
         fn model(&self) -> &str {
             "stub"
+        }
+    }
+
+    #[test]
+    fn the_prompt_lists_every_category_in_the_taxonomy() {
+        // T045. The list used to be a string literal, which drifts silently:
+        // add a variant and the model is never told about it, so every entry
+        // that should carry it comes back as `Other` and nothing reports a
+        // problem. Derived from the enum now, and asserted against it.
+        let prompt = build_chunk_prompt(&RollingContext::default());
+        for c in ActivityCategory::ALL {
+            assert!(
+                prompt.contains(c.wire_name()),
+                "the model is never told about `{}`: {prompt}",
+                c.wire_name()
+            );
+        }
+    }
+
+    #[test]
+    fn every_category_the_parser_produces_is_a_taxonomy_member() {
+        // Including the ones it does not recognise: an unknown token must fall
+        // back to `Other` rather than being dropped, because dropping the
+        // category silently loses the entry's classification while keeping the
+        // entry — the reader then sees an uncategorised hour and no reason why.
+        let chunk = ChunkRef {
+            index: 0,
+            path: std::path::PathBuf::from("/tmp/x.mp4"),
+            start_wall: Utc::now(),
+            end_wall: Utc::now(),
+            display_id: 0,
+            sequence: 0,
+            summarized: false,
+        };
+        for token in ["coding", "docs", "comms", "browsing", "meeting", "idle", "other",
+                      "CODING", "  docs  ", "wat", "", "null", "42"] {
+            let json = format!(
+                r#"{{"category":"{token}","app":"a","activity":"b","detail":"c"}}"#
+            );
+            let s = parse_chunk_summary(&chunk, &json);
+            assert!(
+                ActivityCategory::ALL.contains(&s.category),
+                "token {token:?} produced a category outside the taxonomy"
+            );
         }
     }
 }

@@ -35,6 +35,38 @@ pub enum ActivityCategory {
     Other,
 }
 
+impl ActivityCategory {
+    /// Every category, in taxonomy order.
+    ///
+    /// Exists so the summarizer prompt is DERIVED from the enum rather than
+    /// repeating it as a string literal. A hardcoded list in a prompt drifts
+    /// silently: add a variant and the model is never told about it, so every
+    /// entry that should carry it comes back as `Other` and nothing anywhere
+    /// reports a problem.
+    pub const ALL: [Self; 7] = [
+        Self::Coding,
+        Self::Docs,
+        Self::Comms,
+        Self::Browsing,
+        Self::Meeting,
+        Self::Idle,
+        Self::Other,
+    ];
+
+    /// The token used on the wire, in prompts, and in the database.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Coding => "coding",
+            Self::Docs => "docs",
+            Self::Comms => "comms",
+            Self::Browsing => "browsing",
+            Self::Meeting => "meeting",
+            Self::Idle => "idle",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// One recording mode for a dayflow session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
