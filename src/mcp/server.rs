@@ -224,6 +224,19 @@ impl GentleEyeServer {
             Ok(r) => r,
             Err(e) => return err_text(e),
         };
+        // `standup: true` returns the categorized digest (FR-028) — through
+        // the same DayflowService::standup the CLI and HTTP surfaces call, so
+        // the digest cannot differ by surface. Wave 11's parity work shipped
+        // it on two surfaces out of three; the MCP tool was the missing one.
+        if input.standup.unwrap_or(false) {
+            return match self.dayflow.standup(from, to) {
+                Ok(s) => ok_json(serde_json::json!({
+                    "digest": s,
+                    "text": crate::dayflow::standup::render(&s),
+                })),
+                Err(e) => err_text(e.to_string()),
+            };
+        }
         match self.dayflow.timeline(from, to) {
             Ok(slice) => ok_json(serde_json::json!({
                 "from": from.to_rfc3339(),
@@ -926,7 +939,7 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-08-26T15:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let out = s.tool_get_timeline_at(GetTimelineInput { from: None, to: None }, now);
+        let out = s.tool_get_timeline_at(GetTimelineInput { from: None, to: None, standup: None }, now);
         let text = body_of(&out);
         assert!(text.contains("2026-08-26T00:00:00"), "starts at midnight: {text}");
         assert!(text.contains("2026-08-26T15:30:00"), "ends at now: {text}");
@@ -947,7 +960,7 @@ mod tests {
             .with_run(|r| r.turn_off(now + chrono::Duration::minutes(1)))
             .unwrap();
         let out = s.tool_get_timeline_at(
-            GetTimelineInput { from: None, to: Some("2026-08-26T17:00:00Z".into()) },
+            GetTimelineInput { from: None, to: Some("2026-08-26T17:00:00Z".into()), standup: None },
             now,
         );
         // `body_of` is a Debug render of the content, not raw JSON — assert on
@@ -956,6 +969,42 @@ mod tests {
         let text = body_of(&out);
         assert!(text.contains("gaps"), "the MCP surface returns gaps: {text}");
         assert!(text.contains("user_off"), "with the recorded cause: {text}");
+    }
+
+    #[test]
+    fn the_mcp_standup_flag_returns_the_same_digest_the_other_surfaces_compute() {
+        // FR-028 through the MCP surface. Seeded with a real entry so the
+        // digest has content — a key-presence check on an empty day would pass
+        // against a surface that computes nothing.
+        let s = test_server();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-26T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        s.dayflow
+            .insert_entry(&crate::dayflow::models::TimelineEntry {
+                id: uuid::Uuid::new_v4(),
+                recording_id: uuid::Uuid::new_v4(),
+                start_time: base,
+                end_time: base + chrono::Duration::minutes(30),
+                category: crate::dayflow::models::ActivityCategory::Meeting,
+                app: "zoom".into(),
+                activity: "planning".into(),
+                summary: "sprint planning".into(),
+                provenance: None,
+            })
+            .unwrap();
+        let out = s.tool_get_timeline_at(
+            GetTimelineInput {
+                from: Some("2026-08-26T00:00:00Z".into()),
+                to: Some("2026-08-26T17:00:00Z".into()),
+                standup: Some(true),
+            },
+            base + chrono::Duration::hours(8),
+        );
+        let text = body_of(&out);
+        assert!(text.contains("digest"), "returns the digest shape: {text}");
+        assert!(text.contains("meeting"), "with the seeded category: {text}");
+        assert!(text.contains("planning"), "and its activity: {text}");
     }
 
     #[test]

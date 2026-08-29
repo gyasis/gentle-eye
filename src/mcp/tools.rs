@@ -608,6 +608,11 @@ pub struct GetTimelineInput {
     pub from: Option<String>,
     /// End of the range, RFC 3339. Defaults to now.
     pub to: Option<String>,
+    /// Return the categorized standup digest for the range instead of the raw
+    /// entries (FR-028) — the same digest the CLI's `--standup` and HTTP's
+    /// `/dayflow/standup` produce, computed by the one shared engine.
+    #[serde(default)]
+    pub standup: Option<bool>,
 }
 
 /// Input for the `ask_day` tool.
