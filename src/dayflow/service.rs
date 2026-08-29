@@ -124,8 +124,13 @@ pub struct DayflowService {
 /// The loop is deliberately NOT `Send` (D014-10): platform capture handles are
 /// thread-affine, so the sources are BUILT on the capture thread and never
 /// cross it. The service therefore holds a control handle, not the loop.
+///
+/// The stop signal is a channel, not a flag: the thread WAITS on it between
+/// ticks, so `stop_capture` interrupts the wait instead of blocking its caller
+/// for a whole interval. With a flag + `sleep` a coarse 3-minute cadence made
+/// `dayflow stop` hang for up to 3 minutes.
 struct CaptureHandle {
-    stop: Arc<std::sync::atomic::AtomicBool>,
+    stop: std::sync::mpsc::Sender<()>,
     join: std::thread::JoinHandle<()>,
 }
 
@@ -168,10 +173,18 @@ impl DayflowService {
     /// unusable — and for scrap's X11 capturer, would not compile.
     ///
     /// The thread ticks on `interval`, driving the same pipeline the tests
-    /// drive. It stops when `stop_capture` is called or the session ends.
+    /// drive, and between ticks it settles due windows through `summarizer`,
+    /// writing the resulting entries to the timeline store. That second half is
+    /// not optional plumbing: without it a started session takes samples and
+    /// closes windows into a queue nothing ever drains, and no entry appears
+    /// all day (FR-014) — the exact "wired but inert" shape 013/R29 names.
+    ///
+    /// It stops when `stop_capture` is called, when the session ends, or when a
+    /// tick panics (see the `catch_unwind` note in the body).
     pub fn start_capture(
         &self,
         build_sources: Box<dyn FnOnce() -> Vec<Box<dyn crate::dayflow::source::CaptureSource>> + Send>,
+        summarizer: Arc<dyn crate::dayflow::summarizer::ChunkSummarizer + Send + Sync>,
         sample_dir: std::path::PathBuf,
         interval: std::time::Duration,
     ) -> Result<(), DayflowError> {
@@ -179,13 +192,21 @@ impl DayflowService {
             .capture
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        // Reap a thread that exited on its own (session ended, or a tick
+        // panicked). Leaving it here would refuse every later start with
+        // AlreadyRunning for a thread that is not running at all.
+        if guard.as_ref().is_some_and(|h| h.join.is_finished()) {
+            if let Some(h) = guard.take() {
+                let _ = h.join.join();
+            }
+        }
         if guard.is_some() {
             return Err(DayflowError::AlreadyRunning);
         }
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = Arc::clone(&stop);
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let delta = self.config.delta.clone();
         let run = Arc::clone(&self.run);
+        let store = Arc::clone(&self.store);
         let join = std::thread::spawn(move || {
             let sources = build_sources();
             let mut lp = crate::dayflow::capture_loop::CaptureLoop::new(
@@ -193,25 +214,94 @@ impl DayflowService {
                 crate::dayflow::sampler::Sampler::new(delta),
                 sample_dir,
             );
-            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+            // The summarizer is async (the perception ladder); this thread is
+            // not. A current-thread runtime keeps the capture thread the sole
+            // owner of the loop (D014-10) while still able to await it.
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(error = %e, "capture thread could not build a runtime; capture never starts");
+                    return;
+                }
+            };
+            loop {
                 // `Utc::now()` appears HERE and nowhere below it. This is the
                 // edge that supplies the clock; every decision downstream takes
                 // `now` as a parameter, which is what makes the loop testable
                 // at all (T007, 013/R36).
                 let now = Utc::now();
-                let mut guard = match run.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                match guard.as_mut() {
-                    Some(active) => {
-                        lp.tick(active, now);
+                let session_id = {
+                    let mut guard = match run.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    match guard.as_mut() {
+                        Some(active) => {
+                            let sid = active.session_id();
+                            // D014-11: `on_sample` inside `tick` is a MULTI-STEP
+                            // mutation, and `lock()`'s poison recovery is sound
+                            // only while every mutation under the guard is a
+                            // single atomic assignment. Rather than weaken that
+                            // premise, restore it: a panic inside the tick is
+                            // caught HERE, before it can unwind through the
+                            // guard and poison the lock. Every interruption
+                            // point in `on_sample` leaves the run valid-but-
+                            // undercounting (each field write is atomic; the
+                            // window map is consistent between statements), so
+                            // continuing to serve the run is sound — the only
+                            // loss is the in-flight ClosedWindow, which dies
+                            // with the panicking frame regardless of locking.
+                            let tick = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| {
+                                    lp.tick(active, now);
+                                }),
+                            );
+                            if tick.is_err() {
+                                // Deliberate halt, not a retry: whatever made
+                                // this tick panic will make the next one panic.
+                                // Silence past the staleness threshold then
+                                // reports the session Degraded.
+                                tracing::error!(session = %sid,
+                                    "capture tick panicked; capture halts, the session keeps answering");
+                                return;
+                            }
+                            Some(sid)
+                        }
+                        // The session ended underneath us; stop rather than
+                        // tick a dead run.
+                        None => None,
                     }
-                    // The session ended underneath us; stop rather than spin.
-                    None => break,
+                };
+                let Some(sid) = session_id else { break };
+
+                // Summarise due windows WITHOUT the run lock held: perception
+                // is seconds-slow, and holding the lock through it would stall
+                // every status/stop call for the duration.
+                let entries = rt.block_on(lp.settle_due(summarizer.as_ref(), sid, now));
+                if !entries.is_empty() {
+                    for e in &entries {
+                        // Best-effort like persist_pauses: a failed write is
+                        // loud, and must not kill the recorder.
+                        if let Err(err) = store.insert_entry(e) {
+                            tracing::warn!(error = %err, session = %sid,
+                                "could not persist a timeline entry; that slice will read as missing");
+                        }
+                    }
+                    let mut guard = match run.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    if let Some(active) = guard.as_mut() {
+                        active.note_summarized(now);
+                    }
                 }
-                drop(guard);
-                std::thread::sleep(interval);
+
+                // Wait for the next tick OR a stop signal, whichever first.
+                match stopped.recv_timeout(interval) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    // A signal, or the service dropped the sender: stop.
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             }
         });
         *guard = Some(CaptureHandle { stop, join });
@@ -219,24 +309,34 @@ impl DayflowService {
     }
 
     /// Signal the capture thread to stop and wait for it.
+    ///
+    /// Returns promptly: the thread waits on the stop channel between ticks,
+    /// so the signal interrupts the wait rather than expiring it. The join
+    /// then only waits out an in-flight tick, never a full interval.
     pub fn stop_capture(&self) -> Result<(), DayflowError> {
         let handle = {
             let mut guard = self.capture.lock().unwrap_or_else(|p| p.into_inner());
             guard.take()
         };
         if let Some(h) = handle {
-            h.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Send fails only when the thread already exited; join either way.
+            let _ = h.stop.send(());
             let _ = h.join.join();
         }
         Ok(())
     }
 
     /// Whether a capture thread is currently running.
+    ///
+    /// Checks the thread, not the handle: a thread that exited on its own
+    /// (session ended, tick panicked) leaves its handle behind until reaped,
+    /// and reporting that as "running" is a false green.
     pub fn capture_running(&self) -> bool {
         self.capture
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .is_some()
+            .as_ref()
+            .is_some_and(|h| !h.join.is_finished())
     }
 
     /// Stop the running session, returning the windows it closed.
@@ -370,6 +470,14 @@ impl DayflowService {
         // this recovery silently papers over, and the HTTP surface's
         // `catch_unwind` then turns it into a wrong-but-live answer. Keep
         // mutations here atomic, or make this return the error.
+        //
+        // The ONE multi-step mutation that exists — the capture thread's
+        // `tick`, which calls `run.on_sample` (D014-11) — upholds the premise
+        // from the other side: the thread wraps the tick in `catch_unwind`, so
+        // a panic inside it is caught BEFORE it can unwind through the guard
+        // and poison this lock. A poison observed here therefore still means a
+        // single-assignment mutation site panicked, and the recovery argument
+        // above holds unchanged.
         //
         // The timeline store deliberately does NOT recover: a panic during a
         // query fails loud with a 500 rather than serving stale data.

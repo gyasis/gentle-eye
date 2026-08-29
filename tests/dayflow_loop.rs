@@ -399,28 +399,40 @@ async fn a_failed_summary_is_requeued_and_not_marked_summarised() {
 
 // ── T009: the service actually runs the loop ─────────────────────────────────
 
+use gentle_eye::dayflow::service::DayflowService;
+use gentle_eye::dayflow::timeline::SqliteTimelineStore;
+
+fn live_service() -> DayflowService {
+    let store = Arc::new(SqliteTimelineStore::new(Arc::new(std::sync::Mutex::new(
+        gentle_eye::storage::database::init_in_memory().expect("db"),
+    ))));
+    DayflowService::new(store, DayflowConfig::default())
+}
+
+fn scripted_sources() -> Box<dyn FnOnce() -> Vec<Box<dyn CaptureSource>> + Send> {
+    Box::new(|| {
+        let script: Vec<Option<u8>> =
+            (0..500).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+        vec![Box::new(FakeSource::new(0, script)) as Box<dyn CaptureSource>]
+    })
+}
+
+fn ok_summarizer() -> Arc<FlakySummarizer> {
+    Arc::new(FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 })
+}
+
 /// `start_capture` must RUN the loop, not merely spawn a thread that compiles.
 /// The proof is observable state changing in the shared run.
 #[test]
 fn the_service_capture_thread_actually_drives_the_loop() {
-    use gentle_eye::dayflow::service::DayflowService;
-    use gentle_eye::dayflow::timeline::SqliteTimelineStore;
-
-    let store = Arc::new(SqliteTimelineStore::new(Arc::new(std::sync::Mutex::new(
-        gentle_eye::storage::database::init_in_memory().expect("db"),
-    ))));
-    let svc = DayflowService::new(store, DayflowConfig::default());
+    let svc = live_service();
     svc.start(DayflowMode::Session, vec![0], Utc::now()).expect("session starts");
     assert!(!svc.capture_running(), "no capture thread before start_capture");
 
     let dir = tempfile::tempdir().unwrap();
     svc.start_capture(
-        Box::new(|| {
-            let script: Vec<Option<u8>> = (0..200)
-                .map(|i| Some((i as u8).wrapping_mul(90)))
-                .collect();
-            vec![Box::new(FakeSource::new(0, script)) as Box<dyn CaptureSource>]
-        }),
+        scripted_sources(),
+        ok_summarizer(),
         dir.path().to_path_buf(),
         std::time::Duration::from_millis(5),
     )
@@ -443,4 +455,144 @@ fn the_service_capture_thread_actually_drives_the_loop() {
         seen >= 2,
         "the capture thread wrote {seen} samples — it spawned but did not drive the loop"
     );
+}
+
+/// The capture thread must DRAIN the summary queue into the store, not merely
+/// fill it. Without this a started session takes samples all day and no entry
+/// ever appears (FR-014) — the queue is an orphan with a producer and no
+/// consumer, which is precisely the wired-but-inert class (013/R29).
+#[test]
+fn the_capture_thread_summarises_closed_windows_into_the_store() {
+    let svc = live_service();
+    let t0 = Utc::now();
+    svc.start(DayflowMode::Session, vec![0], t0).expect("session starts");
+    // Windows must close within test time: shrink them to one second. This is
+    // the engine's own FR-035 seam, not a test backdoor.
+    svc.with_run(|r| r.set_interval(std::time::Duration::from_secs(1), t0))
+        .expect("interval set");
+
+    let dir = tempfile::tempdir().unwrap();
+    svc.start_capture(
+        scripted_sources(),
+        ok_summarizer(),
+        dir.path().to_path_buf(),
+        std::time::Duration::from_millis(50),
+    )
+    .expect("capture starts");
+
+    // An entry must appear WHILE the session is still running.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut entries = Vec::new();
+    while std::time::Instant::now() < deadline {
+        entries = svc
+            .timeline(t0 - Duration::hours(1), Utc::now() + Duration::hours(1))
+            .expect("timeline readable")
+            .entries;
+        if !entries.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let still = svc.status(Utc::now()).expect("status");
+    assert!(still.running, "the session must still be running when the entry lands");
+    svc.stop_capture().expect("capture stops");
+    assert!(
+        !entries.is_empty(),
+        "windows closed but no timeline entry appeared — the capture thread \
+         fills the summary queue and nothing drains it"
+    );
+}
+
+/// A source that panics on its first frame — the panic fires INSIDE the tick,
+/// while the capture thread holds the run mutex.
+struct PanickingSource;
+impl CaptureSource for PanickingSource {
+    fn next_frame(&mut self) -> Result<SourceFrame, SourceError> {
+        panic!("frame acquisition exploded");
+    }
+    fn regions_for(&self, _f: &SourceFrame) -> Option<Vec<Region>> {
+        None
+    }
+    fn availability(&self) -> Availability {
+        Availability::Available
+    }
+    fn identity(&self) -> SourceIdentity {
+        SourceIdentity::new("panic", "0")
+    }
+    fn ordinal(&self) -> u32 {
+        0
+    }
+}
+
+/// D014-11: a panic mid-tick is a MULTI-STEP mutation dying under the run
+/// mutex. It must not poison the lock (the service's poison recovery is sound
+/// only for single-assignment mutations), must not kill the service, and must
+/// not leave a zombie handle that blocks every later `start_capture`.
+#[test]
+fn a_panicking_tick_halts_capture_without_poisoning_the_service() {
+    let svc = live_service();
+    svc.start(DayflowMode::Session, vec![0], Utc::now()).expect("session starts");
+
+    let dir = tempfile::tempdir().unwrap();
+    svc.start_capture(
+        Box::new(|| vec![Box::new(PanickingSource) as Box<dyn CaptureSource>]),
+        ok_summarizer(),
+        dir.path().to_path_buf(),
+        std::time::Duration::from_millis(5),
+    )
+    .expect("capture starts");
+
+    // The thread must halt itself after the panic.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while svc.capture_running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!svc.capture_running(), "a panicking tick must halt capture, not spin");
+
+    // The service still answers, and the run mutex is NOT poisoned: with_run
+    // would only observe a poison if the panic unwound through the guard.
+    let status = svc.status(Utc::now()).expect("the service still answers");
+    assert!(status.running, "the session itself survives the capture panic");
+    let sid = svc.with_run(|r| r.session_id()).expect("the run is still serveable");
+    assert_eq!(status.session_id, Some(sid));
+
+    // The dead thread's handle must not block a restart with a healthy source.
+    svc.start_capture(
+        scripted_sources(),
+        ok_summarizer(),
+        dir.path().to_path_buf(),
+        std::time::Duration::from_millis(5),
+    )
+    .expect("a finished thread's handle is reaped, not reported AlreadyRunning");
+    svc.stop_capture().expect("capture stops");
+}
+
+/// `stop_capture` must interrupt the inter-tick wait, not ride it out. With a
+/// flag checked only between sleeps, a coarse cadence (3-minute day interval)
+/// makes `dayflow stop` block its caller for the whole interval.
+#[test]
+fn stop_capture_returns_promptly_despite_a_coarse_interval() {
+    let svc = live_service();
+    svc.start(DayflowMode::Session, vec![0], Utc::now()).expect("session starts");
+
+    let dir = tempfile::tempdir().unwrap();
+    svc.start_capture(
+        scripted_sources(),
+        ok_summarizer(),
+        dir.path().to_path_buf(),
+        std::time::Duration::from_secs(120),
+    )
+    .expect("capture starts");
+    // Let the thread finish its first tick and enter the inter-tick wait.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let asked = std::time::Instant::now();
+    svc.stop_capture().expect("capture stops");
+    let took = asked.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(10),
+        "stop_capture took {took:?} against a 120s interval — the stop signal \
+         does not interrupt the wait"
+    );
+    assert!(!svc.capture_running());
 }

@@ -158,6 +158,13 @@ impl CaptureLoop {
         while let Some(pending) = self.scheduler.next_due(now) {
             let chunk = ChunkRef {
                 index: pending.window.sequence as usize,
+                // The sample DIRECTORY, not a per-window artifact — samples are
+                // loose PNGs, and the window's own files are found by the
+                // (display_id, sequence) prefix, which `RoutedChunkSummarizer`
+                // resolves via `sampler::sample_prefix`. A summarizer that
+                // treats `path` as a single video file (`VisionChunkSummarizer`
+                // does) would analyse a directory and must NOT be handed to
+                // this loop.
                 path: self.sample_dir.clone(),
                 start_wall: pending.window.start_wall,
                 end_wall: pending.window.end_wall,

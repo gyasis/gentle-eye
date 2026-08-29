@@ -235,9 +235,48 @@ owns that channel internally and still satisfies the trait.
 This is a constraint on T006, recorded here so it is not rediscovered as a
 compile error.
 
-## D014-11 — OPEN: the capture thread mutates the run under a poison-recovering lock
+## D014-11 — RESOLVED (W4 gate): the capture thread mutates the run under a poison-recovering lock
 
-**Status: OPEN — flagged, not resolved.** Recorded rather than silently accepted.
+**Status: RESOLVED at the W4 gate.** The tension was real and is now closed
+mechanically, not by widening the comment.
+
+**Decision: restore the premise instead of arguing around it.** The capture
+thread wraps its tick in `catch_unwind` (see `DayflowService::start_capture`),
+so a panic inside `on_sample`'s multi-step mutation is caught BEFORE it can
+unwind through the guard. The lock can therefore only ever be poisoned by a
+single-atomic-assignment mutation site — exactly the premise `lock()`'s
+recovery comment states — so the recovery stays sound and the existing green
+test `a_panic_while_holding_the_lock_does_not_kill_the_service` keeps its
+guarantee untouched.
+
+**Why continuing to serve the run after a caught tick panic is sound.** Every
+interruption point in `on_sample` leaves the run valid-but-undercounting:
+each field write (`sample_count += 1`, `chunks_written += 1`,
+`last_chunk_at = ...`, `stopped = true`) is individually atomic with respect
+to unwinding, the window map is consistent between statements, and allocation
+failure aborts rather than unwinds. The only loss is the in-flight
+`ClosedWindow` in the panicking frame — which dies with that frame under ANY
+locking scheme, so no locking design recovers it. On a caught panic the thread
+halts capture deliberately (whatever panicked once will panic again next
+tick) and logs loudly; the silence then crosses the staleness threshold
+(`STALE_INTERVALS × segment_seconds`) and the session reports **Degraded** —
+so "reports healthy while having skipped a sample" is bounded to that window,
+not indefinite. `capture_running()` now checks the thread, not the handle, so
+the halt is visible immediately.
+
+**Why not option 1** (capture thread owns the run, service keeps a snapshot):
+it preserves the same guarantees at the cost of re-plumbing `status`, `stop`,
+`with_run` and every pause/idle surface through a snapshot channel — a
+service-wide restructure that trades a solved problem for a set of new
+staleness races between the snapshot and the run. Not a gate-sized change, and
+no remaining risk pays for it.
+
+Proven by `a_panicking_tick_halts_capture_without_poisoning_the_service` in
+`tests/dayflow_loop.rs`: a source that panics mid-tick leaves the service
+answering, the run serveable (no poison observed), capture halted, and the
+dead thread's handle reaped rather than blocking the next `start_capture`.
+
+The original record of the tension, kept for the audit trail:
 
 `DayflowService::lock()` recovers from mutex poisoning, and its own comment says
 that is sound **only** because "every mutation under this guard is a single
@@ -264,5 +303,7 @@ unilaterally, so the change was reverted and the concern recorded here.
 3. Accept it: argue an in-place `on_sample` panic is not a real tear, and widen
    the comment to say so explicitly.
 
-Until this is decided, the risk is: a panic inside the capture thread's tick
-produces a session that reports healthy while having skipped a sample.
+The risk as recorded then: a panic inside the capture thread's tick produces a
+session that reports healthy while having skipped a sample. (Closed by the
+`catch_unwind` resolution above — the false-healthy window is bounded by the
+staleness threshold and the halt is immediately visible in `capture_running`.)
