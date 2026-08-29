@@ -54,13 +54,13 @@ line says so.
 
 ## Phase 5: User Story 2 — watch one specific thing (P1)
 
-- [ ] T012 [P] [US2] `WindowSource` in `src/dayflow/source/window.rs`: frames cropped to a named window, regions scoped to it.
+- [x] T012 [P] [US2] `WindowSource` in `src/dayflow/source/window.rs`: frames cropped to a named window, regions scoped to it.
       `> DONE:` a session records only that window's content; a change elsewhere on the desktop produces NO sample. Asserted on stored text, not on intent.
-- [ ] T013 [P] [US2] `TargetSource`-backed source in `src/dayflow/source/target.rs`, using the existing named-target store.
+- [x] T013 [P] [US2] `TargetSource`-backed source in `src/dayflow/source/target.rs`, using the existing named-target store.
       `> DONE:` a defined target drives a session; the stored entries carry that target's region provenance.
-- [ ] T014 [US2] Availability handling in the loop: a failed frame records a gap with its CAUSE and continues; `Ended` stops retrying, `Occluded`/`Available` retry next tick.
+- [x] T014 [US2] Availability handling in the loop: a failed frame records a gap with its CAUSE and continues; `Ended` stops retrying, `Occluded`/`Available` retry next tick.
       `> DONE:` three fixtures — minimised, dropped, quit — produce three DIFFERENT gap causes. Collapsing them makes a minimised window read as a fault, or a dead source read as quiet (FR-113).
-- [ ] T015 [S] [US2] `DayflowStatus` names the session's source and its availability.
+- [x] T015 [S] [US2] `DayflowStatus` names the session's source and its availability.
       `> DONE:` `status` on every surface says WHAT the record is a record of; `cargo check` + clippy = 0.
 
 ## Phase 6: User Story 2 — an input taken, not a display consumed (P1)
