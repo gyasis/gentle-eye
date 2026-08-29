@@ -36,13 +36,13 @@ line says so.
 
 ## Phase 3: User Story 1 — Dayflow runs by itself (P1)
 
-- [ ] T006 [US1] The driver in `src/dayflow/loop.rs`: tick on cadence, call the source, hand frame + regions to the `Sampler`, close windows via `DayflowRun`.
+- [x] T006 [US1] The driver in `src/dayflow/loop.rs`: tick on cadence, call the source, hand frame + regions to the `Sampler`, close windows via `DayflowRun`.
       `> DONE:` a fake source and an injected clock drive several segments; the test asserts SEQUENCING and TIMING only. Policy (windowing, gating, budget) is NOT re-asserted here — it has its own tests, and re-asserting it would pass while the loop bypassed the component entirely (013/R29).
-- [ ] T007 [US1] Take the clock as a parameter throughout the loop; no `Utc::now()` inside a decision path.
+- [x] T007 [US1] Take the clock as a parameter throughout the loop; no `Utc::now()` inside a decision path.
       `> DONE:` every loop test drives time explicitly; a state only reachable after hours of wall-clock is reachable in a test. A rule with the clock inside the function is undefended by construction (013/R36).
-- [ ] T008 [US1] Drive summarisation: closed windows enter `SummaryScheduler`, due windows are summarised through `RoutedChunkSummarizer` while the session continues.
+- [x] T008 [US1] Drive summarisation: closed windows enter `SummaryScheduler`, due windows are summarised through `RoutedChunkSummarizer` while the session continues.
       `> DONE:` entries appear DURING a simulated run, not only after stop; a failed summary is requeued and never marked summarised.
-- [ ] T009 [S] [US1] Wire the loop into `DayflowService::start`/`stop` so a started session actually runs.
+- [x] T009 [S] [US1] Wire the loop into `DayflowService::start`/`stop` so a started session actually runs.
       `> DONE:` `grep` shows `loop` called from the service, not only from its own tests — a "wire" task is not done while the new symbol has no caller outside its module (013/R29). `cargo check` + clippy = 0.
 
 ## Phase 4: User Story 1 — regions reach the ladder (P1)
