@@ -76,9 +76,13 @@ pub struct Escalation {
 /// Two keys in one limiter would still share a capacity, so these are separate
 /// limiters entirely.
 pub const DAYFLOW_KEY: &str = "dayflow:perception";
-
-/// Rate-limit key for user-initiated analysis.
-pub const INTERACTIVE_KEY: &str = "interactive:analyze";
+//
+// There is deliberately NO `INTERACTIVE_KEY` here. One was defined, and it named
+// an isolation nothing implements: no interactive bucket exists anywhere in the
+// tree, so the test "asserting" the isolation constructed its own local limiter
+// and checked it — an assertion that cannot fail, describing protection that is
+// absent. When a real interactive limiter exists, isolation follows from it
+// being a SEPARATE limiter, not from a key.
 
 /// The window Dayflow's perception budget is measured over.
 ///
@@ -134,21 +138,25 @@ impl PerceptionRouter {
         prompt: &str,
         reason: &str,
     ) -> Result<(AnalysisResult, Tier), DayflowError> {
-        self.limiter
-            .check(DAYFLOW_KEY)
-            .map_err(|e| DayflowError::Perception(format!("dayflow perception budget: {e}")))?;
-
         let (provider, tier) = match kind {
             PerceptionKind::Text => (&self.text, Tier::Text),
             PerceptionKind::Reason => (&self.reason, Tier::Reason),
         };
 
+        // VALIDATE BEFORE SPENDING. Charging the budget first meant a malformed
+        // request consumed a token it could never use, so a caller could starve
+        // the day's real work with requests that were refused anyway.
+        if tier == Tier::Reason && reason.trim().is_empty() {
+            return Err(DayflowError::Invalid(
+                "an escalation to the reasoning tier must state its reason".into(),
+            ));
+        }
+
+        self.limiter
+            .check(DAYFLOW_KEY)
+            .map_err(|e| DayflowError::Perception(format!("dayflow perception budget: {e}")))?;
+
         if tier == Tier::Reason {
-            if reason.trim().is_empty() {
-                return Err(DayflowError::Invalid(
-                    "an escalation to the reasoning tier must state its reason".into(),
-                ));
-            }
             self.record_escalation(reason, tier);
         }
 
@@ -229,97 +237,113 @@ const SAME_BLOCK: f64 = 0.65;
 // behaviour depends on. Deleted rather than wrapped in a test that would only
 // have asserted the optimization was taken.
 
-/// The longest run of consecutive lines common to `block` and `incoming`,
-/// as `(index in block, index in incoming, length)`.
-///
-/// **Contiguity is the whole point.** A pane that scrolled shares a CONTIGUOUS
-/// run with what came before. Two unrelated screens of the same application
-/// share SCATTERED lines — the menu bar, the status bar, the file tree, line
-/// numbers — and a set-based measure cannot tell those apart: a realistic
-/// full-screen capture is mostly chrome, so any two screens of one editor score
-/// high enough to merge, folding a day's separate documents into one
-/// interleaved blob.
-fn longest_common_run(block: &[&str], incoming: &[&str]) -> (usize, usize, usize) {
-    // Classic LCSubstring DP, one row at a time.
-    let (mut best_b, mut best_i, mut best_len) = (0usize, 0usize, 0usize);
-    let mut prev = vec![0usize; incoming.len() + 1];
-    let mut cur = vec![0usize; incoming.len() + 1];
-    for (bi, b) in block.iter().enumerate() {
-        for (ii, i) in incoming.iter().enumerate() {
-            cur[ii + 1] = if b == i { prev[ii] + 1 } else { 0 };
-            if cur[ii + 1] > best_len {
-                best_len = cur[ii + 1];
+/// The longest run of consecutive lines common to `a` and `b`, as
+/// `(start index in b, length)`. Comparison is on trimmed lines.
+fn longest_common_run(a: &[&str], b: &[&str]) -> (usize, usize) {
+    let (mut best_b, mut best_len) = (0usize, 0usize);
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut cur = vec![0usize; b.len() + 1];
+    for x in a {
+        for (bi, y) in b.iter().enumerate() {
+            cur[bi + 1] = if x.trim() == y.trim() { prev[bi] + 1 } else { 0 };
+            if cur[bi + 1] > best_len {
+                best_len = cur[bi + 1];
                 best_b = bi + 1 - best_len;
-                best_i = ii + 1 - best_len;
             }
         }
         std::mem::swap(&mut prev, &mut cur);
         cur.iter_mut().for_each(|v| *v = 0);
     }
-    (best_b, best_i, best_len)
+    (best_b, best_len)
 }
 
-/// Split text into the comparable lines: trimmed, blanks dropped.
+/// Split two captures into `(frame prefix len, content_a, content_b, frame suffix len)`.
 ///
-/// Blank lines are dropped for COMPARISON only — [`merge_scroll`] preserves the
-/// original text, because in a captured document a blank line is structure.
-fn lines_of(text: &str) -> Vec<&str> {
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).collect()
+/// **This separates the window from what is inside it.** Every realistic capture
+/// is an application window: a menu bar, a file tree, a status bar, a terminal —
+/// UI CHROME that is byte-identical between any two screens of that app and
+/// pinned to the same position in every capture. What is IN the window scrolls.
+///
+/// Neither earlier metric survived that. A set measure scored two different
+/// files behind one editor at 0.80 and merged them. A single contiguous run
+/// scored a genuine scroll at 0.50 and split it, because chrome interrupts the
+/// run at BOTH content boundaries — reintroducing the exact failure T052 exists
+/// to prevent. Each fixture passed only because it lacked the other's
+/// ingredient.
+///
+/// Chrome is positionally STABLE and content MOVES, so strip the positionally
+/// identical head and tail first and compare only what is left.
+fn frame_split<'a>(
+    a: &'a [&'a str],
+    b: &'a [&'a str],
+) -> (usize, &'a [&'a str], &'a [&'a str], usize) {
+    let p = a.iter().zip(b).take_while(|(x, y)| x.trim() == y.trim()).count();
+    let s = a[p..]
+        .iter()
+        .rev()
+        .zip(b[p..].iter().rev())
+        .take_while(|(x, y)| x.trim() == y.trim())
+        .count();
+    (p, &a[p..a.len() - s], &b[p..b.len() - s], s)
 }
 
-/// How much of `incoming` is a contiguous continuation of `block`, in `[0, 1]`.
+/// How much of `incoming`'s CONTENT the `block` already holds, in `[0, 1]`.
 ///
-/// **Asymmetric on purpose.** The obvious choice is a symmetric ratio
-/// (`2·common / (len(a)+len(b))`), and it is WRONG here — a fact found by
-/// running five samples instead of two. The block GROWS with every merge while
-/// a capture stays one screenful, so a symmetric score decays mechanically as
-/// the document accumulates even when each capture overlaps its tail perfectly:
-/// 0.80, 0.73, 0.67, **0.62 → splits**. Every long document eventually
-/// fragments and the threshold only decides when. The question that actually
-/// matters is "is this capture material I already have?", which is a property of
-/// the INCOMING text and stays stable however large the block gets.
+/// **Asymmetric on purpose.** A symmetric ratio decays mechanically as the block
+/// grows — 0.80, 0.73, 0.67, 0.62 → splits — so every long document eventually
+/// fragments and the threshold only decides when. The question that matters is
+/// "is this capture material I already have?", a property of the INCOMING text,
+/// which stays stable however large the block gets.
 ///
-/// Line-based rather than character-based because OCR of a scrolling pane
-/// re-reads whole lines: character drift within a line is noise, a new line is
-/// signal. That does make this brittle to OCR that perturbs many lines per
-/// sample — see research.md R24.
+/// Line-based because OCR of a scrolling pane re-reads whole lines: drift within
+/// a line is noise, a new line is signal. It is therefore brittle to an OCR
+/// misread MID-RUN, which splits the run — see research.md R25.
 pub fn coverage(block: &str, incoming: &str) -> f64 {
-    let lb = lines_of(block);
-    let li = lines_of(incoming);
+    let lb: Vec<&str> = block.lines().collect();
+    let li: Vec<&str> = incoming.lines().collect();
     if li.is_empty() {
         return 0.0;
     }
-    let (_, _, len) = longest_common_run(&lb, &li);
-    len as f64 / li.len() as f64
+    let (_, content_b, content_i, _) = frame_split(&lb, &li);
+    if content_i.is_empty() {
+        return 1.0; // the whole capture is frame — the same screen again
+    }
+    let (_, len) = longest_common_run(content_b, content_i);
+    len as f64 / content_i.len() as f64
 }
 
-/// Merge `incoming` into `block`, dropping only the contiguous run they share.
+/// Merge `incoming` into `block`, keeping the frame once and appending only new content.
 ///
-/// **Not a set-union.** Deduplicating by line VALUE loses every legitimately
-/// repeated line — a closing brace, a blank separator, a repeated table row —
-/// so for Content intent, where the merged text IS the deliverable, any source
-/// file or table was silently corrupted. Only the lines proven to be the SAME
-/// OCCURRENCE (the contiguous overlap) are skipped; everything else in
-/// `incoming` is kept, in order.
+/// **Not a set-union, and not a trim.** Deduplicating by line VALUE loses every
+/// legitimately repeated line — a closing brace, a blank separator, a repeated
+/// table row — and for Content intent the merged text IS the deliverable. Lines
+/// are appended EXACTLY as captured: comparison trims, but a merge that trimmed
+/// would strip the indentation from every appended line, which in Python is not
+/// a cosmetic loss.
 pub fn merge_scroll(block: &str, incoming: &str) -> String {
-    let bl = lines_of(block);
-    let il = lines_of(incoming);
-    if il.is_empty() {
+    let lb: Vec<&str> = block.lines().collect();
+    let li: Vec<&str> = incoming.lines().collect();
+    if li.is_empty() {
         return block.to_string();
     }
-    let (_, inc_start, len) = longest_common_run(&bl, &il);
-    if len == 0 {
-        return format!("{block}\n{incoming}");
+    let (_, content_b, content_i, suffix) = frame_split(&lb, &li);
+    if content_i.is_empty() {
+        return block.to_string();
     }
-    let mut out = block.trim_end().to_string();
-    // Everything before the overlap (a scroll-up) and after it (a scroll-down)
-    // is new material. Appended in arrival order: putting it in document order
-    // needs on-screen geometry, which is US4's job, not this function's.
-    for line in il[..inc_start].iter().chain(il[inc_start + len..].iter()) {
-        out.push('\n');
-        out.push_str(line);
+    let (run_start, run_len) = longest_common_run(content_b, content_i);
+
+    // Rebuild as everything up to the frame suffix, then the incoming content
+    // that is not the shared run, then the frame suffix back on — so a status
+    // bar stays at the bottom instead of being buried mid-document.
+    let mut out: Vec<&str> = lb[..lb.len() - suffix].to_vec();
+    if run_len == 0 {
+        out.extend(content_i);
+    } else {
+        out.extend(&content_i[..run_start]);
+        out.extend(&content_i[run_start + run_len..]);
     }
-    out
+    out.extend(&lb[lb.len() - suffix..]);
+    out.join("\n")
 }
 
 /// Rolling aggregation of OCR text across samples (Content intent only).
@@ -468,9 +492,14 @@ mod tests {
             if let Ok(mut p) = self.prompts.lock() {
                 p.push(prompt.to_string());
             }
+            // DISTINCT PER CALL. With identical text every call, a regression
+            // that sends the LAST sample's text N times is indistinguishable
+            // from sending all N — the assertion counts occurrences and both
+            // give the same number.
+            let n = self.calls.load(Ordering::SeqCst);
             Ok(AnalysisResult {
                 request_id: uuid::Uuid::new_v4(),
-                analysis_text: format!("served by {}", self.name),
+                analysis_text: format!("served by {} #{n}", self.name),
                 provider: self.name.to_string(),
                 model_used: self.name.to_string(),
                 processing_time_ms: 1,
@@ -615,11 +644,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dayflow_traffic_cannot_exhaust_the_interactive_bucket() {
-        // A day of background sampling must never starve a live user request.
-        // Separate LIMITERS, not two keys in one: two keys still share a
-        // capacity, so a shared limiter would let one drain the other.
-        let interactive = RateLimiter::per_minute(10);
+    async fn the_dayflow_budget_actually_binds() {
+        // This used to also "prove" isolation from an interactive bucket by
+        // constructing a fresh local limiter and checking it ten times — which
+        // succeeds by construction under ANY source mutation, and described a
+        // bucket that does not exist. Only the half that can fail remains.
         let (router, _, _) = {
             let t = Arc::new(AtomicUsize::new(0));
             let r = Arc::new(AtomicUsize::new(0));
@@ -642,7 +671,6 @@ mod tests {
             )
         };
 
-        // Exhaust dayflow's budget entirely.
         for _ in 0..3 {
             router
                 .perceive(PerceptionKind::Text, Path::new("/tmp/x.png"), "read", "")
@@ -653,11 +681,6 @@ mod tests {
             .perceive(PerceptionKind::Text, Path::new("/tmp/x.png"), "read", "")
             .await;
         assert!(refused.is_err(), "dayflow's own budget must actually bind");
-
-        // The interactive bucket is untouched by that exhaustion.
-        for _ in 0..10 {
-            interactive.check(INTERACTIVE_KEY).expect("live requests still served");
-        }
     }
 
     #[tokio::test]
@@ -704,6 +727,40 @@ mod tests {
         assert!(err.is_err(), "an unexplained escalation must not be billable");
         assert_eq!(r.load(Ordering::SeqCst), 0, "and must not reach the model");
         assert!(router.escalations().is_empty());
+
+        // And it must not have SPENT anything: a request refused for being
+        // malformed that still burns a token lets bad callers starve the day's
+        // real work. Budget 1, so a surviving token is provable.
+        let (small, _, r2) = {
+            let t = Arc::new(AtomicUsize::new(0));
+            let r2 = Arc::new(AtomicUsize::new(0));
+            (
+                PerceptionRouter::new(
+                    Arc::new(CountingProvider {
+                        name: "text-tier",
+                        calls: t.clone(),
+                        prompts: prompts(),
+                    }),
+                    Arc::new(CountingProvider {
+                        name: "reason-tier",
+                        calls: r2.clone(),
+                        prompts: prompts(),
+                    }),
+                    1,
+                ),
+                t,
+                r2,
+            )
+        };
+        assert!(small
+            .perceive(PerceptionKind::Reason, Path::new("/tmp/x.png"), "why", "")
+            .await
+            .is_err());
+        small
+            .perceive(PerceptionKind::Reason, Path::new("/tmp/x.png"), "why", "categorising")
+            .await
+            .expect("the refused request must not have consumed the only token");
+        assert_eq!(r2.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -945,7 +1002,7 @@ mod tests {
         // aggregator, so a merge bug cannot hide behind the matching logic.
         assert_eq!(merge_scroll("a\nb\nc", "b\nc\nd\ne"), "a\nb\nc\nd\ne");
         assert_eq!(merge_scroll("a\nb", "a\nb"), "a\nb", "a full repeat adds nothing");
-        assert_eq!(merge_scroll("", "a\nb"), "\na\nb", "empty base keeps everything");
+        assert_eq!(merge_scroll("", "a\nb"), "a\nb", "empty base keeps everything");
     }
 
     #[test]
@@ -969,28 +1026,105 @@ mod tests {
         assert!(merged.contains("two();"), "no incoming content may be dropped");
     }
 
+    /// One captured application window: chrome, then content, then chrome.
+    ///
+    /// EVERY realistic capture has this shape. The two fixtures this replaced
+    /// each had only half of it — a scroll with no chrome, and chrome with no
+    /// scroll — so each passed only because it lacked the other's ingredient,
+    /// and the metric was wrong in both directions at once.
+    fn windowed(content: &[String]) -> String {
+        let mut v = vec![
+            "File  Edit  View".to_string(),
+            "EXPLORER".to_string(),
+            "  src/".to_string(),
+        ];
+        v.extend(content.iter().cloned());
+        v.extend([
+            "Ln 1, Col 1    UTF-8".to_string(),
+            "$ cargo build".to_string(),
+            "   Compiling gentle-eye".to_string(),
+        ]);
+        v.join("\n")
+    }
+
+    fn doc_lines(offset: usize, height: usize) -> Vec<String> {
+        (offset..offset + height).map(|i| format!("    doc line {i}")).collect()
+    }
+
     #[test]
-    fn two_documents_behind_the_same_ui_chrome_do_not_merge() {
-        // A realistic full-screen capture is mostly chrome — menu bar, file
-        // tree, status bar — which is IDENTICAL between any two screens of the
-        // same application. A set-based measure scores those at 0.80 and folds
-        // a day's separate files into one interleaved blob. A contiguous run
-        // tells them apart because chrome is SCATTERED, not consecutive.
-        let chrome_top = "File  Edit  View\nEXPLORER\n  src/";
-        let chrome_bottom = "Ln 1, Col 1    UTF-8\n$ cargo build\n   Compiling gentle-eye";
-        let one = format!("{chrome_top}\nfn alpha() {{\n    first();\n{chrome_bottom}");
-        let two = format!("{chrome_top}\nfn beta() {{\n    second();\n{chrome_bottom}");
+    fn a_document_scrolling_inside_a_window_is_one_block_chrome_and_all() {
+        // The case both earlier fixtures missed. Chrome interrupts the shared
+        // run at BOTH content boundaries, so a single-contiguous-run metric
+        // scores every sample at 0.50 and produces five blocks — the exact
+        // failure T052 exists to prevent, reintroduced by the fix for the
+        // opposite direction.
+        let mut agg = TextAggregator::new();
+        for step in 0..5 {
+            agg.absorb(&windowed(&doc_lines(step * 2, 10)));
+        }
+        assert_eq!(
+            agg.blocks().len(),
+            1,
+            "a document scrolling inside a window is ONE document: {:#?}",
+            agg.blocks()
+        );
+
+        let doc = &agg.blocks()[0];
+        for i in 0..18 {
+            assert_eq!(
+                doc.lines().filter(|l| l.trim() == format!("doc line {i}")).count(),
+                1,
+                "line {i} must appear exactly once in {doc}"
+            );
+        }
+        // Appended lines keep their indentation. Comparison trims; a merge that
+        // trimmed would corrupt every Python file it ever captured.
+        assert_eq!(
+            doc.lines().filter(|l| l.starts_with("    doc line")).count(),
+            18,
+            "every appended content line keeps its original indentation"
+        );
+        assert_eq!(doc.matches("EXPLORER").count(), 1, "chrome is kept once");
+        assert!(
+            doc.trim_end().ends_with("Compiling gentle-eye"),
+            "the frame suffix stays at the end, not buried mid-document"
+        );
+    }
+
+    #[test]
+    fn two_documents_behind_the_same_window_do_not_merge() {
+        // The opposite error. Chrome is identical between ANY two screens of one
+        // app, so only the content may decide.
+        let one = windowed(&["    fn alpha() {".into(), "        first();".into()]);
+        let two = windowed(&["    fn beta() {".into(), "        second();".into()]);
 
         let score = coverage(&one, &two);
-        assert!(
-            score < SAME_BLOCK,
-            "shared chrome must not read as the same document: {score}"
-        );
+        assert!(score < SAME_BLOCK, "different files behind one window: {score}");
 
         let mut agg = TextAggregator::new();
         agg.absorb(&one);
         agg.absorb(&two);
         assert_eq!(agg.blocks().len(), 2, "two files behind one UI are two documents");
+        assert!(!agg.blocks()[0].contains("beta"));
+    }
+
+    #[test]
+    fn a_wide_sidebar_cannot_carry_two_unrelated_screens_together() {
+        // The stress version: chrome is the MAJORITY of the capture, which is
+        // what a file tree or terminal scrollback actually looks like. This is
+        // also the case that defeats the "chrome is scattered" argument — a
+        // sidebar is perfectly contiguous.
+        let tree: Vec<String> = (0..12).map(|i| format!("  file_{i}.rs")).collect();
+        let mk = |body: &str| {
+            let mut v = tree.clone();
+            v.push(body.to_string());
+            v.join("\n")
+        };
+        let score = coverage(&mk("fn alpha() {}"), &mk("fn beta() {}"));
+        assert!(
+            score < SAME_BLOCK,
+            "12 lines of identical sidebar must not carry 1 line of different content: {score}"
+        );
     }
 
     #[tokio::test]
@@ -1034,11 +1168,13 @@ mod tests {
         assert_eq!(seen.len(), 1);
         let prompt = &seen[0];
         assert!(prompt.contains("categorise this segment"), "the caller's ask survives");
-        assert_eq!(
-            prompt.matches("served by text-tier").count(),
-            4,
-            "every sample's extracted text must reach the reasoning tier: {prompt}"
-        );
+        for n in 1..=4 {
+            assert_eq!(
+                prompt.matches(&format!("served by text-tier #{n}")).count(),
+                1,
+                "sample {n}'s own extracted text must reach the reasoning tier: {prompt}"
+            );
+        }
     }
 
     #[tokio::test]

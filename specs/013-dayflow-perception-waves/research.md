@@ -1470,3 +1470,75 @@ document the same way the symmetric metric did. Untestable without real OCR pair
 rather than left as an unstated assumption. Captures of one or two lines are also degenerate —
 coverage is 0.0 or 1.0 with nothing between — so `SAME_BLOCK` carries no meaning below about three
 lines.
+
+
+## R25 — Wave 6 re-review: each fixture passed by lacking the other's ingredient (2026-08-26)
+
+Verdict **FAIL** again, and the finding is sharper than the bug.
+
+### The two fixtures validated against each other's blind spot
+
+R24's contiguous-run fix broke the case it was built for. A document scrolling **inside an
+application window** — chrome at the top, chrome at the bottom, content between — scored **0.50
+on every sample and produced five blocks**, because chrome interrupts the shared run at BOTH
+content boundaries. That is the original T052 failure, reintroduced by the fix for the opposite
+direction. Meanwhile a contiguous 12-line sidebar still false-merged two different files at 0.75,
+so the metric was now wrong in **both** directions.
+
+Neither test could see it:
+
+> **the scroll test had no chrome; the chrome test had no scroll.**
+
+Each passed only because it lacked the other's ingredient. This is R22's uniform-scenario lesson
+one level up — not a scenario too uniform *within* a test, but a **test suite whose fixtures are
+each missing a different half of reality**, so every individual test is green and the composition
+is broken. The check that catches it: *does any single fixture contain all the ingredients that
+co-occur in production?* Here one fixture with chrome AND scroll would have caught all three
+findings at once, including the indentation loss.
+
+### The metric, third and fourth revision
+
+The answer was not a fourth threshold but a different decomposition. Chrome is positionally
+**stable**; content **moves**. So strip the positionally identical head and tail, and compare only
+what is between them. Scroll-inside-a-window scores 0.80 and merges; two files behind one window
+score 0.0 and separate; a majority-chrome sidebar cannot carry unrelated content across.
+
+That also subsumes the calibration argument: the separation now comes from the decomposition, not
+from a tuned constant.
+
+### A merge that fixed one corruption and introduced another
+
+R24 fixed repeated-line loss and silently swapped in **whitespace loss**: the output was rebuilt
+from trimmed lines, so every appended line lost its indentation and every blank separator vanished.
+For Python that is not cosmetic. The repeated-lines test asserted `contains("two();")` rather than
+`contains("    two();")` and could not see it. **Comparison trims; the merge must not** — those are
+different operations on the same data and conflating them corrupted the deliverable.
+
+### Validate before you spend
+
+`limiter.check` ran before the empty-reason validation, so a malformed request **consumed a budget
+token it could never use** — a caller could starve the day's real work with requests that were
+refused anyway. Ordering: reject invalid, then charge.
+
+### A mock uniform enough to hide the bug it was written to catch
+
+The test proving the reasoning call carries every sample's text counted occurrences of a string the
+mock returned **identically for every call** — so "all four samples" and "one sample, four times"
+produce the same count, and a mutation sending the last sample N times **survived**. Fixed by making
+the mock emit per-call distinct text. **A mock that returns a constant cannot witness which input
+produced which output.**
+
+### A key naming an isolation nothing implements
+
+`INTERACTIVE_KEY` had no uses, no interactive bucket existed anywhere, and the test "asserting"
+isolation built its own local limiter and checked it — an assertion that cannot fail, describing
+protection that is absent. Deleted, with a comment saying why, so it is not re-added: isolation will
+come from a separate limiter, never from a key string.
+
+### My own edit tooling destroyed a file
+
+A slice built from two markers in the wrong order produced an **empty** pattern, and
+`str.replace("")` splices the replacement between every character — 1,070 lines became **4.5
+million**. Restored from git. Every scripted edit now goes through a helper that asserts the slice
+is non-empty and that the pattern occurs exactly as many times as expected. Same discipline as the
+mutation harness, applied to editing: **an edit script must prove it edited what it meant to.**
