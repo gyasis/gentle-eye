@@ -1912,3 +1912,62 @@ same as inserting before its documentation**, and the compiler is happy either w
 And `the_migration_is_re_runnable` built a **fresh** database each iteration, so no `ALTER` ever hit
 "duplicate column name" — it never tested the property in its name. Renamed to what it does; the
 real coverage was already one layer down in `database.rs`.
+
+
+## R32 — Wave 8, third pass: a running band edge was the wrong model, not the wrong threshold (2026-08-26)
+
+**PASS WITH NOTES**, and the note was the interesting part: my "fix" had not removed the failure,
+it had **moved** it.
+
+### Both directions fail, which is the diagnosis
+
+- Ending a band at its **tallest** member: a full-height sidebar or window absorbs every row beside
+  it → reads down the columns.
+- Ending it at its **shortest**: a 10-pixel chip pins the edge at y=10, so a left column overlapping
+  the right one for 480 of its 488 pixels is exiled to a later band → reads right before left.
+
+Two opposite failures from the same mechanism means **the mechanism is wrong**, and no third
+threshold rescues it. A running edge accumulates state as regions arrive, so one member's height
+distorts the answer for everything after it.
+
+The replacement asks a question about the whole set instead: **is there a line no region crosses?**
+Horizontal first (rows), else vertical (columns), recursively. That is stateless with respect to
+arrival, so no member's size can move a cut that another member spans.
+
+Two details matter:
+- The cut is where nothing **crosses**, not where coverage has a hole. Rows that abut exactly still
+  separate, because a region ending at `y` and one starting at `y` both fail to cross it.
+- Split at the **first** cut only, then recurse. Cutting at every gap in one pass mixes the axes: a
+  sidebar beside a 2×2 grid has an x-gap left of the content AND one between its columns, so a
+  single pass yields `sidebar | left-column | right-column`. Taking one cut and recursing lets the
+  content be split into ROWS first, which is what a person does.
+
+### A surviving mutant meant the semantics were never pinned
+
+`reach = last member` instead of `max` survived the entire suite — twice, before and after the
+rewrite. It takes **three** regions to distinguish them: a tall column, a short region inside its
+span, and a third below the short one's bottom but still inside the tall one's. With two, both
+rules agree.
+
+**A rule that accumulates needs a fixture long enough for the accumulation to diverge.** Same shape
+as R25's five-sample scroll and R22's partial outage: the minimum case is the one where every
+candidate implementation agrees.
+
+### Recursion on deserialized data is an abort waiting to happen
+
+`Region` is `Deserialize` and `reading_order` is `pub`, so a corrupt or adversarial region set can
+carry an arbitrarily deep parent chain. Recursion made that a **stack overflow — an abort, not an
+`Err`**: no catch, no log, the daemon simply dies. Measured at 8,000 deep. Rewritten with an
+explicit stack; the fixture now runs 50,000 deep and passes.
+
+**Depth that comes from data, not from code, belongs on the heap.** Realistic captures nest four
+levels; that is exactly why nobody would have found this without asking what the input CAN be
+rather than what it usually is.
+
+### And a comment that claimed a path that cannot happen
+
+The `placed` guard inside the emit step was documented as handling parent cycles. It does not:
+every region has at most one parent, so it lands in exactly one group and is reached at most once —
+a mutation replacing that branch with `panic!` passes the whole suite. The cycle handling is
+elsewhere, in the fallback that sweeps unplaced indices. The guard is kept as defence, with a
+comment that says what is actually true.

@@ -349,48 +349,95 @@ pub fn assign_parents(regions: &mut [Region]) {
 ///
 /// # Bounded by the parent tree
 ///
-/// Siblings are ordered among themselves, and each region is immediately
-/// followed by its own children. Without that, two windows side by side get
+/// Siblings are ordered among themselves and each region is immediately
+/// followed by its own subtree. Without that, two windows side by side get
 /// their panes interleaved — window A's left pane, window B's left pane,
-/// window A's right pane — an order that describes no screen anyone saw.
+/// window A's right pane — an order describing no screen anyone saw.
 ///
-/// # Banded, and the band ends at its SHORTEST member
+/// # Recursive cuts, not a running band edge
 ///
-/// Sorting by `y` alone scrambles side-by-side panes: two columns whose tops
-/// differ by three pixels interleave line by line, which is the same corruption
-/// cropping exists to prevent, arriving one layer later. So regions are grouped
-/// into horizontal bands and ordered left-to-right within each.
+/// Siblings are split by GAPS: a horizontal cut wherever no region crosses a
+/// given y (giving rows), else a vertical cut wherever none crosses an x
+/// (giving columns), recursively.
 ///
-/// A band ends where its SHORTEST member ends, not its tallest. Extending it to
-/// the tallest lets one full-height region — a sidebar, a file tree, or the
-/// window that contains everything — absorb every row beneath it into a single
-/// band, which then sorts column-major: down the left column, then down the
-/// right. That was the shipped behaviour, and it is wrong on the ordinary shape
-/// of a capture rather than on an edge case.
+/// Two earlier attempts both used a running band edge and both failed, in
+/// opposite directions, which is what makes the edge the wrong model rather
+/// than the threshold wrong:
 ///
-/// Displays are ordered before bands: a top-left region on a portrait monitor
-/// is not comparable to a bottom-right one on a laptop panel, and interleaving
-/// two screens by `y` produces an order that matches neither.
+/// - ending a band at its TALLEST member let a full-height sidebar or window
+///   absorb every row beside it, reading down the columns;
+/// - ending it at its SHORTEST let a small chip pin the edge so low that a
+///   column overlapping the next one by 480px was exiled to a later band,
+///   reading right before left.
+///
+/// A cut asks a question about the whole set — "is there a line nothing
+/// crosses?" — instead of accumulating an edge as regions arrive, so no single
+/// member's height can distort it.
+///
+/// The cut is where nothing CROSSES, not where coverage has a hole: rows that
+/// abut exactly still separate, because a region ending at y and one starting
+/// at y both fail to cross it.
+///
+/// # Displays
+///
+/// Ordered before anything else: a top-left region on a portrait monitor is not
+/// comparable to a bottom-right one on a laptop panel, and interleaving two
+/// screens by geometry produces an order matching neither.
 pub fn reading_order(regions: &[Region]) -> Vec<usize> {
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); regions.len()];
     let mut roots: Vec<usize> = Vec::new();
     for (i, r) in regions.iter().enumerate() {
         match r.parent.map(|p| p as usize) {
             // A parent index out of range, or pointing at itself, is treated as
-            // no parent: the region still gets placed. Dropping it would make
-            // the order incomplete, which is worse than placing it at the top
-            // level, and provenance must cover every region or it is not a map.
+            // no parent: the region still gets placed. Dropping it would leave
+            // provenance that is not a map of the screen.
             Some(p) if p < regions.len() && p != i => children[p].push(i),
             _ => roots.push(i),
         }
     }
 
+    // An EXPLICIT stack, not recursion. `Region` is `Deserialize` and this is a
+    // pub fn, so a corrupt or adversarial region set can carry an arbitrarily
+    // deep parent chain — and a stack overflow is an ABORT, not an `Err`: it
+    // would kill the daemon with nothing to catch and nothing logged. Measured
+    // before this change: a 8,000-deep chain aborted the process.
+    enum Step {
+        Emit(usize),
+        Group(Vec<usize>),
+    }
     let mut out = Vec::with_capacity(regions.len());
     let mut placed = vec![false; regions.len()];
-    order_group(roots, regions, &children, &mut placed, &mut out);
+    let mut stack = vec![Step::Group(roots)];
 
-    // Anything a parent cycle kept unreachable still gets placed, in index
-    // order, so the result is always a total ordering of the input.
+    while let Some(step) = stack.pop() {
+        match step {
+            Step::Emit(i) => {
+                // The guard is defensive only. Every region has at most one
+                // parent, so it lands in exactly one group — roots or one
+                // `children[p]` — and is reached at most once; a mutation
+                // replacing this branch with `panic!` passes the whole suite.
+                // Cycles are handled by the fallback below, not here.
+                if !placed[i] {
+                    placed[i] = true;
+                    out.push(i);
+                }
+            }
+            Step::Group(group) => {
+                // Pushed in reverse so popping yields: this region, then its
+                // subtree, then the next sibling.
+                for &i in cut_order(group, regions).iter().rev() {
+                    if !children[i].is_empty() {
+                        stack.push(Step::Group(children[i].clone()));
+                    }
+                    stack.push(Step::Emit(i));
+                }
+            }
+        }
+    }
+
+    // A parent cycle leaves its members unreachable from any root — they are
+    // never roots and never children of a root's subtree. They are placed here,
+    // in index order, so the result is always a total ordering of the input.
     for (i, done) in placed.iter_mut().enumerate() {
         if !*done {
             *done = true;
@@ -400,66 +447,99 @@ pub fn reading_order(regions: &[Region]) -> Vec<usize> {
     out
 }
 
-/// Order one set of siblings, then descend into each one's children.
-fn order_group(
-    group: Vec<usize>,
-    regions: &[Region],
-    children: &[Vec<usize>],
-    placed: &mut [bool],
-    out: &mut Vec<usize>,
-) {
-    for i in banded(group, regions) {
-        if placed[i] {
-            continue; // a parent cycle; already emitted
+/// Order one sibling set by recursive horizontal-then-vertical cuts.
+fn cut_order(group: Vec<usize>, regions: &[Region]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(group.len());
+    let mut stack = vec![group];
+
+    while let Some(g) = stack.pop() {
+        if g.len() <= 1 {
+            out.extend(g);
+            continue;
         }
-        placed[i] = true;
-        out.push(i);
-        if !children[i].is_empty() {
-            order_group(children[i].clone(), regions, children, placed, out);
+        // Displays first and absolutely: never compared by geometry.
+        if let Some(parts) = split_by_display(&g, regions) {
+            stack.extend(parts.into_iter().rev());
+            continue;
         }
+        if let Some(parts) = split(&g, regions, Axis::Y) {
+            stack.extend(parts.into_iter().rev());
+            continue;
+        }
+        if let Some(parts) = split(&g, regions, Axis::X) {
+            stack.extend(parts.into_iter().rev());
+            continue;
+        }
+        // Nothing separates these — genuinely overlapping content. Fall back to
+        // a total, arrival-order-independent sort so the answer is still the
+        // same on every run.
+        let mut rest = g;
+        rest.sort_by_key(|&i| (regions[i].bbox.y, regions[i].bbox.x, i));
+        out.extend(rest);
     }
-}
-
-/// Sort one sibling set into reading bands.
-fn banded(mut group: Vec<usize>, regions: &[Region]) -> Vec<usize> {
-    // Total and independent of arrival order: detection order is an accident of
-    // which provider ran first, and must not decide how a screen reads.
-    group.sort_by(|&a, &b| {
-        let (ra, rb) = (&regions[a], &regions[b]);
-        ra.display_id
-            .cmp(&rb.display_id)
-            .then(ra.bbox.y.cmp(&rb.bbox.y))
-            .then(ra.bbox.x.cmp(&rb.bbox.x))
-            .then(a.cmp(&b))
-    });
-
-    let mut out: Vec<usize> = Vec::with_capacity(group.len());
-    let mut band: Vec<usize> = Vec::new();
-    let mut band_display: Option<u32> = None;
-    let mut band_bottom = u32::MAX;
-
-    for i in group {
-        let r = &regions[i];
-        let same_display = band_display == Some(r.display_id);
-        if same_display && !band.is_empty() && r.bbox.y < band_bottom {
-            band_bottom = band_bottom.min(r.bbox.y.saturating_add(r.bbox.h));
-            band.push(i);
-        } else {
-            flush_band(&mut band, regions, &mut out);
-            band_display = Some(r.display_id);
-            band_bottom = r.bbox.y.saturating_add(r.bbox.h);
-            band.push(i);
-        }
-    }
-    flush_band(&mut band, regions, &mut out);
     out
 }
 
-fn flush_band(band: &mut Vec<usize>, regions: &[Region], out: &mut Vec<usize>) {
-    // `band` arrives pre-sorted by (y, x, index) and `sort_by` is stable, so
-    // sorting on x alone already leaves equal-x members in y-then-index order.
-    band.sort_by_key(|&i| regions[i].bbox.x);
-    out.append(band);
+enum Axis {
+    X,
+    Y,
+}
+
+fn split_by_display(group: &[usize], regions: &[Region]) -> Option<Vec<Vec<usize>>> {
+    let mut ids: Vec<u32> = group.iter().map(|&i| regions[i].display_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.len() < 2 {
+        return None;
+    }
+    Some(
+        ids.into_iter()
+            .map(|d| {
+                group.iter().copied().filter(|&i| regions[i].display_id == d).collect()
+            })
+            .collect(),
+    )
+}
+
+/// Split `group` wherever no region CROSSES the cut line on `axis`.
+///
+/// Returns `None` when the group cannot be cut on this axis.
+fn split(group: &[usize], regions: &[Region], axis: Axis) -> Option<Vec<Vec<usize>>> {
+    /// Where a region begins, and how far it extends, on the axis being cut.
+    type Extent = fn(&Region) -> u32;
+    let (start, size): (Extent, Extent) = match axis {
+        Axis::Y => (|r| r.bbox.y, |r| r.bbox.h),
+        Axis::X => (|r| r.bbox.x, |r| r.bbox.w),
+    };
+    let mut sorted = group.to_vec();
+    // Ties broken by the other axis then by index, so the result cannot depend
+    // on the order regions were detected in.
+    sorted.sort_by_key(|&i| {
+        let r = &regions[i];
+        match axis {
+            Axis::Y => (r.bbox.y, r.bbox.x, i),
+            Axis::X => (r.bbox.x, r.bbox.y, i),
+        }
+    });
+
+    // Split at the FIRST cut only, then let recursion find the rest. Cutting at
+    // every gap in one pass mixes the axes: a sidebar beside a 2x2 grid has an
+    // x-gap left of the content AND one between its columns, so a single pass
+    // yields sidebar | left-column | right-column — reading down the columns.
+    // Taking one cut and recursing lets the content be split into ROWS first,
+    // which is what a person does.
+    let mut reach = 0u32;
+    for (n, &i) in sorted.iter().enumerate() {
+        let r = &regions[i];
+        // `>=` so exactly abutting rows separate: a region ending at y and one
+        // starting at y both fail to CROSS y, which is a cut even though the
+        // coverage has no hole in it.
+        if n > 0 && start(r) >= reach {
+            return Some(vec![sorted[..n].to_vec(), sorted[n..].to_vec()]);
+        }
+        reach = reach.max(start(r).saturating_add(size(r)));
+    }
+    None
 }
 
 /// Resolve a natural-language target to a region index — **structural + geometric,
@@ -1014,6 +1094,99 @@ mod tests {
             "the identity of a given region must never change; if this fails, \
              every region_id already written to disk has been orphaned"
         );
+    }
+
+
+    #[test]
+    fn a_small_chip_above_a_column_does_not_exile_the_column_beside_it() {
+        // The INVERSE of the sidebar failure, and the reason a running band
+        // edge is the wrong model rather than the threshold being wrong.
+        //
+        // Ending a band at its shortest member let this 10px chip pin the edge
+        // at y=10, so the left column — which overlaps the right one for 480 of
+        // its 488 pixels — started a new band and was read AFTER it. Right
+        // before left, on a layout with no nesting and nothing unusual about it.
+        let regions = vec![
+            r_at(600, 0, 100, 10, 0),   // a small chip, top-right
+            r_at(600, 4, 300, 496, 0),  // right column, starts just below it
+            r_at(0, 12, 300, 488, 0),   // left column, overlaps the right by ~480px
+        ];
+        let order = reading_order(&regions);
+        assert_eq!(
+            order,
+            vec![2, 0, 1],
+            "left column first, then the chip and the right column: {order:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_region_inside_a_tall_ones_span_does_not_end_the_group() {
+        // `reach` must be the MAXIMUM extent seen, not the last member's.
+        // Tracking only the last one lets a short region inside a tall one's
+        // span drop the reach to its own bottom, so the next region — still
+        // well inside the tall one — is cut off into a new row.
+        //
+        // Two regions cannot show this: the difference needs a tall region, a
+        // short one within its span, and a third below the SHORT one's bottom
+        // but still inside the TALL one's. A mutation replacing max with the
+        // last member survived the whole suite until this fixture existed.
+        let regions = vec![
+            r_at(300, 0, 100, 1000, 0), // 0: tall right column
+            r_at(300, 10, 100, 20, 0),  // 1: short, inside its span, ends at 30
+            r_at(0, 40, 100, 50, 0),    // 2: left, below 1's bottom, inside 0's span
+        ];
+        let order = reading_order(&regions);
+        assert_eq!(
+            order,
+            vec![2, 0, 1],
+            "the left region is read first — it sits beside the tall column, not \
+             below it: {order:?}"
+        );
+    }
+
+    #[test]
+    fn three_levels_of_nesting_keep_each_subtree_together() {
+        // Monitor -> window -> pane -> element. Two recursion levels, which no
+        // fixture exercised: a pane's elements must stay with their pane rather
+        // than being ordered against the other pane's elements.
+        let mut regions = vec![
+            Region::new(
+                crate::target::model::PixelRect { x: 0, y: 0, w: 1000, h: 600 },
+                Source::Wm,
+                Granularity::Window,
+                1.0,
+            ),
+            r_at(10, 10, 480, 580, 0),  // 1: left pane
+            r_at(510, 10, 480, 580, 0), // 2: right pane
+            r_at(20, 20, 200, 40, 0),   // 3: element in the left pane
+            r_at(20, 80, 200, 40, 0),   // 4: element in the left pane
+            r_at(520, 20, 200, 40, 0),  // 5: element in the right pane
+        ];
+        assign_parents(&mut regions);
+        let order = reading_order(&regions);
+        assert_eq!(
+            order,
+            vec![0, 1, 3, 4, 2, 5],
+            "window, left pane and ITS elements, then right pane and its own: {order:?}"
+        );
+    }
+
+    #[test]
+    fn a_deeply_nested_region_set_does_not_abort_the_process() {
+        // `Region` is Deserialize and this is a pub fn, so a corrupt or
+        // adversarial region set can carry an arbitrarily deep parent chain.
+        // Recursion made that a STACK OVERFLOW — an abort, not an `Err`: it
+        // kills the daemon with nothing to catch and nothing logged. Measured
+        // before the explicit-stack rewrite: 8,000 deep aborted the process.
+        let depth = 50_000;
+        let mut regions: Vec<Region> = (0..depth).map(|i| r_at(0, i as u32, 10, 10, 0)).collect();
+        for (i, r) in regions.iter_mut().enumerate().skip(1) {
+            r.parent = Some((i - 1) as u64);
+        }
+        let order = reading_order(&regions);
+        assert_eq!(order.len(), depth, "every region placed, and the process survived");
+        assert_eq!(order[0], 0, "the chain reads from its root");
+        assert_eq!(order[depth - 1], depth - 1);
     }
 
     #[test]
