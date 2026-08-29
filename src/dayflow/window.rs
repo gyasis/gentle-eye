@@ -44,15 +44,23 @@ pub enum PauseCause {
     DisplaySleep,
     /// The user turned capture off.
     UserOff,
+    /// A capture source was temporarily unreachable — minimised, covered, or a
+    /// stalled stream. Lifts on its own when the source comes back.
+    SourceOccluded,
+    /// A capture source ended for good — the window closed, the display was
+    /// unplugged, the stream finished. Does NOT lift on its own.
+    SourceEnded,
 }
 
 impl PauseCause {
     /// Whether this pause lifts on its own when the condition clears.
     ///
     /// `UserOff` is NOT automatic — auto-resuming it would override an explicit
-    /// instruction to stop recording.
+    /// instruction to stop recording. `SourceEnded` is not automatic either:
+    /// the source is gone, so "the condition clears" never happens and a retry
+    /// loop would spin forever (see `source::Availability::retryable`).
     pub fn is_automatic(self) -> bool {
-        !matches!(self, Self::UserOff)
+        !matches!(self, Self::UserOff | Self::SourceEnded)
     }
 }
 

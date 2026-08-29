@@ -27,11 +27,11 @@ line says so.
 
 ## Phase 2: Foundational — the source abstraction (blocks every user story)
 
-- [ ] T003 [US2] Define `CaptureSource` in `src/dayflow/source/mod.rs` per `contracts/capture-source.md`: `next_frame`, `regions_for`, `availability`, `identity`, `ordinal`.
+- [x] T003 [US2] Define `CaptureSource` in `src/dayflow/source/mod.rs` per `contracts/capture-source.md`: `next_frame`, `regions_for`, `availability`, `identity`, `ordinal`.
       `> DONE:` the trait compiles; its doc states the D014-1 rationale (a new kind must be addable without editing the loop) and the D014-2 note that `ordinal` occupies the existing `display_id` position.
-- [ ] T004 [P] [US2] `Availability` (`Available`/`Occluded`/`Ended`) and `SourceIdentity` in `src/dayflow/source/mod.rs`.
-      `> DONE:` a test proves the three availability states are distinct in a gap record; `SourceIdentity` is stable across a simulated move (position is NOT identity) and uses a SPECIFIED hash, with its value pinned — `DefaultHasher` is not stable across toolchains and this id is written to disk (013/R31).
-- [ ] T005 [S] [US2] `DisplaySource` in `src/dayflow/source/display.rs`, wrapping the existing `capture::display` path and the region cascade.
+- [x] T004 [P] [US2] `Availability` (`Available`/`Occluded`/`Ended`) and `SourceIdentity` in `src/dayflow/source/mod.rs`.
+      `> DONE:` **AMENDED (D014-9)** — the original wording said "distinct in a gap record", which is not implementable: `Gap` is per-SESSION and has no source field, so a gap for one of three displays would claim the whole session stopped. A test instead proves the three states drive distinct OUTCOMES (`gap_cause` + `retryable`), that a per-source failure is a `DropReason::SourceUnavailable` and not a gap, and that `Available` warrants NO gap; `SourceIdentity` is stable across a simulated move (position is NOT identity) and uses a SPECIFIED hash, with its value pinned — `DefaultHasher` is not stable across toolchains and this id is written to disk (013/R31).
+- [x] T005 [S] [US2] `DisplaySource` in `src/dayflow/source/display.rs`, wrapping the existing `capture::display` path and the region cascade.
       `> DONE:` an existing display session behaves byte-identically through the trait — same sample filenames, same `display_id` values, same regions; `cargo check` + clippy `-D warnings` = 0.
 
 ## Phase 3: User Story 1 — Dayflow runs by itself (P1)

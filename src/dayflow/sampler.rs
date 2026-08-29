@@ -70,6 +70,10 @@ pub enum DropReason {
     MalformedFrame,
     /// The frame was good but could not be written to disk.
     WriteFailed,
+    /// The source could not produce a frame for this interval — occluded,
+    /// stalled, or ended. Per-source and NOT a gap: a gap says capture stopped,
+    /// which is false while other sources are still producing.
+    SourceUnavailable,
 }
 
 impl DropReason {
@@ -78,6 +82,7 @@ impl DropReason {
         match self {
             Self::MalformedFrame => "malformed_frame",
             Self::WriteFailed => "write_failed",
+            Self::SourceUnavailable => "source_unavailable",
         }
     }
 }

@@ -190,3 +190,47 @@ failing binary). A surviving mutant may mean redundant code rather than a weak
 test; distinguish explicitly. And check every fixture against its own claim:
 thirteen times in 013 a fixture did not produce the condition its assertion
 named.
+
+## D014-9 — A per-source failure is a DROP, not a gap (found building W2/W3)
+
+**Decision.** `Availability` maps to two different existing taxonomies, and the
+choice between them is per-scope:
+
+| scope | record | type |
+|---|---|---|
+| one source could not produce this interval's frame | `SampleDrop { reason: DropReason::SourceUnavailable }` | per-source (`display_id`) |
+| capture stopped for the whole session | `Gap { cause: PauseCause::SourceOccluded \| SourceEnded }` | per-session |
+
+**Why this needed deciding.** T004's DONE line said "a test proves the three
+availability states are distinct in a gap record". That is not implementable as
+written: `timeline::Gap` carries `session_id` and no source field, so a gap for
+one of three displays claims the entire session stopped — while the other two
+are still producing. 013 separated these deliberately (`SampleDrop` is
+per-display; a gap is "quiet on purpose"), and collapsing them would have made a
+single occluded window read as a whole-day pause.
+
+`Availability::gap_cause()` therefore returns `Option<PauseCause>` and maps
+`Available` to `None`: a healthy source warrants no gap, and writing one would
+manufacture a recorded fact that never happened.
+
+**Added:** `DropReason::SourceUnavailable`, `PauseCause::SourceOccluded`,
+`PauseCause::SourceEnded`. `SourceEnded.is_automatic()` is `false` — the source
+is gone, so "the condition clears" never happens and an auto-resume would spin.
+
+**Amends:** T004's DONE line (see tasks.md, marked AMENDED).
+
+## D014-10 — `CaptureSource` is deliberately NOT `Send`
+
+**Decision.** The trait carries no `Send` bound.
+
+**Why.** Platform capture handles are thread-affine — scrap's X11 capturer holds
+`Rc<Server>` and raw pointers, so `DisplaySource` cannot be `Send`. A `Send`
+bound on the trait excludes the most basic source kind there is, which is a
+strong signal the bound is wrong rather than the implementation. The loop is a
+single ticking driver that owns its sources on the thread that created them; a
+source that genuinely must cross threads (a network stream with its own reader)
+owns that channel internally and still satisfies the trait.
+
+**Consequence for the loop (W4):** it cannot hand a source to a worker pool.
+This is a constraint on T006, recorded here so it is not rediscovered as a
+compile error.
