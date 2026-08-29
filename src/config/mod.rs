@@ -954,7 +954,14 @@ pub struct DayflowConfig {
     /// A day may therefore contain segments of DIFFERENT lengths. Nothing
     /// downstream may derive a duration by multiplying a count by this value —
     /// always read the segment's own recorded start and end.
-    #[serde(default = "default_segment_seconds")]
+    ///
+    /// `0` means UNSET, and unset is also the serde default — deliberately
+    /// different from [`DayflowConfig::default`]'s 900. Defaulting the FILE
+    /// field to 900 made the `chunk_minutes` fallback unreachable: a legacy
+    /// config setting only the old key silently got 900 while the docs claimed
+    /// its author's value was honored. Read via
+    /// [`DayflowConfig::segment_duration`], never this field directly.
+    #[serde(default)]
     pub segment_seconds: u32,
     /// Legacy interval in minutes, retained so existing config files keep
     /// parsing. [`DayflowConfig::segment_duration`] is the accessor to use;
@@ -1046,9 +1053,12 @@ impl DayflowConfig {
 
     /// The configured segment length.
     ///
-    /// `segment_seconds` is authoritative; `chunk_minutes` is consulted only
-    /// when `segment_seconds` is zero, so a legacy config file that sets only
-    /// the old key still behaves as its author intended.
+    /// `segment_seconds` is authoritative; `chunk_minutes` is consulted when
+    /// `segment_seconds` is zero — which is both the explicit sentinel AND the
+    /// serde default for a file that omits the key. So a legacy config setting
+    /// only the old key genuinely gets its author's value, and a file setting
+    /// neither gets `chunk_minutes`'s default (15 min = 900 s, the same value
+    /// [`DayflowConfig::default`] carries).
     pub fn segment_duration(&self) -> std::time::Duration {
         let secs = if self.segment_seconds > 0 {
             u64::from(self.segment_seconds)
@@ -1688,10 +1698,32 @@ mod tests {
     fn legacy_config_with_only_chunk_minutes_still_parses() {
         // A config file written before `segment_seconds` existed must keep working
         // and must keep meaning what its author intended (FR-035 back-compat).
+        //
+        // The fixture OMITS `segment_seconds` — that is what a legacy file
+        // actually looks like. An earlier version wrote `segment_seconds = 0`
+        // explicitly, which is not the condition the name claims: with the
+        // serde default at 900, a genuinely legacy file silently got 900 and
+        // this test could not see it.
         let cfg: DayflowConfig =
-            toml::from_str("chunk_minutes = 30\nsegment_seconds = 0\n").expect("legacy parse");
+            toml::from_str("chunk_minutes = 30\n").expect("legacy parse");
         assert_eq!(cfg.chunk_minutes, 30);
         assert_eq!(cfg.segment_duration().as_secs(), 30 * 60);
+    }
+
+    #[test]
+    fn an_explicit_zero_segment_seconds_also_falls_back_to_chunk_minutes() {
+        // 0 is the documented "unset" sentinel, spelled out or omitted alike.
+        let cfg: DayflowConfig =
+            toml::from_str("chunk_minutes = 30\nsegment_seconds = 0\n").expect("parse");
+        assert_eq!(cfg.segment_duration().as_secs(), 30 * 60);
+    }
+
+    #[test]
+    fn a_config_setting_neither_interval_key_gets_the_default_segment_length() {
+        // Omitting both keys must land on the same 900 s the programmatic
+        // Default carries — the serde-default change must not shift it.
+        let cfg: DayflowConfig = toml::from_str("").expect("empty parse");
+        assert_eq!(cfg.segment_duration().as_secs(), 900);
     }
 
     #[test]
