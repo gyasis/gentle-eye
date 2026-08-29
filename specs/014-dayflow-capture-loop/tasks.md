@@ -47,9 +47,9 @@ line says so.
 
 ## Phase 4: User Story 1 — regions reach the ladder (P1)
 
-- [ ] T010 [US1] Write the region sidecar beside every sample: `perception::regions_path(sample)`, produced by the loop from `CaptureSource::regions_for`.
+- [x] T010 [US1] Write the region sidecar beside every sample: `perception::regions_path(sample)`, produced by the loop from `CaptureSource::regions_for`.
       `> DONE:` an integration test drives the loop and then asserts the ladder took CROPS — text-tier call count is samples × regions, not samples. The consumer has existed since 013 with no producer.
-- [ ] T011 [S] [US1] Surface `SegmentLatency::samples_read_whole` in `DayflowStatus`, and count a `None` from `regions_for` into it.
+- [x] T011 [S] [US1] Surface `SegmentLatency::samples_read_whole` in `DayflowStatus`, and count a `None` from `regions_for` into it.
       `> DONE:` a session whose source yields no regions reports a NON-ZERO count in `status`, on all three surfaces. The path fails open by design, so its degradation is otherwise invisible — every test green and crop-before-extract entirely absent (013/R29). `cargo check` + clippy = 0.
 
 ## Phase 5: User Story 2 — watch one specific thing (P1)
