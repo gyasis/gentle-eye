@@ -1158,15 +1158,10 @@ fn dayflow_command(
         }
         "stop" => serde_json::json!({ "windows_closed": df.stop(now)?.len() }),
         "status" => serde_json::to_value(df.status(now)?)?,
-        "standup" => {
-            let (from, to) = range(rest)?;
-            let s = df.standup(from, to)?;
-            serde_json::json!({
-                "digest": s,
-                "text": gentle_eye::dayflow::standup::render(&s),
-            })
-        }
-        "timeline" if rest.iter().any(|a| a == "--standup") => {
+        // Both spellings, ONE body. Two copies of four lines is two copies
+        // that can drift, and the range wiring in one of them survived a
+        // swapped-argument mutation in the wave before this.
+        "standup" | "timeline" if sub == "standup" || rest.iter().any(|a| a == "--standup") => {
             let (from, to) = range(rest)?;
             let s = df.standup(from, to)?;
             serde_json::json!({
@@ -1342,5 +1337,36 @@ mod dayflow_cli_tests {
         assert!(dayflow_command(&s, &argv(&["frobnicate"]), now()).is_err());
         // …but no subcommand at all defaults to status, which is the harmless one
         assert!(dayflow_command(&s, &[], now()).is_ok());
+    }
+
+    #[test]
+    fn the_cli_standup_passes_from_and_to_in_the_right_order() {
+        // Swapping them here survived the whole suite: `dayflow_command` was
+        // made testable in the previous wave precisely so new arms would be
+        // covered, and this arm was added without a test anyway.
+        let s = svc();
+        for argv_form in [
+            vec!["standup", "--from", "2026-08-26T09:00:00Z", "--to", "2026-08-26T17:00:00Z"],
+            vec!["timeline", "--standup", "--from", "2026-08-26T09:00:00Z", "--to", "2026-08-26T17:00:00Z"],
+        ] {
+            let out = dayflow_command(&s, &argv(&argv_form), now()).unwrap();
+            let d = &out["digest"];
+            assert!(d["from"].as_str().unwrap().starts_with("2026-08-26T09:00"), "{out}");
+            assert!(d["to"].as_str().unwrap().starts_with("2026-08-26T17:00"), "{out}");
+            assert!(out["text"].is_string(), "and the prose is rendered: {out}");
+        }
+    }
+
+    #[test]
+    fn both_cli_spellings_of_standup_give_the_same_digest() {
+        // `standup` and `timeline --standup` must not drift apart.
+        let s = svc();
+        let a = dayflow_command(&s, &argv(&["standup"]), now()).unwrap();
+        let b = dayflow_command(&s, &argv(&["timeline", "--standup"]), now()).unwrap();
+        assert_eq!(a, b);
+        // …and a bare `timeline` is still the entry list, not the digest.
+        let plain = dayflow_command(&s, &argv(&["timeline"]), now()).unwrap();
+        assert!(plain["entries"].is_array(), "{plain}");
+        assert!(plain.get("digest").is_none());
     }
 }

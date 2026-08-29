@@ -2321,3 +2321,65 @@ back as `Other` — and **nothing anywhere reports a problem**. Now derived from
 
 **A literal that restates an enum is a second source of truth with no compiler between them.** The
 same shape as R37's three copies of the range default, in a prompt instead of a function.
+
+
+## R40 — Wave 11 review: I moved the second source of truth instead of removing it (2026-08-26)
+
+Verdict **FAIL**, and the sharpest finding is that my own fix for a drift bug reproduced the bug one
+level down.
+
+### Relocating a literal is not removing it
+
+R39 said the prompt's hardcoded category list was replaced by one derived from the enum. What
+actually happened: the literal moved from the prompt into `ActivityCategory::ALL`, a
+hand-written `[Self; 7]`. **A variant added to the enum but omitted from `ALL` passed all 555
+tests** — the prompt never mentioned it, every entry that should have carried it came back `Other`,
+and nothing reported a problem. Exactly the failure I had claimed to eliminate.
+
+Worse, both tests iterated `ALL`, so they **validated the stale list against the stale list**. My
+first repair — an exhaustive `taxonomy_index` match plus a length check — also failed, and for an
+instructive reason: **a check written in terms of `ALL` cannot see what `ALL` is missing.** The
+exhaustive match caught the variant at compile time only until someone added the arm; then the
+length check compared `ALL.len()` against a maximum computed *over `ALL`*, and passed.
+
+The fix that works is to have one declaration generate all three things — enum, `ALL`, and
+`wire_name` — from a macro. Verified by doing it: adding a category the only way the macro allows
+puts it in the prompt automatically, and there is no longer a way to add one that does not.
+
+**The general form: when a duplicate must be eliminated, check whether the fix removed the second
+copy or gave it a new address.** Mine gave it a new address, twice.
+
+### A digest that counted the same minute twice
+
+Windows are per DISPLAY, so a two-monitor session emits two entries over the same wall-clock
+minute — and summing them reported two minutes of a day that had one. On a mostly-idle two-monitor
+day the inflation crossed the sparse threshold, so **the one safeguard against over-trusting the
+digest was the first thing the bug destroyed**.
+
+`recorded_seconds` is now the UNION of intervals; `attributed_seconds` is the sum, reported
+separately because the difference is real information (two screens doing different things at once),
+and reconciling it away would make a two-monitor day look either twice as long or half as busy
+depending on which number was kept.
+
+Entries are also clipped to the range now. The store's query is overlap-based, so an entry that
+began before `from` arrived whole — and my docstring defended not clipping by saying it "would
+invent durations the recorder never observed", which is backwards: clipping removes time; what was
+invented was attributing pre-range activity to the range.
+
+### A tautology I wrote while trying to prove a taxonomy
+
+`assert!(ActivityCategory::ALL.contains(&s.category))` cannot fail for any value of the type.
+Changing either unknown-token fallback from `Other` to `Meeting` survived the suite, so `"wat"`
+silently became a meeting. **Twelfth instance of a fixture not producing the condition the assertion
+names**, and the second time in this project that a "membership in an enum" assertion has been
+mistaken for a behavioural one.
+
+Now asserted as an actual mapping: every wire name round-trips to itself, case and padding are
+variance rather than error, and anything unrecognised is `Other` — never some other real category,
+which would file unknown work under a specific heading and look deliberate in the digest.
+
+### And a prompt test that accepted a garbage schema
+
+`prompt.contains(wire_name)` for each of seven names is satisfied by joining them with `""` — one
+run-together token offered to the model as its entire category schema. The assertion is on the
+alternation now.

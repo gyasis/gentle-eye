@@ -26,9 +26,12 @@ use crate::dayflow::models::{ActivityCategory, TimelineEntry};
 pub struct CategorySlice {
     /// The category.
     pub category: ActivityCategory,
-    /// Total time spent, summed from real entry durations.
+    /// Wall-clock time in this category, counting overlap within it once.
     pub seconds: i64,
-    /// Share of the digest's total, 0–100, rounded to one decimal.
+    /// Share of [`Standup::attributed_seconds`], 0–100, rounded to one decimal.
+    ///
+    /// Each slice rounds independently, so the column can sum to slightly more
+    /// or less than 100 — with seven categories, measured drift is at most 0.3.
     pub percent: f64,
     /// How many entries contributed — reported ALONGSIDE the duration, never
     /// instead of it, so a reader can see "eleven short interruptions" and "one
@@ -45,11 +48,22 @@ pub struct Standup {
     pub from: DateTime<Utc>,
     /// End of the range digested.
     pub to: DateTime<Utc>,
-    /// Total recorded time — the sum of entry durations, NOT the wall-clock
-    /// span of the range. A four-hour range with twenty minutes of entries in
-    /// it recorded twenty minutes, and saying otherwise would attribute
+    /// Wall-clock time actually covered by recordings, counting overlap ONCE.
+    ///
+    /// NOT the span of the range: a four-hour range with twenty minutes of
+    /// entries recorded twenty minutes, and saying otherwise attributes
     /// unrecorded time to whatever happened to be nearby.
+    ///
+    /// And NOT the sum of entry durations: windows are per display, so a
+    /// two-monitor session produces two entries covering the same minute.
     pub recorded_seconds: i64,
+    /// Time attributed to categories, which can EXCEED `recorded_seconds` when
+    /// two displays were doing different things at once.
+    ///
+    /// Reported separately rather than reconciled away: the difference is the
+    /// concurrency, and hiding it would make a two-monitor day look either
+    /// twice as long or half as busy depending on which number was chosen.
+    pub attributed_seconds: i64,
     /// Wall-clock span of the range, for contrast with the above.
     pub span_seconds: i64,
     /// Categories, largest share first.
@@ -74,37 +88,57 @@ impl Standup {
 /// the recorder never observed, and the range is the caller's question, not a
 /// claim about what was captured.
 pub fn digest(entries: &[TimelineEntry], from: DateTime<Utc>, to: DateTime<Utc>) -> Standup {
-    /// What one category accumulates while the entries are walked: the
-    /// category itself, total seconds, entry count, and each activity label
-    /// with the time it carried.
+    /// What one category accumulates: the category, its intervals, and each
+    /// activity label with the time it carried.
     struct Bucket {
         category: ActivityCategory,
-        seconds: i64,
+        intervals: Vec<(DateTime<Utc>, DateTime<Utc>)>,
         entries: usize,
         labels: Vec<(String, i64)>,
     }
     let mut by_category: BTreeMap<String, Bucket> = BTreeMap::new();
+    let mut all_intervals: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::new();
 
     for e in entries {
-        // A backwards or zero-length entry contributes no time. Taking its
-        // absolute value would manufacture duration out of a clock glitch.
-        let secs = (e.end_time - e.start_time).num_seconds().max(0);
+        // CLIPPED to the range. The store's query is overlap-based, so an entry
+        // that began before `from` arrives whole — and counting all of it
+        // attributes activity from BEFORE the range to a digest of it. Clipping
+        // does not invent duration, it declines to claim time the caller did
+        // not ask about.
+        let start = e.start_time.max(from);
+        let end = e.end_time.min(to);
+        // A backwards entry (a clock step) or one entirely outside the range
+        // contributes no time. Its absolute value would manufacture duration
+        // out of a glitch.
+        let secs = (end - start).num_seconds().max(0);
+        if secs > 0 {
+            all_intervals.push((start, end));
+        }
+
         let slot = by_category.entry(e.category.wire_name().to_string()).or_insert(Bucket {
             category: e.category,
-            seconds: 0,
+            intervals: Vec::new(),
             entries: 0,
             labels: Vec::new(),
         });
-        slot.seconds += secs;
         slot.entries += 1;
+        if secs > 0 {
+            slot.intervals.push((start, end));
+        }
         slot.labels.push((e.activity.clone(), secs));
     }
 
-    let recorded: i64 = by_category.values().map(|b| b.seconds).sum();
+    // UNION, not sum. Windows are per DISPLAY, so a two-monitor session
+    // produces two entries covering the same wall-clock minute — and summing
+    // them reports two minutes of a day that had one. On a mostly-idle
+    // two-monitor day that inflation is enough to push the total past the
+    // sparse threshold, so the one safeguard against over-trusting the digest
+    // is the first thing the bug destroys.
+    let recorded = union_seconds(&mut all_intervals);
 
     let mut categories: Vec<CategorySlice> = by_category
         .into_values()
-        .map(|Bucket { category, seconds, entries, mut labels }| {
+        .map(|Bucket { category, mut intervals, entries, mut labels }| {
             labels.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
             let mut activities: Vec<String> = Vec::new();
             for (label, _) in labels {
@@ -114,21 +148,31 @@ pub fn digest(entries: &[TimelineEntry], from: DateTime<Utc>, to: DateTime<Utc>)
             }
             CategorySlice {
                 category,
-                seconds,
-                percent: if recorded > 0 {
-                    ((seconds as f64 / recorded as f64) * 1000.0).round() / 10.0
-                } else {
-                    0.0
-                },
+                seconds: union_seconds(&mut intervals),
+                percent: 0.0, // filled below, once the attributed total is known
                 entries,
                 activities,
             }
         })
         .collect();
 
-    // Largest share first, ties broken by name so the order is the same on
-    // every run — a digest that reshuffles between two identical requests looks
-    // like the day changed.
+    // Percentages are shares of ATTRIBUTED time, not of `recorded`: two
+    // displays can be doing DIFFERENT things at once, so the category unions
+    // can legitimately sum to more than the wall-clock they cover. Dividing by
+    // `recorded` would then produce percentages summing past 100 — a number a
+    // reader would rightly disbelieve.
+    let attributed: i64 = categories.iter().map(|c| c.seconds).sum();
+    for c in &mut categories {
+        c.percent = if attributed > 0 {
+            ((c.seconds as f64 / attributed as f64) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        };
+    }
+
+    // Largest share first. Ties land in name order because the BTreeMap yields
+    // them that way and `sort_by` is stable — the tie-break below makes that
+    // explicit rather than relying on it.
     categories.sort_by(|a, b| {
         b.seconds
             .cmp(&a.seconds)
@@ -139,9 +183,30 @@ pub fn digest(entries: &[TimelineEntry], from: DateTime<Utc>, to: DateTime<Utc>)
         from,
         to,
         recorded_seconds: recorded,
+        attributed_seconds: attributed,
         span_seconds: (to - from).num_seconds().max(0),
         categories,
     }
+}
+
+/// Total wall-clock seconds covered by `intervals`, counting overlap ONCE.
+fn union_seconds(intervals: &mut [(DateTime<Utc>, DateTime<Utc>)]) -> i64 {
+    if intervals.is_empty() {
+        return 0;
+    }
+    intervals.sort_by_key(|(s, _)| *s);
+    let mut total = 0i64;
+    let (mut cur_start, mut cur_end) = intervals[0];
+    for &(s, e) in &intervals[1..] {
+        if s > cur_end {
+            total += (cur_end - cur_start).num_seconds();
+            cur_start = s;
+            cur_end = e;
+        } else if e > cur_end {
+            cur_end = e;
+        }
+    }
+    total + (cur_end - cur_start).num_seconds()
 }
 
 /// Render the digest as the prose a person reads in a standup.
@@ -158,6 +223,16 @@ pub fn render(s: &Standup) -> String {
              not the whole period.\n\n",
             human(s.recorded_seconds),
             human(s.span_seconds)
+        ));
+    }
+    if s.attributed_seconds > s.recorded_seconds {
+        // Otherwise the percentages describe display-time while the total
+        // describes wall-clock, and nothing says the two differ.
+        out.push_str(&format!(
+            "{} of activity across {} of wall-clock — displays were showing \
+             different things at once.\n\n",
+            human(s.attributed_seconds),
+            human(s.recorded_seconds)
         ));
     }
     for c in &s.categories {
@@ -262,8 +337,91 @@ mod tests {
         assert_eq!(coding.seconds, 1_840, "not 3 x the interval");
         let total: i64 = d.categories.iter().map(|c| c.seconds).sum();
         assert_eq!(total, d.recorded_seconds, "the parts sum to the whole");
+        // Each slice rounds independently, so the column need not land exactly
+        // on 100. The 0.2 in the first version of this assertion was a property
+        // of its two-category fixture presented as an invariant; brute force
+        // finds seven-way partitions summing to 100.3, so the honest bound is
+        // half the number of categories times the rounding step.
         let pct: f64 = d.categories.iter().map(|c| c.percent).sum();
-        assert!((pct - 100.0).abs() < 0.2, "and the percentages do too: {pct}");
+        let bound = 0.05 * d.categories.len() as f64;
+        assert!(
+            (pct - 100.0).abs() <= bound.max(0.1),
+            "percentages sum to {pct}, outside the rounding bound {bound}"
+        );
+    }
+
+    #[test]
+    fn two_displays_covering_the_same_minute_record_one_minute_not_two() {
+        // Windows are per DISPLAY, so a two-monitor session produces two
+        // entries over the same wall-clock minute. Summing them reports two
+        // minutes of a day that had one — and on a mostly-idle two-monitor day
+        // that inflation pushes the total past the sparse threshold, so the one
+        // safeguard against over-trusting the digest is the first casualty.
+        let entries = vec![
+            entry(0, 7_200, ActivityCategory::Coding, "display 0"),
+            entry(0, 7_200, ActivityCategory::Coding, "display 1"),
+        ];
+        let d = digest(&entries, at(0), at(28_800)); // an 8-hour range
+
+        assert_eq!(d.recorded_seconds, 7_200, "two hours of wall-clock, not four");
+        assert!(
+            d.is_sparse(),
+            "6 of 8 hours have no recording at all: recorded={} span={}",
+            d.recorded_seconds,
+            d.span_seconds
+        );
+        assert!(render(&d).starts_with("Only 2h of 8h"), "{}", render(&d));
+    }
+
+    #[test]
+    fn two_displays_doing_different_things_report_both_without_inflating_the_clock() {
+        // The other half: concurrency is real information. An hour of coding on
+        // one screen and an hour of meeting on the other is one hour of
+        // wall-clock and two hours of attributed activity, and a digest that
+        // reported only one of those numbers would be wrong either way.
+        let entries = vec![
+            entry(0, 3_600, ActivityCategory::Coding, "the ladder"),
+            entry(0, 3_600, ActivityCategory::Meeting, "standup"),
+        ];
+        let d = digest(&entries, at(0), at(3_600));
+
+        assert_eq!(d.recorded_seconds, 3_600, "one hour actually elapsed");
+        assert_eq!(d.attributed_seconds, 7_200, "across two screens");
+        let pct: f64 = d.categories.iter().map(|c| c.percent).sum();
+        assert!((pct - 100.0).abs() < 0.5, "shares still sum to 100: {pct}");
+        assert!(
+            render(&d).contains("displays were showing different things at once"),
+            "and the reader is told: {}",
+            render(&d)
+        );
+    }
+
+    #[test]
+    fn an_entry_straddling_the_range_contributes_only_the_part_inside_it() {
+        // The store's query is OVERLAP-based, so an entry that began before
+        // `from` arrives whole. Counting all of it attributes activity from
+        // before the range to a digest of the range — and a single long
+        // straddling entry can push the total past the span.
+        let entries = vec![entry(0, 7_200, ActivityCategory::Coding, "started earlier")];
+        let d = digest(&entries, at(3_600), at(10_800)); // asked about 1h-3h
+
+        assert_eq!(d.recorded_seconds, 3_600, "only the hour inside the range");
+        assert!(
+            d.recorded_seconds <= d.span_seconds,
+            "recorded {} cannot exceed the span {}",
+            d.recorded_seconds,
+            d.span_seconds
+        );
+        assert_eq!(d.categories[0].entries, 1, "and the entry is still reported");
+    }
+
+    #[test]
+    fn an_entry_entirely_outside_the_range_contributes_nothing() {
+        let entries = vec![entry(0, 600, ActivityCategory::Coding, "yesterday")];
+        let d = digest(&entries, at(10_000), at(20_000));
+        assert_eq!(d.recorded_seconds, 0);
+        assert_eq!(d.categories[0].seconds, 0, "no time…");
+        assert_eq!(d.categories[0].entries, 1, "…but it is not silently dropped");
     }
 
     #[test]
@@ -321,7 +479,12 @@ mod tests {
         for _ in 0..20 {
             assert_eq!(digest(&entries, at(0), at(1_800)), first);
         }
-        // Equal durations, so the tie-break must be doing the work.
+        // Equal durations, so SOMETHING must order these deterministically.
+        // Note it is the BTreeMap (name-ascending) plus a stable sort that
+        // actually does it — deleting the explicit tie-break changes nothing,
+        // which a mutation confirmed. It stays because relying on an incidental
+        // property of the collection is how the order breaks when the
+        // collection changes.
         assert_eq!(
             first.categories.iter().map(|c| c.category.wire_name()).collect::<Vec<_>>(),
             vec!["coding", "comms", "docs"],

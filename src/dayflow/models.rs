@@ -11,63 +11,69 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// A coarse activity classification for a timeline entry.
+/// Declare the activity taxonomy ONCE.
 ///
-/// Context-aware (what the user was *doing*), not app-name logging —
-/// "researching on YouTube" is `Browsing`, not "Chrome".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivityCategory {
+/// The enum, [`ActivityCategory::ALL`] and `wire_name` are all generated from
+/// this single list, so adding a category is one edit and cannot half-land.
+///
+/// This exists because two weaker attempts did not hold. The prompt first
+/// repeated the categories as a string literal — add a variant and the model is
+/// never told, so every entry that should carry it comes back `Other` with
+/// nothing reporting a problem. Deriving the prompt from a hand-written `ALL`
+/// const only MOVED that literal: `ALL` was still a hand-list, the tests
+/// iterated `ALL` itself (validating the stale list against the stale list),
+/// and a variant added to the enum but omitted from `ALL` passed the entire
+/// suite. Even an exhaustive-match index guard did not catch it, because a
+/// check written in terms of `ALL` cannot see what `ALL` is missing.
+///
+/// A macro removes the second source of truth instead of relocating it.
+macro_rules! activity_taxonomy {
+    ($( $(#[$meta:meta])* $variant:ident => $wire:literal ),+ $(,)?) => {
+        /// A coarse activity classification for a timeline entry.
+        ///
+        /// Context-aware (what the user was *doing*), not app-name logging —
+        /// "researching on YouTube" is `Browsing`, not "Chrome".
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+        #[serde(rename_all = "snake_case")]
+        pub enum ActivityCategory {
+            $( $(#[$meta])* $variant, )+
+        }
+
+        impl ActivityCategory {
+            /// Every category, in taxonomy order.
+            ///
+            /// Generated alongside the enum, so it cannot omit a variant.
+            pub const ALL: &'static [Self] = &[ $( Self::$variant ),+ ];
+
+            /// The token used on the wire, in prompts, and in the database.
+            pub fn wire_name(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $wire, )+
+                }
+            }
+        }
+    };
+}
+
+activity_taxonomy! {
     /// Writing or editing code.
-    Coding,
+    Coding => "coding",
     /// Reading or writing documentation / prose.
-    Docs,
+    Docs => "docs",
     /// Email, chat, calls.
-    Comms,
+    Comms => "comms",
     /// Web browsing / research.
-    Browsing,
+    Browsing => "browsing",
     /// In a meeting / call.
-    Meeting,
+    Meeting => "meeting",
     /// No meaningful activity.
-    Idle,
+    Idle => "idle",
     /// Anything that doesn't fit the above.
     #[default]
-    Other,
+    Other => "other",
 }
 
-impl ActivityCategory {
-    /// Every category, in taxonomy order.
-    ///
-    /// Exists so the summarizer prompt is DERIVED from the enum rather than
-    /// repeating it as a string literal. A hardcoded list in a prompt drifts
-    /// silently: add a variant and the model is never told about it, so every
-    /// entry that should carry it comes back as `Other` and nothing anywhere
-    /// reports a problem.
-    pub const ALL: [Self; 7] = [
-        Self::Coding,
-        Self::Docs,
-        Self::Comms,
-        Self::Browsing,
-        Self::Meeting,
-        Self::Idle,
-        Self::Other,
-    ];
-
-    /// The token used on the wire, in prompts, and in the database.
-    pub fn wire_name(self) -> &'static str {
-        match self {
-            Self::Coding => "coding",
-            Self::Docs => "docs",
-            Self::Comms => "comms",
-            Self::Browsing => "browsing",
-            Self::Meeting => "meeting",
-            Self::Idle => "idle",
-            Self::Other => "other",
-        }
-    }
-}
-
-/// One recording mode for a dayflow session.
+/// How a dayflow run is driven.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DayflowMode {
@@ -77,6 +83,34 @@ pub enum DayflowMode {
     /// Long-lived continuous daemon, auto-rolling segments across the day.
     Daemon,
 }
+
+#[cfg(test)]
+mod taxonomy_tests {
+    use super::ActivityCategory;
+
+    #[test]
+    fn every_wire_name_is_distinct() {
+        // Two variants sharing a token would silently merge in the database, in
+        // the prompt, and in every digest.
+        let mut names: Vec<&str> = ActivityCategory::ALL.iter().map(|c| c.wire_name()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "duplicate wire names: {names:?}");
+    }
+
+    #[test]
+    fn the_wire_name_matches_what_serde_writes() {
+        // `wire_name` and the serde token are used interchangeably — the
+        // database writes one, the prompt offers the other — so a divergence
+        // would store a category the parser could never read back.
+        for c in ActivityCategory::ALL {
+            let json = serde_json::to_string(c).unwrap();
+            assert_eq!(json.trim_matches('"'), c.wire_name(), "{c:?}");
+        }
+    }
+}
+
 
 /// Lifecycle status of a dayflow session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -660,4 +694,5 @@ mod liveness_tests {
         let json = serde_json::to_string(&l).unwrap();
         assert!(json.contains("\"health\""), "health must be in the payload: {json}");
     }
+
 }

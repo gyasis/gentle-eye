@@ -215,7 +215,11 @@ fn parse_chunk_summary(chunk: &ChunkRef, text: &str) -> ChunkSummary {
 }
 
 fn category_from(s: &str) -> ActivityCategory {
-    serde_json::from_str(&format!("\"{}\"", s.to_lowercase())).unwrap_or(ActivityCategory::Other)
+    // TRIMMED as well as lowercased: a model emitting `"  docs  "` is emitting
+    // docs, and filing it as Other loses a classification for a whitespace
+    // difference nobody would call an error.
+    serde_json::from_str(&format!("\"{}\"", s.trim().to_lowercase()))
+        .unwrap_or(ActivityCategory::Other)
 }
 
 fn category_str(c: &ActivityCategory) -> String {
@@ -536,13 +540,20 @@ mod tests {
         // that should carry it comes back as `Other` and nothing reports a
         // problem. Derived from the enum now, and asserted against it.
         let prompt = build_chunk_prompt(&RollingContext::default());
-        for c in ActivityCategory::ALL {
-            assert!(
-                prompt.contains(c.wire_name()),
-                "the model is never told about `{}`: {prompt}",
-                c.wire_name()
-            );
-        }
+        // The ALTERNATION, not seven independent substrings: joining the names
+        // with "" instead of "|" satisfies `contains` for every member while
+        // offering the model one garbage token as its whole schema — and that
+        // mutation survived the suite.
+        let alternation = ActivityCategory::ALL
+            .iter()
+            .map(|c| c.wire_name())
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(
+            prompt.contains(&alternation),
+            "the prompt must offer the categories as alternatives, not as one \
+             run-together token. Expected `{alternation}` in: {prompt}"
+        );
     }
 
     #[test]
@@ -560,16 +571,45 @@ mod tests {
             sequence: 0,
             summarized: false,
         };
-        for token in ["coding", "docs", "comms", "browsing", "meeting", "idle", "other",
-                      "CODING", "  docs  ", "wat", "", "null", "42"] {
+        // `ALL.contains(&category)` is a TAUTOLOGY — it cannot fail for any
+        // value of the type — so the previous version of this test pinned
+        // nothing: changing either fallback from Other to Meeting survived the
+        // whole suite, and "wat" silently became a meeting.
+        //
+        // Assert the actual mapping instead, in both directions.
+        for c in ActivityCategory::ALL {
             let json = format!(
-                r#"{{"category":"{token}","app":"a","activity":"b","detail":"c"}}"#
+                r#"{{"category":"{}","app":"a","activity":"b","detail":"c"}}"#,
+                c.wire_name()
             );
-            let s = parse_chunk_summary(&chunk, &json);
-            assert!(
-                ActivityCategory::ALL.contains(&s.category),
-                "token {token:?} produced a category outside the taxonomy"
+            assert_eq!(
+                parse_chunk_summary(&chunk, &json).category,
+                *c,
+                "`{}` must round-trip to itself",
+                c.wire_name()
             );
         }
+
+        // Case and padding are variance, not error.
+        for (token, expect) in [("CODING", ActivityCategory::Coding), ("  docs  ", ActivityCategory::Docs)] {
+            let json = format!(r#"{{"category":"{token}","app":"a","activity":"b","detail":"c"}}"#);
+            assert_eq!(parse_chunk_summary(&chunk, &json).category, expect, "token {token:?}");
+        }
+
+        // Anything unrecognisable is Other — NOT some other real category,
+        // which would file unknown work under a specific heading and look
+        // deliberate in the digest.
+        for token in ["wat", "", "null", "42", "meetingg"] {
+            let json = format!(r#"{{"category":"{token}","app":"a","activity":"b","detail":"c"}}"#);
+            assert_eq!(
+                parse_chunk_summary(&chunk, &json).category,
+                ActivityCategory::Other,
+                "unknown token {token:?} must fall back to Other"
+            );
+        }
+
+        // And a MISSING category key, which is a different code path.
+        let no_key = r#"{"app":"a","activity":"b","detail":"c"}"#;
+        assert_eq!(parse_chunk_summary(&chunk, no_key).category, ActivityCategory::Other);
     }
 }
