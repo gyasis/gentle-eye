@@ -204,6 +204,16 @@ impl Sampler {
         }
     }
 
+    /// Record a drop the sampler could not observe itself.
+    ///
+    /// A source that cannot produce a frame fails BEFORE the sampler sees one,
+    /// so `observe` never runs and the interval would otherwise vanish. The
+    /// ledger belongs here, with every other drop, rather than in a second
+    /// place every surface would have to remember to read.
+    pub fn record_drop(&mut self, drop: SampleDrop) {
+        self.drops.push(drop);
+    }
+
     /// Every interval whose frame could not be obtained.
     ///
     /// This is the surface a status payload or a timeline view renders: dropped

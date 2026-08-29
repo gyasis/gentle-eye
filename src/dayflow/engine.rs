@@ -188,6 +188,12 @@ impl DayflowRun {
     ///
     /// Returns any window that closed as a result. Windows are counted here, so
     /// the liveness evidence advances only when something was actually produced.
+    /// The sequence a sample taken now would belong to, for `display_id`.
+    /// Read before `on_sample` — see [`WindowController::current_sequence`].
+    pub fn current_sequence(&self, display_id: u32) -> u64 {
+        self.windows.current_sequence(display_id)
+    }
+
     pub fn on_sample(&mut self, display_id: u32, now: DateTime<Utc>) -> Option<ClosedWindow> {
         // Enforce the cap before accepting the sample: a bounded session must not
         // record past its own limit just because something kept feeding it.

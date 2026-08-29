@@ -185,6 +185,20 @@ impl WindowController {
     ///
     /// While paused this is a no-op returning `None`: no samples are taken, so
     /// none may be counted.
+    /// The sequence a sample taken NOW would belong to, for `display_id`.
+    ///
+    /// The sampler needs this to build the durable key `(session, display_id,
+    /// sequence)`. Read it BEFORE calling `on_sample`: `on_sample` may close the
+    /// open window and start the next one, at which point the sample that
+    /// triggered the close belongs to the window that just ended, not to its
+    /// successor.
+    pub fn current_sequence(&self, display_id: u32) -> u64 {
+        self.open
+            .get(&display_id)
+            .map(|w| w.sequence)
+            .unwrap_or_else(|| self.next_sequence.get(&display_id).copied().unwrap_or(0))
+    }
+
     pub fn on_sample(&mut self, display_id: u32, now: DateTime<Utc>) -> Option<ClosedWindow> {
         if self.paused.is_some() {
             return None;

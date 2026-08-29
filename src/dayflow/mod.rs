@@ -16,6 +16,7 @@
 //! - [`daemon`]     — continuous all-day daemon (Wave 5).
 //! - [`retention`]  — save → shrink → archive + disk-evict guard (Wave 6).
 
+pub mod capture_loop;
 pub mod chunking;
 pub mod daemon;
 pub mod engine;

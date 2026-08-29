@@ -234,3 +234,35 @@ owns that channel internally and still satisfies the trait.
 **Consequence for the loop (W4):** it cannot hand a source to a worker pool.
 This is a constraint on T006, recorded here so it is not rediscovered as a
 compile error.
+
+## D014-11 — OPEN: the capture thread mutates the run under a poison-recovering lock
+
+**Status: OPEN — flagged, not resolved.** Recorded rather than silently accepted.
+
+`DayflowService::lock()` recovers from mutex poisoning, and its own comment says
+that is sound **only** because "every mutation under this guard is a single
+atomic `Option` assignment... Keep mutations here atomic, or make this return
+the error."
+
+T009's capture thread breaks that premise: it holds the guard and calls
+`run.on_sample(...)`, which mutates the run's internal window set in place. A
+panic mid-`on_sample` can therefore leave a run that is structurally valid but
+logically inconsistent (the window advanced, the sample was not recorded), and
+the recovery would serve it as healthy.
+
+**What I tried and reverted.** Discarding the run on poison and flagging it
+Degraded. That broke `a_panic_while_holding_the_lock_does_not_kill_the_service`,
+an existing green test asserting the opposite guarantee. Breaking a documented,
+tested invariant to satisfy a theoretical concern is the wrong trade to make
+unilaterally, so the change was reverted and the concern recorded here.
+
+**The options, none yet chosen:**
+1. Capture thread owns the run; the service keeps a read-only status snapshot
+   behind its own lock. Preserves both guarantees; largest change.
+2. Recover, but mark the session Degraded when the poison occurred while the
+   capture thread held the guard. Needs a holder tag.
+3. Accept it: argue an in-place `on_sample` panic is not a real tear, and widen
+   the comment to say so explicitly.
+
+Until this is decided, the risk is: a panic inside the capture thread's tick
+produces a session that reports healthy while having skipped a sample.

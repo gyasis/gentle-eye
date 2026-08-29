@@ -112,15 +112,32 @@ pub fn resolve_range(
 
 /// The single Dayflow engine, shared by every surface.
 pub struct DayflowService {
-    run: Mutex<Option<DayflowRun>>,
+    run: Arc<Mutex<Option<DayflowRun>>>,
     store: Arc<dyn TimelineStore + Send + Sync>,
     config: DayflowConfig,
+    /// The running capture thread, when a session is driving itself.
+    capture: Mutex<Option<CaptureHandle>>,
+}
+
+/// A capture thread and its stop signal.
+///
+/// The loop is deliberately NOT `Send` (D014-10): platform capture handles are
+/// thread-affine, so the sources are BUILT on the capture thread and never
+/// cross it. The service therefore holds a control handle, not the loop.
+struct CaptureHandle {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    join: std::thread::JoinHandle<()>,
 }
 
 impl DayflowService {
     /// Build the service over a timeline store.
     pub fn new(store: Arc<dyn TimelineStore + Send + Sync>, config: DayflowConfig) -> Self {
-        Self { run: Mutex::new(None), store, config }
+        Self {
+            run: Arc::new(Mutex::new(None)),
+            store,
+            config,
+            capture: Mutex::new(None),
+        }
     }
 
     /// Start a session.
@@ -142,6 +159,84 @@ impl DayflowService {
         let id = run.session_id();
         *guard = Some(run);
         Ok(id)
+    }
+
+    /// Start the capture loop for the running session.
+    ///
+    /// `build_sources` runs ON the capture thread: platform capture handles are
+    /// thread-affine (D014-10), so a source built here and sent over would be
+    /// unusable — and for scrap's X11 capturer, would not compile.
+    ///
+    /// The thread ticks on `interval`, driving the same pipeline the tests
+    /// drive. It stops when `stop_capture` is called or the session ends.
+    pub fn start_capture(
+        &self,
+        build_sources: Box<dyn FnOnce() -> Vec<Box<dyn crate::dayflow::source::CaptureSource>> + Send>,
+        sample_dir: std::path::PathBuf,
+        interval: std::time::Duration,
+    ) -> Result<(), DayflowError> {
+        let mut guard = self
+            .capture
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if guard.is_some() {
+            return Err(DayflowError::AlreadyRunning);
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let delta = self.config.delta.clone();
+        let run = Arc::clone(&self.run);
+        let join = std::thread::spawn(move || {
+            let sources = build_sources();
+            let mut lp = crate::dayflow::capture_loop::CaptureLoop::new(
+                sources,
+                crate::dayflow::sampler::Sampler::new(delta),
+                sample_dir,
+            );
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                // `Utc::now()` appears HERE and nowhere below it. This is the
+                // edge that supplies the clock; every decision downstream takes
+                // `now` as a parameter, which is what makes the loop testable
+                // at all (T007, 013/R36).
+                let now = Utc::now();
+                let mut guard = match run.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                match guard.as_mut() {
+                    Some(active) => {
+                        lp.tick(active, now);
+                    }
+                    // The session ended underneath us; stop rather than spin.
+                    None => break,
+                }
+                drop(guard);
+                std::thread::sleep(interval);
+            }
+        });
+        *guard = Some(CaptureHandle { stop, join });
+        Ok(())
+    }
+
+    /// Signal the capture thread to stop and wait for it.
+    pub fn stop_capture(&self) -> Result<(), DayflowError> {
+        let handle = {
+            let mut guard = self.capture.lock().unwrap_or_else(|p| p.into_inner());
+            guard.take()
+        };
+        if let Some(h) = handle {
+            h.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = h.join.join();
+        }
+        Ok(())
+    }
+
+    /// Whether a capture thread is currently running.
+    pub fn capture_running(&self) -> bool {
+        self.capture
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
     }
 
     /// Stop the running session, returning the windows it closed.
