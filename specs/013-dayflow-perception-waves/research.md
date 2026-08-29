@@ -1399,3 +1399,74 @@ distinction that carries no behaviour.
 more of the capture, so a higher score was correct and the metric was fine. The block has to grow
 with material **unrelated to the capture** for the property to be about growth at all. Fifth
 occurrence of the same class: **the fixture did not produce the condition the assertion named.**
+
+
+## R24 — Wave 6 review: a whole module that nothing called, and a merge that ate the document (2026-08-26)
+
+Verdict **FAIL**, eleven findings. Three matter beyond this wave.
+
+### The module was an orphan and I had ticked the box that said otherwise
+
+`PerceptionRouter`, `summarize_segment_via_ladder`, `TextAggregator` and `RateLimiter` had
+**zero callers outside `perception.rs`**, while T031 — *"Route the summarizer through the
+router"* — was marked `[x]`. Every guarantee the wave proved was proved **in vitro**: the budget
+bounded no real traffic, the escalation ledger recorded nothing that happened, and production
+perception (had any existed) still took the old unbudgeted path.
+
+**Fourth occurrence of the same pattern**, and the worst, because this time the task's own text
+named the wiring as the deliverable. The rule now: **a task whose verb is "route", "wire",
+"connect" or "integrate" is not done while `grep` shows the new symbol has no caller outside its
+own module.** That check is one command and would have caught all four.
+
+Wiring it surfaced a bug the type system had been holding: `ChunkRef` carries BOTH `index` and
+`sequence`, and its own doc says `index` resets on every pause, resume, interval change and
+display change. Resolving a window's samples by `index` would, after any pause, silently
+summarise **a different window's samples**. The durable identity is `(session, display_id,
+sequence)`. Keyed correctly, and mutation-proven.
+
+### The merge ate the document it was supposed to build
+
+`diff_merge` deduplicated by line VALUE, so any line already present anywhere in the block was
+dropped from every later capture. For source code that means every closing brace after the first;
+for prose, every blank separator; for a table, every repeated row. Under Content intent **the
+merged text IS the deliverable**, so this silently corrupted the artifact — and the "absorb never
+drops a capture" guarantee held only at BLOCK granularity while losing lines inside them.
+
+Every fixture used globally-unique `line {i}` text, which is exactly why it was invisible.
+**A fixture whose values are all distinct cannot exercise duplicate handling** — and duplicates
+are the normal case in real text.
+
+### The metric was fitted to fixtures with no UI in them
+
+`coverage` counted shared lines as a SET, so two entirely different files behind the same editor
+chrome — menu bar, file tree, status bar, terminal — scored **0.80** and merged. A realistic
+full-screen capture is mostly chrome, identical between any two screens of one application, so a
+day in one editor folded into a single interleaved blob.
+
+The fix is not a different threshold, it is a different question: a scroll shares a **contiguous**
+run, whereas unrelated screens share **scattered** lines. Matching and merging both now use the
+longest common run. That also subsumes the earlier calibration: contiguity, not a tuned constant,
+is what separates the cases.
+
+**Three metric revisions in one wave** — symmetric ratio (decays as the block grows), set coverage
+(chrome inflates it), contiguous run. Each was found by a fixture closer to reality than the last.
+The lesson is not about similarity metrics: it is that **a fixture built from synthetic uniform
+data validates the implementation against itself.**
+
+### Assertions that could not fail, again
+
+`the_comparison_history_is_bounded` asserted `blocks().len() > HISTORY` — but the length is
+already `HISTORY + 1` before the probing call, so it held whether bounding worked or not. The
+fixture performed the right experiment and then asserted nothing about its outcome. Now an exact
+count.
+
+And the budget's MAGNITUDE was unpinned: every assertion was a ratio, so halving the whole budget
+passed. **A ratio-only test permits any uniform scaling of the thing it measures.**
+
+### Known and accepted
+
+`coverage` is exact trimmed-line equality, so OCR that perturbs most lines per sample fragments a
+document the same way the symmetric metric did. Untestable without real OCR pairs; recorded here
+rather than left as an unstated assumption. Captures of one or two lines are also degenerate —
+coverage is 0.0 or 1.0 with nothing between — so `SAME_BLOCK` carries no meaning below about three
+lines.

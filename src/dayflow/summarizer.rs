@@ -67,6 +67,76 @@ impl ChunkSummarizer for VisionChunkSummarizer {
     }
 }
 
+/// A [`ChunkSummarizer`] that routes through the two-tier perception ladder.
+///
+/// This is what T031 asks for, and the difference from [`VisionChunkSummarizer`]
+/// is the cost shape, not the output: that one sends the whole segment to a
+/// single vision model, while this reads every sample with the cheap text tier
+/// and consults the reasoning tier ONCE per segment. Over an eight-hour day
+/// that is the difference between a feature that can run all day and one that
+/// cannot (research R19).
+pub struct RoutedChunkSummarizer {
+    router: Arc<crate::dayflow::perception::PerceptionRouter>,
+    sample_dir: std::path::PathBuf,
+}
+
+impl RoutedChunkSummarizer {
+    /// Route through `router`, resolving each window's samples under `sample_dir`.
+    pub fn new(
+        router: Arc<crate::dayflow::perception::PerceptionRouter>,
+        sample_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self { router, sample_dir: sample_dir.into() }
+    }
+
+    /// The sample files belonging to `chunk`, in capture order.
+    ///
+    /// Resolved by the sampler's own [`sample_prefix`](crate::dayflow::sampler::sample_prefix)
+    /// rather than a second copy of the naming rule, so the reader cannot drift
+    /// from the writer. The names embed a sortable timestamp, so a lexical sort
+    /// IS capture order.
+    pub fn samples_for(&self, chunk: &ChunkRef) -> Result<Vec<std::path::PathBuf>, DayflowError> {
+        // `sequence`, NEVER `index`: index is a per-run counter that resets on
+        // every pause, resume, interval change and display change, so after any
+        // pause it would resolve to a DIFFERENT window's samples — silently
+        // summarising the wrong slice of the day. The durable identity is
+        // (session, display_id, sequence), which is what the sampler wrote.
+        let prefix = crate::dayflow::sampler::sample_prefix(chunk.display_id, chunk.sequence);
+        let entries = std::fs::read_dir(&self.sample_dir).map_err(|e| {
+            DayflowError::Internal(format!("read {}: {e}", self.sample_dir.display()))
+        })?;
+        let mut found: Vec<std::path::PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".png"))
+            })
+            .collect();
+        found.sort();
+        Ok(found)
+    }
+}
+
+#[async_trait]
+impl ChunkSummarizer for RoutedChunkSummarizer {
+    async fn summarize_chunk(
+        &self,
+        chunk: &ChunkRef,
+        prior: &RollingContext,
+    ) -> Result<ChunkSummary, DayflowError> {
+        let samples = self.samples_for(chunk)?;
+        let text = crate::dayflow::perception::summarize_segment_via_ladder(
+            &self.router,
+            &samples,
+            &build_chunk_prompt(prior),
+        )
+        .await?;
+        Ok(parse_chunk_summary(chunk, &text))
+    }
+}
+
 /// Parse the provider's text into a structured [`ChunkSummary`] (JSON when
 /// present; otherwise a safe fallback that preserves the raw text in `detail`).
 fn parse_chunk_summary(chunk: &ChunkRef, text: &str) -> ChunkSummary {
@@ -288,5 +358,130 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].category, ActivityCategory::Other);
         assert!(summaries[0].detail.contains("coding in the editor"));
+    }
+
+    // ─── T031: the ladder is actually reachable from the summarizer ────────
+
+    #[tokio::test]
+    async fn the_routed_summarizer_reads_a_windows_samples_and_reasons_once() {
+        // The wiring, end to end: a ChunkSummarizer whose per-sample work goes
+        // to the text tier and whose ONE reasoning call carries what those
+        // samples extracted. Previously the router existed but nothing called
+        // it, so every guarantee it makes protected traffic that did not exist.
+        use crate::dayflow::perception::{PerceptionRouter, Tier};
+        use crate::dayflow::sampler::sample_prefix;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Three samples of window 7 on display 2, plus decoys that must be
+        // ignored: another window, another display, and a non-PNG.
+        for name in [
+            format!("{}20260826T100000000.png", sample_prefix(2, 7)),
+            format!("{}20260826T100300000.png", sample_prefix(2, 7)),
+            format!("{}20260826T100600000.png", sample_prefix(2, 7)),
+            format!("{}20260826T100000000.png", sample_prefix(2, 8)),
+            format!("{}20260826T100000000.png", sample_prefix(3, 7)),
+            format!("{}notes.txt", sample_prefix(2, 7)),
+        ] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+
+        let text_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reason_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let router = Arc::new(PerceptionRouter::new(
+            Arc::new(TierProvider { tier: Tier::Text, calls: text_calls.clone() }),
+            Arc::new(TierProvider { tier: Tier::Reason, calls: reason_calls.clone() }),
+            1_000,
+        ));
+        let s = RoutedChunkSummarizer::new(router.clone(), dir.path());
+
+        // index and sequence DELIBERATELY differ: index resets on every pause,
+        // so a resolver keyed on it reads another window's samples after one.
+        let chunk = ChunkRef {
+            index: 0,
+            path: dir.path().join("unused.mp4"),
+            start_wall: Utc::now(),
+            end_wall: Utc::now(),
+            display_id: 2,
+            sequence: 7,
+            summarized: false,
+        };
+
+        let resolved = s.samples_for(&chunk).unwrap();
+        assert_eq!(
+            resolved.len(),
+            3,
+            "resolved by SEQUENCE (7), not index (0): {resolved:?}"
+        );
+        assert!(
+            resolved.iter().all(|p| p.to_string_lossy().contains("w000007")),
+            "an index-keyed resolver would have picked window 0's samples"
+        );
+        assert!(resolved.windows(2).all(|w| w[0] <= w[1]), "and in capture order");
+
+        let summary = s.summarize_chunk(&chunk, &RollingContext::default()).await.unwrap();
+        assert_eq!(text_calls.load(std::sync::atomic::Ordering::SeqCst), 3, "one read per sample");
+        assert_eq!(
+            reason_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "and the segment is reasoned about ONCE"
+        );
+        assert_eq!(router.escalations().len(), 1, "with an audit record");
+        assert_eq!(summary.category, ActivityCategory::Coding, "the reasoning tier's answer");
+    }
+
+    /// Answers as whichever tier it stands for, so a test can tell which one
+    /// produced the summary.
+    struct TierProvider {
+        tier: crate::dayflow::perception::Tier,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl VisionProvider for TierProvider {
+        async fn analyze_video(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+            _: Option<crate::contracts::traits::TimeRange>,
+        ) -> Result<crate::contracts::traits::AnalysisResult, VisionError> {
+            unreachable!("the ladder never analyses video")
+        }
+        async fn analyze_image(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> Result<crate::contracts::traits::AnalysisResult, VisionError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = match self.tier {
+                crate::dayflow::perception::Tier::Text => "raw screen text".to_string(),
+                crate::dayflow::perception::Tier::Reason => {
+                    r#"{"category":"coding","app":"editor","activity":"a","detail":"d"}"#.to_string()
+                }
+            };
+            Ok(crate::contracts::traits::AnalysisResult {
+                request_id: uuid::Uuid::new_v4(),
+                analysis_text: text,
+                provider: "stub".into(),
+                model_used: "stub".into(),
+                processing_time_ms: 1,
+                token_count: None,
+                completed_at: Utc::now(),
+            })
+        }
+        async fn health_check(&self) -> Result<(), VisionError> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+        fn max_video_size(&self) -> u64 {
+            0
+        }
+        fn supports_native_video(&self) -> bool {
+            false
+        }
+        fn model(&self) -> &str {
+            "stub"
+        }
     }
 }

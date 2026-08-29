@@ -422,10 +422,19 @@ impl Sampler {
     }
 }
 
+/// The filename prefix every sample of one window shares.
+///
+/// Public because the summarizer resolves a window's samples by it: a private
+/// convention that two modules both depend on is a convention that drifts.
+pub fn sample_prefix(display_id: u32, sequence: u64) -> String {
+    format!("d{display_id}_w{sequence:06}_")
+}
+
 /// Filename for a sample: sortable, and unique per display and instant.
 fn sample_filename(display_id: u32, sequence: u64, taken_at: DateTime<Utc>) -> String {
     format!(
-        "d{display_id}_w{sequence:06}_{}.png",
+        "{}{}.png",
+        sample_prefix(display_id, sequence),
         taken_at.format("%Y%m%dT%H%M%S%3f")
     )
 }
