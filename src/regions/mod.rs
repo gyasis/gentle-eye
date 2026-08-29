@@ -138,6 +138,30 @@ impl Region {
         self.label = Some(label.into());
         self
     }
+
+/// A stable identity for this region, derived from where it is.
+///
+/// **Not the vector index.** `parent` is an index into the slice a single
+/// capture produced, which is meaningless the moment it is written to a
+/// database: the next capture builds a different vector and index 3 means
+/// something else. Persisting an index would produce provenance that looks
+/// precise and points at the wrong pane.
+///
+/// Derived from `(display_id, bbox)` so it is deterministic, and so the SAME
+/// pane in two captures carries the SAME id — which is what makes "this entry
+/// came from the editor pane" answerable across a day rather than only within
+/// one frame.
+pub fn identity(&self) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    self.display_id.hash(&mut h);
+    self.bbox.x.hash(&mut h);
+    self.bbox.y.hash(&mut h);
+    self.bbox.w.hash(&mut h);
+    self.bbox.h.hash(&mut h);
+    h.finish()
+}
+
     pub fn with_role(mut self, role: impl Into<String>) -> Self {
         self.role = Some(role.into());
         self
@@ -287,6 +311,80 @@ pub fn assign_parents(regions: &mut [Region]) {
 /// middle"), and label/role match ("the terminal", "Cancel button"). Returns the
 /// best-matching region's index, or `None`. (Pixel/VLM escalation is E7–E10;
 /// this is the `gentle-eye locate` primitive over the structural region set.)
+/// Assign a deterministic reading order to `regions` (FR-020).
+///
+/// Returns indices into `regions`, in the order a person reads them.
+///
+/// # Geometry, never a model
+///
+/// A model asked to order regions gives a different answer on the same input
+/// from one run to the next, and there is no way to tell a re-ordering from a
+/// re-render. Reading order is a property of where things are on screen, and
+/// pixels already say where things are.
+///
+/// # Banded, not raw top-to-bottom
+///
+/// Sorting by `y` alone scrambles side-by-side panes: two columns whose tops
+/// differ by three pixels interleave line by line, which is the same corruption
+/// cropping exists to prevent, arriving one layer later. Regions are grouped
+/// into horizontal BANDS first — a new band starts when a region's top is below
+/// the current band's baseline by more than the band's own height — then
+/// ordered left-to-right within each band.
+///
+/// Displays are ordered before bands: a top-left region on a portrait monitor
+/// is not comparable to a bottom-right one on a laptop panel, and interleaving
+/// two screens by `y` produces an order that matches neither.
+pub fn reading_order(regions: &[Region]) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..regions.len()).collect();
+
+    // Stable, total, and independent of input order: ties broken by x then by
+    // index so the same input always yields the same output.
+    idx.sort_by(|&a, &b| {
+        let (ra, rb) = (&regions[a], &regions[b]);
+        ra.display_id
+            .cmp(&rb.display_id)
+            .then(ra.bbox.y.cmp(&rb.bbox.y))
+            .then(ra.bbox.x.cmp(&rb.bbox.x))
+            .then(a.cmp(&b))
+    });
+
+    let mut out: Vec<usize> = Vec::with_capacity(idx.len());
+    let mut band: Vec<usize> = Vec::new();
+    let mut band_display: Option<u32> = None;
+    let mut band_bottom: u32 = 0;
+
+    for i in idx {
+        let r = &regions[i];
+        let same_display = band_display == Some(r.display_id);
+        // A region belongs to the current band while it starts above that
+        // band's bottom edge — i.e. it overlaps vertically with what is already
+        // in the band, which is what "side by side" means.
+        if same_display && !band.is_empty() && r.bbox.y < band_bottom {
+            band_bottom = band_bottom.max(r.bbox.y.saturating_add(r.bbox.h));
+            band.push(i);
+        } else {
+            flush_band(&mut band, regions, &mut out);
+            band_display = Some(r.display_id);
+            band_bottom = r.bbox.y.saturating_add(r.bbox.h);
+            band.push(i);
+        }
+    }
+    flush_band(&mut band, regions, &mut out);
+    out
+}
+
+fn flush_band(band: &mut Vec<usize>, regions: &[Region], out: &mut Vec<usize>) {
+    band.sort_by(|&a, &b| {
+        regions[a]
+            .bbox
+            .x
+            .cmp(&regions[b].bbox.x)
+            .then(regions[a].bbox.y.cmp(&regions[b].bbox.y))
+            .then(a.cmp(&b))
+    });
+    out.append(band);
+}
+
 pub fn locate(query: &str, regions: &[Region]) -> Option<usize> {
     if regions.is_empty() {
         return None;
@@ -595,4 +693,111 @@ mod tests {
         assert_eq!(regions[1].parent, Some(0), "element nests under the window");
         assert_eq!(regions[0].parent, None, "window has no container");
     }
+
+    fn r_at(x: u32, y: u32, w: u32, h: u32, display: u32) -> Region {
+        let mut r = Region::new(
+            crate::target::model::PixelRect { x, y, w, h },
+            Source::Wm,
+            Granularity::Pane,
+            0.8,
+        );
+        r.display_id = display;
+        r
+    }
+
+    #[test]
+    fn reading_order_is_identical_across_runs_on_the_same_input() {
+        // FR-020 asks for determinism, which is the whole reason this is
+        // geometry and not a model: a model gives a different answer on the
+        // same input from one run to the next, and nothing can tell a
+        // re-ordering from a re-render.
+        let regions = vec![
+            r_at(600, 10, 300, 400, 0),
+            r_at(10, 10, 300, 400, 0),
+            r_at(10, 500, 900, 200, 0),
+            r_at(320, 12, 260, 400, 0),
+        ];
+        let first = reading_order(&regions);
+        for _ in 0..20 {
+            assert_eq!(reading_order(&regions), first, "same input, same order");
+        }
+        assert_eq!(first.len(), regions.len(), "every region is placed exactly once");
+        let mut seen = first.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2, 3], "no region dropped or duplicated");
+    }
+
+    #[test]
+    fn side_by_side_panes_read_left_to_right_not_interleaved_by_pixel_row() {
+        // Three columns whose tops differ by a few pixels. Sorting by `y` alone
+        // interleaves them — the same corruption cropping exists to prevent,
+        // arriving one layer later, as a timeline that reads across two
+        // documents line by line.
+        let regions = vec![
+            r_at(640, 12, 300, 500, 0), // right column, 2px lower
+            r_at(10, 10, 300, 500, 0),  // left column
+            r_at(325, 14, 300, 500, 0), // middle column, 4px lower
+        ];
+        let order = reading_order(&regions);
+        assert_eq!(
+            order,
+            vec![1, 2, 0],
+            "left, middle, right — a raw y-sort would give right, left, middle"
+        );
+    }
+
+    #[test]
+    fn a_row_below_another_reads_after_all_of_it() {
+        // Banding must not swallow everything into one band: a region genuinely
+        // below the previous row starts a new one.
+        let regions = vec![
+            r_at(10, 600, 300, 200, 0), // second row, left
+            r_at(400, 10, 300, 500, 0), // first row, right
+            r_at(10, 10, 300, 500, 0),  // first row, left
+            r_at(400, 600, 300, 200, 0), // second row, right
+        ];
+        assert_eq!(reading_order(&regions), vec![2, 1, 0, 3]);
+    }
+
+    #[test]
+    fn displays_are_never_interleaved_by_geometry() {
+        // A top-left region on a portrait panel is not comparable to a
+        // bottom-right one on a laptop panel: bboxes are display-LOCAL, so two
+        // screens ordered together by `y` produce an order matching neither.
+        let regions = vec![
+            r_at(10, 500, 300, 200, 1), // display 1, low
+            r_at(10, 10, 300, 200, 0),  // display 0, high
+            r_at(10, 20, 300, 200, 1),  // display 1, high
+            r_at(10, 700, 300, 200, 0), // display 0, low
+        ];
+        let order = reading_order(&regions);
+        assert_eq!(order, vec![1, 3, 2, 0], "all of display 0, then all of display 1");
+
+        let displays: Vec<u32> = order.iter().map(|&i| regions[i].display_id).collect();
+        assert_eq!(displays, vec![0, 0, 1, 1], "never interleaved");
+    }
+
+    #[test]
+    fn the_order_does_not_depend_on_the_order_regions_arrived_in() {
+        // Detection order is an accident of which provider ran first. If it
+        // leaked into reading order, the same screen would read differently
+        // depending on whether the WM or the OCR pass found a pane first.
+        let a = r_at(10, 10, 300, 400, 0);
+        let b = r_at(400, 12, 300, 400, 0);
+        let c = r_at(10, 500, 690, 200, 0);
+
+        let forward = vec![a.clone(), b.clone(), c.clone()];
+        let backward = vec![c, b, a];
+
+        let f: Vec<_> = reading_order(&forward).iter().map(|&i| forward[i].bbox).collect();
+        let g: Vec<_> = reading_order(&backward).iter().map(|&i| backward[i].bbox).collect();
+        assert_eq!(f, g, "the same screen must read the same way whatever order it arrived in");
+    }
+
+    #[test]
+    fn an_empty_or_single_region_set_is_handled() {
+        assert!(reading_order(&[]).is_empty());
+        assert_eq!(reading_order(&[r_at(5, 5, 10, 10, 0)]), vec![0]);
+    }
+
 }

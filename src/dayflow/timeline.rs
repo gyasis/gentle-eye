@@ -73,8 +73,10 @@ impl TimelineStore for SqliteTimelineStore {
         let conn = self.lock()?;
         conn.execute(
             "INSERT OR REPLACE INTO timeline_entries \
-             (id, recording_id, start_time, end_time, category, app, activity, summary) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (id, recording_id, start_time, end_time, category, app, activity, summary, \
+              region_id, bbox_x, bbox_y, bbox_w, bbox_h, parent_region_id, display_id, \
+              reading_order) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 e.id.to_string(),
                 e.recording_id.to_string(),
@@ -84,6 +86,18 @@ impl TimelineStore for SqliteTimelineStore {
                 e.app,
                 e.activity,
                 e.summary,
+                // Provenance columns. `u64` region ids are stored as i64 by
+                // reinterpretation, not truncation: SQLite has no unsigned
+                // integer, and a cast that saturated would silently collide two
+                // different regions onto one id.
+                e.provenance.map(|p| p.region_id as i64),
+                e.provenance.map(|p| p.bbox_x),
+                e.provenance.map(|p| p.bbox_y),
+                e.provenance.map(|p| p.bbox_w),
+                e.provenance.map(|p| p.bbox_h),
+                e.provenance.and_then(|p| p.parent_region_id).map(|v| v as i64),
+                e.provenance.map(|p| p.display_id),
+                e.provenance.map(|p| p.reading_order),
             ],
         )
         .map_err(db)?;
@@ -98,13 +112,25 @@ impl TimelineStore for SqliteTimelineStore {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, recording_id, start_time, end_time, category, app, activity, summary \
+                "SELECT id, recording_id, start_time, end_time, category, app, activity, summary, \
+                 region_id, bbox_x, bbox_y, bbox_w, bbox_h, parent_region_id, \
+                 display_id, reading_order \
                  FROM timeline_entries WHERE end_time > ?1 AND start_time < ?2 \
                  ORDER BY start_time ASC",
             )
             .map_err(db)?;
         // Collect raw columns first, then parse outside the closure for clean errors.
-        type Raw = (String, String, String, String, String, String, String, String);
+        type Prov = (
+            Option<i64>,
+            Option<u32>,
+            Option<u32>,
+            Option<u32>,
+            Option<u32>,
+            Option<i64>,
+            Option<u32>,
+            Option<u32>,
+        );
+        type Raw = (String, String, String, String, String, String, String, String, Prov);
         let raw: Vec<Raw> = stmt
             .query_map(params![from.to_rfc3339(), to.to_rfc3339()], |row| {
                 Ok((
@@ -116,6 +142,16 @@ impl TimelineStore for SqliteTimelineStore {
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    (
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                        row.get(13)?,
+                        row.get(14)?,
+                        row.get(15)?,
+                    ),
                 ))
             })
             .map_err(db)?
@@ -130,7 +166,26 @@ impl TimelineStore for SqliteTimelineStore {
                 .map_err(|e| StorageError::DatabaseError(format!("bad timestamp '{s}': {e}")))
         };
         let mut out = Vec::with_capacity(raw.len());
-        for (id, rid, st, et, cat, app, activity, summary) in raw {
+        for (id, rid, st, et, cat, app, activity, summary, prov) in raw {
+            // ALL of the geometry must be present for provenance to mean
+            // anything: a half-filled box describes a region that was never on
+            // screen. A partial row therefore reads as "not recorded", which is
+            // exactly what a pre-migration entry genuinely is.
+            let provenance = match prov {
+                (Some(reg), Some(x), Some(y), Some(w), Some(h), parent, Some(disp), Some(ord)) => {
+                    Some(crate::dayflow::models::EntryProvenance {
+                        region_id: reg as u64,
+                        bbox_x: x,
+                        bbox_y: y,
+                        bbox_w: w,
+                        bbox_h: h,
+                        parent_region_id: parent.map(|v| v as u64),
+                        display_id: disp,
+                        reading_order: ord,
+                    })
+                }
+                _ => None,
+            };
             out.push(TimelineEntry {
                 id: Uuid::parse_str(&id).map_err(|e| db(format!("bad id '{id}': {e}")))?,
                 recording_id: Uuid::parse_str(&rid)
@@ -141,6 +196,7 @@ impl TimelineStore for SqliteTimelineStore {
                 app,
                 activity,
                 summary,
+                provenance,
             });
         }
         Ok(out)
@@ -177,6 +233,7 @@ mod tests {
             app: "editor".into(),
             activity: activity.into(),
             summary: format!("did {activity}"),
+            provenance: None,
         }
     }
 
@@ -369,6 +426,7 @@ mod ask_tests {
             app: "editor".into(),
             activity: activity.into(),
             summary: format!("worked on {activity}"),
+            provenance: None,
         }
     }
 

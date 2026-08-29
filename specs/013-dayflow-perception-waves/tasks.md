@@ -148,13 +148,13 @@ deterministic.
 
 **Independent test**: a two-pane capture yields entries whose region and parent references
 reconstruct the arrangement, identically on every run. — NOTE: T053's 0.95 append gate is SUBSUMED, not implemented: line-level `diff_merge` adds only lines the block lacks, so a near-identical capture contributes nothing by construction. Implemented as an explicit branch first; mutation testing showed removing it changed no behaviour.
-- [ ] T033 [US4] Additive migration in `src/storage/database.rs` (was T310) — `region_id`, `bbox_*`, `parent_region_id`, `display_id`, `reading_order` on `timeline_entries`, all nullable, idempotent, not rewriting T240.
+- [x] T033 [US4] Additive migration in `src/storage/database.rs` (was T310) — `region_id`, `bbox_*`, `parent_region_id`, `display_id`, `reading_order` on `timeline_entries`, all nullable, idempotent, not rewriting T240.
       `> DONE:` re-runnable; existing rows survive with empty provenance; an in-memory test round-trips the new columns.
-- [ ] T034 [US4] Compute reading order from geometry in `src/regions/mod.rs` — banded top-to-bottom then left-to-right, bounded by the parent tree (FR-020). Never ask a model.
+- [x] T034 [US4] Compute reading order from geometry in `src/regions/mod.rs` — banded top-to-bottom then left-to-right, bounded by the parent tree (FR-020). Never ask a model.
       `> DONE:` a deterministic test gives the identical order across repeated runs on the same input.
-- [ ] T035 [S] [US4] Join extracted text to the region tree on region identity and persist provenance onto each entry (was T311).
+- [x] T035 [S] [US4] Join extracted text to the region tree on region identity and persist provenance onto each entry (was T311).
       `> DONE:` a two-pane capture yields entries whose parent/bbox/display reconstruct the on-screen layout; `cargo check` + tests green.
-- [ ] T036 [P] [US4] Integration coverage in `tests/dayflow_timeline.rs` for provenance and ordering, including entries written before the migration.
+- [x] T036 [P] [US4] Integration coverage in `tests/dayflow_timeline.rs` for provenance and ordering, including entries written before the migration.
       `> DONE:` all US4 acceptance scenarios from `spec.md` are asserted.
 
 ## Phase 7: User Story 5 — Disk stays bounded (P3)

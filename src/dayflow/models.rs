@@ -313,6 +313,64 @@ impl RollingContext {
     }
 }
 
+/// Where on screen an entry's text came from (US4/FR-020).
+///
+/// Every field is optional at the storage layer because entries written before
+/// this existed have none, and never will — the pixels are gone. A default
+/// would be an invented layout indistinguishable from a measured one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryProvenance {
+    /// Stable identity of the region this text came from.
+    pub region_id: u64,
+    /// The region's box, in its display's coordinates.
+    pub bbox_x: u32,
+    /// See [`EntryProvenance::bbox_x`].
+    pub bbox_y: u32,
+    /// See [`EntryProvenance::bbox_x`].
+    pub bbox_w: u32,
+    /// See [`EntryProvenance::bbox_x`].
+    pub bbox_h: u32,
+    /// Identity of the region that CONTAINS this one, when there is one.
+    ///
+    /// Carries the cascade edge, so a stored entry can be walked back up to the
+    /// window it sat in — the containment relation is what reconstructs an
+    /// arrangement rather than a flat list of boxes.
+    pub parent_region_id: Option<u64>,
+    /// Which display it was on.
+    pub display_id: u32,
+    /// Rank in the deterministic reading order of that capture.
+    pub reading_order: u32,
+}
+
+/// Join extracted regions to their provenance, in reading order (T035).
+///
+/// Takes the regions a capture produced and returns one provenance per region,
+/// ordered as a person reads them. `parent_region_id` is resolved from the
+/// within-capture `parent` INDEX to the parent's stable identity, because an
+/// index does not survive being written down.
+pub fn provenance_in_reading_order(regions: &[crate::regions::Region]) -> Vec<EntryProvenance> {
+    crate::regions::reading_order(regions)
+        .into_iter()
+        .enumerate()
+        .map(|(rank, i)| {
+            let r = &regions[i];
+            EntryProvenance {
+                region_id: r.identity(),
+                bbox_x: r.bbox.x,
+                bbox_y: r.bbox.y,
+                bbox_w: r.bbox.w,
+                bbox_h: r.bbox.h,
+                parent_region_id: r
+                    .parent
+                    .and_then(|p| regions.get(p as usize))
+                    .map(|p| p.identity()),
+                display_id: r.display_id,
+                reading_order: rank as u32,
+            }
+        })
+        .collect()
+}
+
 /// A single entry in the queryable activity timeline (persisted in SQLite,
 /// Wave 4). Column-aligned with the `timeline_entries` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +391,11 @@ pub struct TimelineEntry {
     pub activity: String,
     /// Human-readable summary of the activity in this range.
     pub summary: String,
+    /// Where on screen this text came from (US4). `None` for entries written
+    /// before provenance existed — the pixels are gone, so it can never be
+    /// filled in, and NULL is the honest value.
+    #[serde(default)]
+    pub provenance: Option<EntryProvenance>,
 }
 
 #[cfg(test)]

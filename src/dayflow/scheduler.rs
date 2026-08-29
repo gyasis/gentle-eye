@@ -189,6 +189,10 @@ pub fn entry_from(
         app: summary.app.clone(),
         activity: summary.activity.clone(),
         summary: summary.detail.clone(),
+        // Provenance is attached by the caller that HAS the regions — this
+        // function sees only a summary and a window. Left None rather than
+        // guessed: an invented layout is indistinguishable from a measured one.
+        provenance: None,
     }
 }
 

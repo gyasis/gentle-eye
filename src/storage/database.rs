@@ -156,6 +156,20 @@ fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
         "ALTER TABLE recordings ADD COLUMN output_dir TEXT",
         "ALTER TABLE recordings ADD COLUMN display_name TEXT",
         "ALTER TABLE recordings ADD COLUMN encoder_mode TEXT NOT NULL DEFAULT 'in_memory_pipe'",
+        // T033 — structural provenance on timeline entries (US4/FR-020).
+        //
+        // ALL NULLABLE, no default. Entries written before this migration have
+        // no provenance and never will: the pixels they came from are gone, so
+        // a default would be an invented layout, indistinguishable from a
+        // measured one. NULL says "not recorded" and that is the honest value.
+        "ALTER TABLE timeline_entries ADD COLUMN region_id INTEGER",
+        "ALTER TABLE timeline_entries ADD COLUMN bbox_x INTEGER",
+        "ALTER TABLE timeline_entries ADD COLUMN bbox_y INTEGER",
+        "ALTER TABLE timeline_entries ADD COLUMN bbox_w INTEGER",
+        "ALTER TABLE timeline_entries ADD COLUMN bbox_h INTEGER",
+        "ALTER TABLE timeline_entries ADD COLUMN parent_region_id INTEGER",
+        "ALTER TABLE timeline_entries ADD COLUMN display_id INTEGER",
+        "ALTER TABLE timeline_entries ADD COLUMN reading_order INTEGER",
     ];
     for stmt in COLUMN_ADDS {
         if let Err(e) = conn.execute(stmt, []) {

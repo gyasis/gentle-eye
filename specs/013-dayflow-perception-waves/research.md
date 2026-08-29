@@ -1793,3 +1793,55 @@ counts the degradation so it is measurable rather than inferred. Same for
 `ResidencyPolicy::keep_alive`, which is computed correctly but has no channel to be sent:
 `analyze_image(path, prompt)` cannot carry it, so `Resident` remains a policy the running system
 cannot express. Both say so on the task instead of reading as done.
+
+
+## R30 — Wave 8 (US4): identity is where a thing IS, not where it sits in a vector (2026-08-26)
+
+The structural timeline. Two design points and two fixture lessons.
+
+### An index is not an identity
+
+`Region::parent` is an index into the slice ONE capture produced. Persisting it would have written
+provenance that looks precise and points at the wrong pane: the next capture builds a different
+vector and index 3 means something else. So identity is derived from `(display_id, bbox)` — where
+the region actually is — which is deterministic AND makes the SAME pane in two captures carry the
+SAME id. That is what makes "this entry came from the editor pane" answerable across a day rather
+than only within one frame, and `parent` is resolved from index to identity at the boundary.
+
+### Reading order is geometry, never a model
+
+A model asked to order regions answers differently on the same input from one run to the next, and
+nothing can distinguish a re-ordering from a re-render. Pixels already say where things are.
+
+Sorting by `y` alone is not enough: two columns whose tops differ by three pixels interleave line
+by line — the same corruption cropping prevents, arriving one layer later as a timeline that reads
+across two documents. Regions are banded first (a new band starts when a region no longer overlaps
+the current band vertically), then ordered left-to-right within a band, with displays never
+interleaved.
+
+### A fixture that passed by coincidence
+
+The mutation `region_id = vector index` **survived**. My cross-capture identity test put the editor
+pane at index 1 in *both* fixtures, so index-as-identity gave the same answer as geometry-as-identity
+— the test asserted equality and got it for the wrong reason.
+
+**A test for "X is not derived from Y" must make Y differ.** Obvious once stated; it is the same
+family as R22's symmetric scenario, and the tell is the same: the fixture treats both sides alike
+where the property under test is about them differing.
+
+### The guard nothing could reach through the API
+
+The mutation "fill missing provenance columns with zeros" also survived, because the writer always
+writes all-or-nothing, so no test could produce a half-written row. But such a row can still
+appear — a partial migration, a hand-edit, an older writer — and filling the gaps would describe a
+region at (0,0) sized 0×0 that was never on screen, indistinguishable from a measured one.
+
+**A defensive branch that the public API cannot reach still needs a test; reach past the API to
+write one.** Raw SQL produced the row and pinned the guard.
+
+### Also
+
+A missing comma in a multi-line SQL string turned `summary, region_id` into `summary AS region_id`
+— eight columns returned where sixteen were read, caught immediately by an existing round-trip test.
+Worth noting only because concatenated SQL strings make this failure invisible on inspection: the
+line reads correctly, and the bug lives in the whitespace between two lines.
