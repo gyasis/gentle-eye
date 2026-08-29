@@ -65,7 +65,13 @@ pub enum Cost {
 /// The common currency every provider emits and every consumer reads.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 pub struct Region {
-    /// Screen-absolute pixel box (callers clamp to the display).
+    /// Pixel box in the coordinate space of [`Region::display_id`] — see that
+    /// field for the invariant and its current producer gap.
+    ///
+    /// (This line previously read "screen-absolute", contradicting the
+    /// invariant fifteen lines below. Consumers were reading whichever half
+    /// they happened to see first, so the wrong one is corrected rather than
+    /// left for the next reader to pick between.)
     pub bbox: PixelRect,
     pub source: Source,
     pub granularity: Granularity,

@@ -806,8 +806,17 @@ impl Default for IdleConfig {
 /// the lane reported a model resident with an expiry hours out (suggesting the
 /// keep-alive is long and a pinger is pointless), yet a probe in the same
 /// session paid a 43.9 s cold load because a 32 GB tenant had evicted the OCR
-/// model, against 0.5–3.2 s warm. Default is [`ResidencyPolicy::OnDemand`]
-/// because it builds nothing and holds nothing until the question is settled.
+/// **MEASURED at T029 (research R27), superseding the T006 figures that stood
+/// here.** Against the live governor: `deepseek-ocr:latest` loads cold in
+/// **3.74 s** and answers warm in **0.18 s**, holds **7.4 GB**, and the lane's
+/// own window for it is about **50 s** — not the ~6 h seen on a different
+/// model, because the window is per-model, not per-lane.
+///
+/// Default stays [`ResidencyPolicy::OnDemand`], and the reason changed: not
+/// "the question is unsettled" but that dayflow's text calls are made in a
+/// BURST at segment close, so a segment pays the cold load **once**, not once
+/// per sample. At the default 15-minute segment that is well under 1% overhead
+/// — not worth holding 7.4 GB of a shared machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResidencyPolicy {
@@ -822,6 +831,37 @@ pub enum ResidencyPolicy {
 impl Default for ResidencyPolicy {
     fn default() -> Self {
         Self::OnDemand
+    }
+}
+
+impl ResidencyPolicy {
+    /// The `keep_alive` to send with a perception request, if any.
+    ///
+    /// **Takes the SEGMENT cadence, not the sample interval** — and that
+    /// distinction was a real bug. Dayflow does not perceive per sample: the
+    /// text calls for a whole segment fire back-to-back at segment close
+    /// (`summarize_segment_via_ladder`), so the gap the model must survive to
+    /// stay warm is the gap between SEGMENTS, ~900 s by default. Sizing this
+    /// from the 180 s sample interval produced a window that expired long
+    /// before the next burst, so `Resident` held memory and still paid every
+    /// cold load — the worst of both, while reporting itself as residency.
+    ///
+    /// Doubled plus a margin because a window equal to the cadence races the
+    /// next burst against its own expiry: a segment closing a second late
+    /// finds the tier cold, having paid for residency and got none.
+    ///
+    /// The governor honours this per request (R27), so residency needs no
+    /// background pinger and no keep-warm calls — and the tier therefore
+    /// unloads by itself when recording stops, which a pinger holding 7.4 GB
+    /// after a dead session would not.
+    pub fn keep_alive(self, segment_cadence: std::time::Duration) -> Option<String> {
+        match self {
+            Self::Resident => {
+                Some(format!("{}s", segment_cadence.as_secs().saturating_mul(2) + 60))
+            }
+            Self::OnDemand => None,
+            Self::Off => Some("0".to_string()),
+        }
     }
 }
 

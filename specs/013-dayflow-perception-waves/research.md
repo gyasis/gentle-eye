@@ -1649,3 +1649,76 @@ The three-valued knob therefore becomes:
 
 Default `OnDemand`, because the coarse cadence is the default and 2% is not worth holding 7.4 GB
 of someone else's memory.
+
+
+## R28 — Wave 7 review: I measured the right thing and reasoned about the wrong pipeline (2026-08-26)
+
+Verdict **FAIL**. Three tasks marked done whose defining verbs did not execute, and one genuine
+reasoning error that no amount of measurement would have caught.
+
+### The arithmetic described a call pattern my own code does not have
+
+R27 measured correctly — 3.74 s cold, 0.18 s warm, ~50 s window, `keep_alive` honoured — and then
+concluded *"under the default every single sample pays the cold load… a 15-minute segment of 5
+samples pays it five times."* **False for this pipeline.** T031 batches: every text call for a
+segment fires back-to-back inside one `summarize_segment_via_ladder` pass at segment close, ~0.2 s
+apart, far inside the 50 s window. A segment pays the cold load **once** — about 0.4%, not 2%, and
+not five times.
+
+Worse, `Resident` sized its window from the **sample interval** (180 s) when the gap the model must
+actually survive is the gap between **segments** (900 s). So `Resident` expired long before the next
+burst: it held 7.4 GB *and* paid every cold load, while reporting itself as residency. T029 and
+T031, both marked done, were mutually inconsistent as shipped.
+
+**The lesson is not "measure" — I did measure.** It is that a measurement is interpreted against a
+model of the system, and mine was of the pipeline I had planned rather than the one I had built two
+commits earlier. **When a number is used to justify a policy, state the call pattern it assumes and
+check that against the code, not against the design.**
+
+### The orphan defect, again — in the commit that added the guard against it
+
+`crop_regions` was written, documented, unit-tested… and called by nothing. The text tier was fed
+whole frames, committing precisely the failure the function's own doc rails against. Same for
+`Residency::keep_alive` (no channel to send it) and `SegmentLatency` (never constructed).
+
+**Fifth occurrence, and the sharpest, because the same commit added `the_ladder_stays_reachable_…`
+as an anti-orphan guard.** That test proved the ROUTER was reachable; nothing proved the CROPS
+were. A guard written for one seam gives no coverage of the next one, and having written it made
+the whole class feel handled.
+
+The wiring also needed a design decision I had skipped: the region cascade runs at CAPTURE time
+while summarisation happens at segment close, so regions must be **persisted beside the sample**.
+Re-detecting at summarisation would describe a different moment than the pixels do.
+
+### A clamp that manufactured evidence
+
+`x.min(fw - 1)` on a region entirely off-frame dragged the box onto the edge and produced a **1×1
+crop of a corner pixel** — content belonging to no region, fed to OCR under that region's name,
+burning a budgeted call. And my test **enshrined it**: "clamps to a 1px sliver, not an error". The
+`w == 0` skip branch it sat beside was unreachable, so its warning described a case that could
+never occur.
+
+Clamping and intersecting are not the same operation. **A clamp moves a box that does not belong
+here until it does; an intersection reports that it does not belong.** Fixed to a real intersection,
+with the non-intersecting region skipped.
+
+Also found: `Region`'s own docs contradicted themselves — `bbox` was labelled "screen-absolute" on
+one line and "display-local" fifteen lines below. Consumers were reading whichever half they saw
+first. Corrected in place rather than left for the next reader to pick between, and `crop_regions`
+now skips regions belonging to another display, which would otherwise index straight into this
+frame's pixels as if they were their own.
+
+### A test that was theatre in both directions
+
+`the_demoted_tesseract_path_is_never_the_text_tier` grepped the source for a word. The reviewer
+executed both failure modes: it **fails** on a comment explaining why not to use tesseract, and
+**passes** when the real wrapper is reintroduced under a name not containing the word. Deleted.
+The property is already held behaviourally — every test injects its own provider, so a local OCR
+call could not satisfy the assertions — and a module-boundary rule is a lint, not a test.
+
+### Also
+
+`DynamicImage::crop` takes `&mut self`, so cropping cloned the whole decoded frame per region —
+~33 MB at 4K × 8 regions × every sample. `crop_imm` borrows. And `SegmentLatency`'s hardcoded
+500 ms cold-load threshold was an absolute valid only for one model on one machine; it now reports
+mean-time-per-call, which compares without a magic constant.

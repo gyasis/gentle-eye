@@ -12,12 +12,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use gentle_eye::config::DayflowIntent;
+use gentle_eye::config::{DayflowIntent, ResidencyPolicy};
 use gentle_eye::contracts::errors::VisionError;
 use gentle_eye::contracts::traits::{AnalysisResult, TimeRange, VisionProvider};
 use gentle_eye::dayflow::models::{ChunkRef, RollingContext};
 use gentle_eye::dayflow::perception::{
-    aggregator_for, dayflow_budget, PerceptionKind, PerceptionRouter, Residency, Tier,
+    aggregator_for, dayflow_budget, PerceptionKind, PerceptionRouter, Tier,
 };
 use gentle_eye::dayflow::summarizer::{ChunkSummarizer, RoutedChunkSummarizer};
 
@@ -26,6 +26,9 @@ struct Recorder {
     tier: Tier,
     calls: Arc<AtomicUsize>,
     prompts: Arc<Mutex<Vec<String>>>,
+    /// Which image each call was given — without this, nothing pins WHICH
+    /// frame the reasoning tier sees, and a `last`→`first` mutation survives.
+    paths: Arc<Mutex<Vec<std::path::PathBuf>>>,
 }
 
 #[async_trait]
@@ -38,9 +41,10 @@ impl VisionProvider for Recorder {
     ) -> Result<AnalysisResult, VisionError> {
         panic!("dayflow perception must never analyse video: it samples frames")
     }
-    async fn analyze_image(&self, _: &Path, prompt: &str) -> Result<AnalysisResult, VisionError> {
+    async fn analyze_image(&self, image: &Path, prompt: &str) -> Result<AnalysisResult, VisionError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         self.prompts.lock().unwrap().push(prompt.to_string());
+        self.paths.lock().unwrap().push(image.to_path_buf());
         let text = match self.tier {
             Tier::Text => format!("screen text sample {n}"),
             Tier::Reason => {
@@ -80,6 +84,8 @@ struct Rig {
     text_calls: Arc<AtomicUsize>,
     reason_calls: Arc<AtomicUsize>,
     reason_prompts: Arc<Mutex<Vec<String>>>,
+    text_paths: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    reason_paths: Arc<Mutex<Vec<std::path::PathBuf>>>,
 }
 
 fn rig(budget: u32) -> Rig {
@@ -88,15 +94,31 @@ fn rig(budget: u32) -> Rig {
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
     );
+    let (tpath, rpath) = (
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+    );
     Rig {
         router: Arc::new(PerceptionRouter::new(
-            Arc::new(Recorder { tier: Tier::Text, calls: tc.clone(), prompts: tp }),
-            Arc::new(Recorder { tier: Tier::Reason, calls: rc.clone(), prompts: rp.clone() }),
+            Arc::new(Recorder {
+                tier: Tier::Text,
+                calls: tc.clone(),
+                prompts: tp,
+                paths: tpath.clone(),
+            }),
+            Arc::new(Recorder {
+                tier: Tier::Reason,
+                calls: rc.clone(),
+                prompts: rp.clone(),
+                paths: rpath.clone(),
+            }),
             budget,
         )),
         text_calls: tc,
         reason_calls: rc,
         reason_prompts: rp,
+        text_paths: tpath,
+        reason_paths: rpath,
     }
 }
 
@@ -199,20 +221,51 @@ async fn a_segments_perception_cannot_outrun_its_budget() {
     );
 }
 
-#[test]
-fn the_demoted_tesseract_path_is_never_the_text_tier() {
-    // T032 names this explicitly. Local tesseract remains available for the
-    // interactive `read_screen_text` tool, but the DAYFLOW text tier is the
-    // configured vision model: tesseract on a full desktop screenshot returns
-    // fragmentary text with no layout, which is precisely the input that makes
-    // a downstream summary confidently wrong.
-    let src = std::fs::read_to_string("src/dayflow/perception.rs").unwrap();
-    assert!(
-        !src.to_lowercase().contains("tesseract"),
-        "the dayflow perception ladder must not reach for the demoted local OCR path"
+// T032 asked for an assertion that "the demoted tesseract path is never used as
+// the text tier". It was written as a grep over the source files, and that test
+// is theatre in both directions: it FAILS on a comment explaining why not to use
+// tesseract, and PASSES if the real wrapper is reintroduced under a name that
+// does not contain the word. Deleted rather than kept as reassurance.
+//
+// The property is already held behaviourally: the text tier is whichever
+// `VisionProvider` the router was constructed with, and every test here injects
+// its own — a local OCR call could not satisfy them, because the assertions are
+// on what the INJECTED provider received. A module-boundary rule ("dayflow must
+// not import analysis::ocr") is a lint, not a test, and belongs in T050.
+
+#[tokio::test]
+async fn the_reasoning_tier_is_given_the_segments_last_frame() {
+    // `last` is deliberate: the end state of a segment is what a question about
+    // "what was I doing" is usually asking about. A mutation to `first`
+    // survived the whole suite, so nothing was pinning it.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = samples(dir.path(), 0, 0, 4);
+    let r = rig(1_000);
+
+    let (_, _lat) = gentle_eye::dayflow::perception::summarize_segment_via_ladder(
+        &r.router,
+        &paths,
+        "categorise",
+        0,
+        8,
+    )
+    .await
+    .unwrap();
+
+    // The reasoning call is the only one that takes a frame of its own choosing.
+    // and every text read went to a real sample, never to the reasoning frame
+    // by accident
+    let read = r.text_paths.lock().unwrap().clone();
+    assert_eq!(read.len(), 4, "one text read per sample when no regions exist");
+    assert_eq!(read, paths, "in capture order");
+
+    let seen = r.reason_paths.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0],
+        *paths.last().unwrap(),
+        "the reasoning tier must see the segment's LAST frame, not its first"
     );
-    let summarizer = std::fs::read_to_string("src/dayflow/summarizer.rs").unwrap();
-    assert!(!summarizer.to_lowercase().contains("tesseract"));
 }
 
 #[test]
@@ -247,14 +300,21 @@ fn intent_decides_whether_text_is_accumulated_at_all() {
 }
 
 #[test]
-fn residency_is_a_request_parameter_not_a_background_thread() {
+fn residency_is_a_request_parameter_sized_by_the_segment_cadence() {
     // R27: the governor honours keep_alive per request, so the tier unloads by
-    // itself when sampling stops. A pinger would keep 7.4 GB resident on a
-    // shared machine after the session died.
-    let i = std::time::Duration::from_secs(180);
-    assert_eq!(Residency::default(), Residency::OnDemand);
-    assert!(Residency::OnDemand.keep_alive(i).is_none());
-    assert!(Residency::Resident.keep_alive(i).is_some());
+    // itself when sampling stops — a pinger would hold 7.4 GB on a shared
+    // machine after the session died.
+    //
+    // And it is sized by the SEGMENT cadence, because dayflow's text calls fire
+    // in a burst at segment close: a window sized from the 180s sample interval
+    // expires long before the next burst, so `Resident` would hold memory AND
+    // pay every cold load.
+    let segment = std::time::Duration::from_secs(900);
+    assert_eq!(ResidencyPolicy::default(), ResidencyPolicy::OnDemand);
+    assert!(ResidencyPolicy::OnDemand.keep_alive(segment).is_none());
+    let ka = ResidencyPolicy::Resident.keep_alive(segment).unwrap();
+    let secs: u64 = ka.trim_end_matches('s').parse().unwrap();
+    assert!(secs > segment.as_secs(), "must outlast one segment to bridge two");
 }
 
 #[tokio::test]
@@ -273,4 +333,109 @@ async fn a_reasoning_request_must_say_why_before_anything_is_spent() {
         .perceive(PerceptionKind::Reason, Path::new("/tmp/x.png"), "why", "categorising")
         .await
         .expect("a valid request still has its budget");
+}
+
+#[tokio::test]
+async fn region_crops_actually_reach_the_text_tier() {
+    // THE GUARD THAT WAS MISSING. `crop_regions` was written, documented and
+    // unit-tested while nothing called it, so the shipped pipeline fed whole
+    // frames to the text tier — committing the exact failure the function's own
+    // doc rails against, in the same commit that added an anti-orphan guard for
+    // the router. A correct function nothing calls is not a feature.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = samples(dir.path(), 0, 0, 2);
+
+    // A frame with two panes, and the regions the capture detected for it.
+    for p in &paths {
+        let mut img = image::RgbaImage::new(400, 200);
+        for (x, _y, px) in img.enumerate_pixels_mut() {
+            *px = if x < 200 {
+                image::Rgba([255, 0, 0, 255])
+            } else {
+                image::Rgba([0, 0, 255, 255])
+            };
+        }
+        img.save(p).unwrap();
+
+        let regions = vec![
+            gentle_eye::regions::Region::new(
+                gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 200, h: 200 },
+                gentle_eye::regions::Source::Wm,
+                gentle_eye::regions::Granularity::Pane,
+                0.8,
+            ),
+            gentle_eye::regions::Region::new(
+                gentle_eye::target::model::PixelRect { x: 200, y: 0, w: 200, h: 200 },
+                gentle_eye::regions::Source::Wm,
+                gentle_eye::regions::Granularity::Pane,
+                0.8,
+            ),
+        ];
+        std::fs::write(
+            gentle_eye::dayflow::perception::regions_path(p),
+            serde_json::to_string(&regions).unwrap(),
+        )
+        .unwrap();
+    }
+
+    let r = rig(1_000);
+    let (_, latency) = gentle_eye::dayflow::perception::summarize_segment_via_ladder(
+        &r.router,
+        &paths,
+        "categorise",
+        0,
+        8,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        r.text_calls.load(Ordering::SeqCst),
+        4,
+        "2 samples x 2 regions — the tier must see CROPS, not 2 whole frames"
+    );
+    assert_eq!(latency.perception_calls, 5, "4 text reads + 1 reasoning call");
+
+    // and each crop is one pane, not the frame
+    for p in r.text_paths.lock().unwrap().iter() {
+        let img = image::open(p).unwrap();
+        assert_eq!(
+            (img.width(), img.height()),
+            (200, 200),
+            "each read must be a single-pane crop at full resolution: {p:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_sample_with_no_regions_is_still_read_whole() {
+    // FAIL-OPEN (R13): a missing or unreadable region sidecar must DEGRADE the
+    // reading, never drop the sample. Dayflow cannot re-capture yesterday.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = samples(dir.path(), 0, 0, 3);
+    // one sample gets a corrupt sidecar, one gets none, one gets an empty list
+    std::fs::write(
+        gentle_eye::dayflow::perception::regions_path(&paths[0]),
+        b"{ not json",
+    )
+    .unwrap();
+    std::fs::write(gentle_eye::dayflow::perception::regions_path(&paths[2]), b"[]").unwrap();
+
+    let r = rig(1_000);
+    let (_, latency) = gentle_eye::dayflow::perception::summarize_segment_via_ladder(
+        &r.router,
+        &paths,
+        "categorise",
+        0,
+        8,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        r.text_calls.load(Ordering::SeqCst),
+        3,
+        "every sample is still read, once, as a whole frame"
+    );
+    assert_eq!(latency.samples, 3);
 }

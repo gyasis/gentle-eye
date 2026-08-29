@@ -78,6 +78,8 @@ impl ChunkSummarizer for VisionChunkSummarizer {
 pub struct RoutedChunkSummarizer {
     router: Arc<crate::dayflow::perception::PerceptionRouter>,
     sample_dir: std::path::PathBuf,
+    max_regions: usize,
+    latencies: std::sync::Mutex<Vec<crate::dayflow::perception::SegmentLatency>>,
 }
 
 impl RoutedChunkSummarizer {
@@ -86,7 +88,28 @@ impl RoutedChunkSummarizer {
         router: Arc<crate::dayflow::perception::PerceptionRouter>,
         sample_dir: impl Into<std::path::PathBuf>,
     ) -> Self {
-        Self { router, sample_dir: sample_dir.into() }
+        Self {
+            router,
+            sample_dir: sample_dir.into(),
+            max_regions: crate::config::PerceptionConfig::default().max_regions_per_segment
+                as usize,
+            latencies: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Bound the crops taken per sample. This is the same number the perception
+    /// budget is derived from, so the two must be configured together.
+    pub fn with_max_regions(mut self, n: usize) -> Self {
+        self.max_regions = n;
+        self
+    }
+
+    /// Per-segment perception cost so far (FR-013).
+    pub fn latencies(&self) -> Vec<crate::dayflow::perception::SegmentLatency> {
+        match self.latencies.lock() {
+            Ok(v) => v.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
     }
 
     /// The sample files belonging to `chunk`, in capture order.
@@ -127,12 +150,25 @@ impl ChunkSummarizer for RoutedChunkSummarizer {
         prior: &RollingContext,
     ) -> Result<ChunkSummary, DayflowError> {
         let samples = self.samples_for(chunk)?;
-        let text = crate::dayflow::perception::summarize_segment_via_ladder(
+        let (text, latency) = crate::dayflow::perception::summarize_segment_via_ladder(
             &self.router,
             &samples,
             &build_chunk_prompt(prior),
+            chunk.display_id,
+            self.max_regions,
         )
         .await?;
+        tracing::info!(
+            sequence = chunk.sequence,
+            samples = latency.samples,
+            calls = latency.perception_calls,
+            total_ms = latency.total.as_millis() as u64,
+            mean_call_ms = latency.mean_call().as_millis() as u64,
+            "dayflow segment perception"
+        );
+        if let Ok(mut v) = self.latencies.lock() {
+            v.push(latency);
+        }
         Ok(parse_chunk_summary(chunk, &text))
     }
 }
