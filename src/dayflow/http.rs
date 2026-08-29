@@ -33,6 +33,13 @@ pub fn serve(listener: TcpListener, service: Arc<DayflowService>) {
         // says nothing blocks FOREVER — and this loop is single-threaded, so
         // one silent socket froze the timeline surface for everyone until that
         // client died.
+        //
+        // ⚠ A MITIGATION, NOT A FIX. The loop is still single-threaded, so N
+        // silent clients serialise into ~5N seconds of stall for a legitimate
+        // caller (measured: one silent client delays the next request by 5.06s),
+        // and an honest client sending a large request line over more than five
+        // seconds is cut off. Thread-per-connection is the real answer;
+        // localhost-only makes this survivable, not correct.
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
 

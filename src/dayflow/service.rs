@@ -212,10 +212,22 @@ impl DayflowService {
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Option<DayflowRun>>, DayflowError> {
-        // A poisoned lock means another thread panicked while holding it. The
-        // state behind it is a plain Option, so recovering is safe — and
-        // refusing every subsequent call would turn one panic into a dead
-        // daemon that reports nothing.
+        // A poisoned lock means another thread panicked while holding it.
+        // Recovering is safe HERE FOR A SPECIFIC REASON, not in general: every
+        // mutation under this guard is a single atomic `Option` assignment
+        // (`take` or assign), so a panic can only leave a fully-old or
+        // fully-new value — never a torn invariant. Refusing every subsequent
+        // call would turn one panic into a dead daemon that reports nothing.
+        //
+        // ⚠ THAT PROPERTY IS LOAD-BEARING AND NOTHING ENFORCES IT. If a future
+        // change puts a MULTI-STEP mutation under this guard — set field A,
+        // then field B — a panic between them leaves a half-updated run that
+        // this recovery silently papers over, and the HTTP surface's
+        // `catch_unwind` then turns it into a wrong-but-live answer. Keep
+        // mutations here atomic, or make this return the error.
+        //
+        // The timeline store deliberately does NOT recover: a panic during a
+        // query fails loud with a 500 rather than serving stale data.
         Ok(self.run.lock().unwrap_or_else(|p| p.into_inner()))
     }
 }

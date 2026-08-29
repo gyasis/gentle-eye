@@ -2239,3 +2239,42 @@ rather than implied by a checkbox.
 refusal path works as described. The tool description says so. A catalog entry that promises more
 than the code does is a lie told to every client that reads it — and the stub strings even differed
 per surface, which is a parity violation in the wave about parity.
+
+
+## R38 — Wave 10 re-review: an adapter that prints cannot be tested (2026-08-26)
+
+**PASS WITH NOTES.** All three prior findings verified fixed by killing regression mutations. The
+remaining gap was the CLI, and its cause is worth naming.
+
+### A function that writes to stdout is a function nobody tests
+
+`run_dayflow` loaded config from disk and `println!`d its results, so nothing could execute it —
+and swapping `--from` and `--to` in its range call **survived the entire suite**. The shared
+`resolve_range` was tested; the CLI's USE of it was not.
+
+Two structural changes made it testable, and both are the general fix rather than this case's:
+the logic takes the service as a parameter instead of constructing one from disk, and it **returns
+the JSON rather than printing it**. A function whose only output is stdout can be tested only by
+capturing stdout, which in practice means it is not tested at all.
+
+**This is the same lesson as R36's clock seam, one layer out**: I/O and configuration are the parts
+that make code unreachable, and the fix is always to push them to the caller.
+
+### Two caveats recorded rather than closed
+
+`lock()`'s poison recovery is sound **for a specific reason, not in general**: every mutation under
+that guard is a single atomic `Option` assignment, so a panic leaves a fully-old or fully-new value
+and never a torn invariant. Nothing enforces that property — a future multi-step mutation would
+turn the recovery into silently papering over half-updated state, which the HTTP `catch_unwind`
+would then serve as a wrong-but-live answer. The comment says so, loudly, next to the code that
+depends on it. (The timeline store deliberately does NOT recover: a panic during a query fails loud
+with a 500 rather than serving stale data.)
+
+The 5-second read timeout is a **mitigation, not a fix**: measured, one silent client still delays
+the next request by 5.06 s, N of them serialise into ~5N seconds, and an honest client sending a
+large request line slowly gets cut off. Thread-per-connection is the real answer; localhost-only
+makes the current behaviour survivable rather than correct. Also recorded in the code.
+
+**A limitation written down beside the code is worth more than one fixed badly.** Both of these are
+one-line comments that will still be true, and still findable, when someone changes the thing they
+constrain.

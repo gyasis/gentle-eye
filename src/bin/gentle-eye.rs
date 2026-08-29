@@ -1104,11 +1104,42 @@ async fn run_serve() -> Result<()> {
 /// decision made in one surface is a decision the other two do not make.
 async fn run_dayflow(args: &[String]) -> Result<()> {
     let server = GentleEyeServer::new().await?;
-    let df = server.dayflow();
+    let value = dayflow_command(server.dayflow(), args, Utc::now())?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    // EXIT 0 EVEN WHEN DEGRADED. A degraded session is running, just not
+    // producing; a non-zero exit makes every script treat a recoverable state
+    // as a crash, and the state is already in the payload.
+    Ok(())
+}
+
+/// The CLI's dayflow logic, with the service supplied.
+///
+/// Split out because `run_dayflow` builds a `GentleEyeServer`, which loads
+/// config from disk — so nothing could execute this code, and it showed:
+/// swapping `--from` and `--to` here survived the entire suite. The argument
+/// parsing and the service calls are the part that can be wrong; loading a
+/// config file is not.
+/// Returns the JSON the caller prints, rather than printing it: a function that
+/// writes to stdout can only be tested by capturing stdout, so in practice it
+/// is not tested at all.
+fn dayflow_command(
+    df: &std::sync::Arc<gentle_eye::dayflow::service::DayflowService>,
+    args: &[String],
+    now: chrono::DateTime<Utc>,
+) -> Result<serde_json::Value> {
     let sub = args.first().map(String::as_str).unwrap_or("status");
     let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
 
-    match sub {
+    let range = |r: &[String]| {
+        gentle_eye::dayflow::service::resolve_range(
+            flag(r, "--from").as_deref(),
+            flag(r, "--to").as_deref(),
+            now,
+        )
+        .map_err(|e| anyhow!(e))
+    };
+
+    let value = match sub {
         "start" => {
             let mode = match flag(rest, "--mode").as_deref() {
                 None | Some("session") => gentle_eye::dayflow::models::DayflowMode::Session,
@@ -1123,37 +1154,17 @@ async fn run_dayflow(args: &[String]) -> Result<()> {
                     .map_err(|e| anyhow!("bad --displays: {e}"))?,
                 None => vec![0],
             };
-            let id = df.start(mode, displays, Utc::now())?;
-            println!("{}", serde_json::json!({ "session_id": id.to_string() }));
+            serde_json::json!({ "session_id": df.start(mode, displays, now)?.to_string() })
         }
-        "stop" => {
-            let closed = df.stop(Utc::now())?;
-            println!("{}", serde_json::json!({ "windows_closed": closed.len() }));
-        }
-        "status" => {
-            let status = df.status(Utc::now())?;
-            println!("{}", serde_json::to_string_pretty(&status)?);
-            // EXIT 0 EVEN WHEN DEGRADED. A degraded session is running, just
-            // not producing; exiting non-zero would make every script treat a
-            // recoverable state as a crash, and the state is already in the
-            // payload for anything that wants to act on it.
-        }
+        "stop" => serde_json::json!({ "windows_closed": df.stop(now)?.len() }),
+        "status" => serde_json::to_value(df.status(now)?)?,
         "timeline" => {
-            let (from, to) = gentle_eye::dayflow::service::resolve_range(
-                flag(rest, "--from").as_deref(),
-                flag(rest, "--to").as_deref(),
-                Utc::now(),
-            )
-            .map_err(|e| anyhow!(e))?;
-            let entries = df.timeline(from, to)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "from": from.to_rfc3339(),
-                    "to": to.to_rfc3339(),
-                    "entries": entries,
-                }))?
-            );
+            let (from, to) = range(rest)?;
+            serde_json::json!({
+                "from": from.to_rfc3339(),
+                "to": to.to_rfc3339(),
+                "entries": df.timeline(from, to)?,
+            })
         }
         "ask" => {
             // Skip the VALUE of every two-token flag, not just the flags
@@ -1174,21 +1185,146 @@ async fn run_dayflow(args: &[String]) -> Result<()> {
                 question = Some(a);
                 break;
             }
-            let question = question
-                .ok_or_else(|| anyhow!("usage: gentle-eye dayflow ask \"<question>\" [--from T] [--to T]"))?;
-            let (from, to) = gentle_eye::dayflow::service::resolve_range(
-                flag(rest, "--from").as_deref(),
-                flag(rest, "--to").as_deref(),
-                Utc::now(),
-            )
-            .map_err(|e| anyhow!(e))?;
-            let answer = df.ask(question, from, to, |prompt| {
-                format!("[no model configured for ask]\n{prompt}")
+            let question = question.ok_or_else(|| {
+                anyhow!("usage: gentle-eye dayflow ask \"<question>\" [--from T] [--to T]")
             })?;
-            println!("{}", serde_json::to_string_pretty(&answer)?);
+            let (from, to) = range(rest)?;
+            serde_json::to_value(df.ask(question, from, to, |prompt| {
+                format!("[no model configured for ask]\n{prompt}")
+            })?)?
         }
         other => return Err(anyhow!("unknown dayflow subcommand '{other}'")),
-    }
-    Ok(())
+    };
+    Ok(value)
 }
 
+
+#[cfg(test)]
+mod dayflow_cli_tests {
+    use super::*;
+    use gentle_eye::dayflow::models::{ActivityCategory, TimelineEntry};
+    use gentle_eye::dayflow::service::DayflowService;
+    use gentle_eye::dayflow::timeline::SqliteTimelineStore;
+    use std::sync::{Arc, Mutex};
+
+    fn svc() -> Arc<DayflowService> {
+        let store = Arc::new(SqliteTimelineStore::new(Arc::new(Mutex::new(
+            gentle_eye::storage::database::init_in_memory().unwrap(),
+        ))));
+        Arc::new(DayflowService::new(
+            store,
+            gentle_eye::config::DayflowConfig::default(),
+        ))
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn now() -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-26T15:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn the_cli_passes_from_and_to_in_the_right_order() {
+        // Nothing executed this code, and it showed: swapping --from and --to
+        // in the range call survived the entire suite. The shared resolver was
+        // tested; the CLI's USE of it was not, and an adapter is code.
+        let s = svc();
+        let out = dayflow_command(
+            &s,
+            &argv(&[
+                "timeline",
+                "--from",
+                "2026-08-26T09:00:00Z",
+                "--to",
+                "2026-08-26T17:00:00Z",
+            ]),
+            now(),
+        )
+        .unwrap();
+        assert!(out["from"].as_str().unwrap().starts_with("2026-08-26T09:00"), "{out}");
+        assert!(out["to"].as_str().unwrap().starts_with("2026-08-26T17:00"), "{out}");
+    }
+
+    #[test]
+    fn the_cli_defaults_a_missing_range_to_today_so_far() {
+        let s = svc();
+        let out = dayflow_command(&s, &argv(&["timeline"]), now()).unwrap();
+        assert!(out["from"].as_str().unwrap().starts_with("2026-08-26T00:00:00"), "{out}");
+        assert!(out["to"].as_str().unwrap().starts_with("2026-08-26T15:30:00"), "{out}");
+    }
+
+    #[test]
+    fn the_cli_reads_the_same_timeline_the_other_surfaces_do() {
+        // The verb that genuinely works cross-surface: the timeline lives in
+        // SQLite, so the CLI sees what anything else wrote.
+        let s = svc();
+        let base = now();
+        s.insert_entry(&TimelineEntry {
+            id: uuid::Uuid::new_v4(),
+            recording_id: uuid::Uuid::new_v4(),
+            start_time: base - chrono::Duration::hours(2),
+            end_time: base - chrono::Duration::hours(1),
+            category: ActivityCategory::Coding,
+            app: "editor".into(),
+            activity: "refactor".into(),
+            summary: "the surfaces".into(),
+            provenance: None,
+        })
+        .unwrap();
+
+        let out = dayflow_command(&s, &argv(&["timeline"]), base).unwrap();
+        let entries = out["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{out}");
+        assert_eq!(entries[0]["summary"], "the surfaces");
+    }
+
+    #[test]
+    fn the_cli_question_is_not_a_flags_value() {
+        // `ask --from <ts> "what did I do"` used to pick the TIMESTAMP as the
+        // question and answer it, successfully and silently.
+        let s = svc();
+        let out = dayflow_command(
+            &s,
+            &argv(&["ask", "--from", "2026-08-26T09:00:00Z", "what did I do"]),
+            now(),
+        )
+        .unwrap();
+        // No records, so the refusal — the point is that it did not error out
+        // treating the timestamp as the question, and the range still applied.
+        assert_eq!(out["answer"], gentle_eye::dayflow::timeline::NO_RECORD);
+
+        // and a question that IS missing is refused rather than invented
+        let err = dayflow_command(&s, &argv(&["ask", "--from", "2026-08-26T09:00:00Z"]), now());
+        assert!(err.is_err(), "a flag value must never become the question");
+    }
+
+    #[test]
+    fn the_cli_drives_the_same_engine_within_one_process() {
+        // Honest scope: a real CLI invocation is a fresh process, so start/stop
+        // cannot span invocations (tasks.md records this). What IS true is that
+        // these verbs drive the shared service rather than a private copy — the
+        // property that will make them work once the daemon owns the session.
+        let s = svc();
+        let started = dayflow_command(&s, &argv(&["start"]), now()).unwrap();
+        assert!(started["session_id"].is_string());
+        assert!(s.status(now()).unwrap().running, "the service sees the CLI's start");
+
+        let status = dayflow_command(&s, &argv(&["status"]), now()).unwrap();
+        assert_eq!(status["running"], true, "and the CLI reports it back");
+
+        dayflow_command(&s, &argv(&["stop"]), now()).unwrap();
+        assert!(!s.status(now()).unwrap().running);
+    }
+
+    #[test]
+    fn an_unknown_subcommand_is_refused_rather_than_defaulting_to_status() {
+        let s = svc();
+        assert!(dayflow_command(&s, &argv(&["frobnicate"]), now()).is_err());
+        // …but no subcommand at all defaults to status, which is the harmless one
+        assert!(dayflow_command(&s, &[], now()).is_ok());
+    }
+}
