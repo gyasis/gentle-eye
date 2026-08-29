@@ -204,9 +204,7 @@ mod integration {
     }
 
     fn cfg() -> DayflowConfig {
-        let mut c = DayflowConfig::default();
-        c.segment_seconds = 600;
-        c
+        DayflowConfig { segment_seconds: 600, ..Default::default() }
     }
 
     fn frame(w: u32, h: u32, seed: u8) -> Vec<u8> {

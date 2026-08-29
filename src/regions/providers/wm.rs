@@ -38,14 +38,14 @@ impl WmProvider {
         let mut out = Vec::with_capacity(windows.len());
         for w in windows {
             // size (window-relative x/y is useless — translate to root for absolute)
-            let geo = match conn.get_geometry(w).and_then(|c| Ok(c.reply())) {
+            let geo = match conn.get_geometry(w).map(|c| c.reply()) {
                 Ok(Ok(g)) => g,
                 _ => continue, // window vanished between the list and the query
             };
             if geo.width == 0 || geo.height == 0 {
                 continue;
             }
-            let (ax, ay) = match conn.translate_coordinates(w, root, 0, 0).and_then(|c| Ok(c.reply())) {
+            let (ax, ay) = match conn.translate_coordinates(w, root, 0, 0).map(|c| c.reply()) {
                 Ok(Ok(t)) => (t.dst_x as i32, t.dst_y as i32),
                 _ => continue,
             };

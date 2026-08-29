@@ -586,7 +586,7 @@ fn detect_panels_bgra(buf: &[u8], w: usize, h: usize, stride: usize) -> Vec<(usi
         return vec![(0, w)];
     }
     let mut act = vec![0f64; w];
-    for x in 0..w {
+    for (x, a) in act.iter_mut().enumerate() {
         let (mut sum, mut sq) = (0f64, 0f64);
         for y in 0..h {
             let o = y * stride + x * 4;
@@ -599,14 +599,14 @@ fn detect_panels_bgra(buf: &[u8], w: usize, h: usize, stride: usize) -> Vec<(usi
         }
         let n = h as f64;
         let mean = sum / n;
-        act[x] = (sq / n - mean * mean).max(0.0).sqrt();
+        *a = (sq / n - mean * mean).max(0.0).sqrt();
     }
     let half = 10usize; // smoothing window ~21
     let mut sm = vec![0f64; w];
-    for x in 0..w {
+    for (x, s) in sm.iter_mut().enumerate() {
         let a = x.saturating_sub(half);
         let b = (x + half + 1).min(w);
-        sm[x] = act[a..b].iter().sum::<f64>() / (b - a) as f64;
+        *s = act[a..b].iter().sum::<f64>() / (b - a) as f64;
     }
     let mut sorted = sm.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1132,8 +1132,8 @@ fn dayflow_command(
 
     let range = |r: &[String]| {
         gentle_eye::dayflow::service::resolve_range(
-            flag(r, "--from").as_deref(),
-            flag(r, "--to").as_deref(),
+            flag(r, "--from"),
+            flag(r, "--to"),
             now,
         )
         .map_err(|e| anyhow!(e))
@@ -1141,7 +1141,7 @@ fn dayflow_command(
 
     let value = match sub {
         "start" => {
-            let mode = match flag(rest, "--mode").as_deref() {
+            let mode = match flag(rest, "--mode") {
                 None | Some("session") => gentle_eye::dayflow::models::DayflowMode::Session,
                 Some("daemon") => gentle_eye::dayflow::models::DayflowMode::Daemon,
                 Some(other) => return Err(anyhow!("unknown mode '{other}': use session or daemon")),

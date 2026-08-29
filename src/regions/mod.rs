@@ -565,7 +565,7 @@ pub fn locate(query: &str, regions: &[Region]) -> Option<usize> {
         None
     };
     let filtered: Vec<usize> = (0..regions.len())
-        .filter(|&i| want.map_or(true, |g| regions[i].granularity == g))
+        .filter(|&i| want.is_none_or(|g| regions[i].granularity == g))
         .collect();
     let pool = if filtered.is_empty() {
         (0..regions.len()).collect::<Vec<_>>()
@@ -603,7 +603,7 @@ pub fn locate_ocr(query: &str, regions: &[Region], frame_png: &str, origin: (i64
         let text = crate::analysis::ocr::ocr_image(&tmp).unwrap_or_default().to_lowercase();
         let _ = std::fs::remove_file(&tmp);
         let score = words.iter().filter(|w| text.contains(w.as_str())).count();
-        if score > 0 && best.map_or(true, |(_, bs)| score > bs) {
+        if score > 0 && best.is_none_or(|(_, bs)| score > bs) {
             best = Some((i, score));
         }
     }
