@@ -1611,6 +1611,39 @@ fn a_targets_availability_follows_its_inner_source_between_frames() {
     assert_eq!(fine.availability(), Availability::Available);
 }
 
+/// The mirror of the target test above, for the window: `availability()` must
+/// re-ask the LOCATOR, so a window that closed between frames is seen without
+/// waiting for the next failed capture. Every in-loop caller happens to run
+/// right after `next_frame` refreshed `state`, so only a direct between-frames
+/// call can tell a live re-ask from a stale field (mutation M14 survived until
+/// this test existed).
+#[test]
+fn a_windows_availability_follows_its_locator_between_frames() {
+    let rect = gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 32, h: 32 };
+    let state = Arc::new(StdMutex::new(WindowState::Visible(rect)));
+    let win = WindowSource::new(
+        Box::new(ScriptedFrames { frames: vec![quadrant_frame(5, 5)], cursor: 0, ordinal: 0 }),
+        Box::new(ScriptedLocator { state: Arc::clone(&state) }),
+        "term",
+        0,
+    );
+    // NO next_frame call in this test: the change must reach the trait surface
+    // through the locator alone.
+    assert_eq!(win.availability(), Availability::Available);
+    *state.lock().unwrap() = WindowState::Minimised;
+    assert_eq!(
+        win.availability(),
+        Availability::Occluded,
+        "the window minimised between frames and availability still reports the stale state"
+    );
+    *state.lock().unwrap() = WindowState::Gone;
+    assert_eq!(
+        win.availability(),
+        Availability::Ended,
+        "the window closed between frames and availability still reports the stale state"
+    );
+}
+
 /// The SESSION-WIDE arm of FR-113 (D014-9's second row): a watched window that
 /// QUITS must leave a gap in the session's ledger saying why — not silence.
 /// Before this wire existed, `Availability::gap_cause()` was called by nothing
@@ -1738,36 +1771,55 @@ fn a_frame_does_not_lift_an_idle_pause() {
     );
 }
 
-/// A retired source stays `Ended` in `describe()`, even when its window
-/// REAPPEARS under the same label: the contract says an ended source is never
-/// restarted, so the status surface must not advertise it Available while the
-/// loop will never ask it again — that is a liveness lie in the other
-/// direction.
+/// A retired source stays `Ended` in `describe()`, even when the source's OWN
+/// availability flips back (a stream that reconnects, a window recreated under
+/// the same label): the contract says an ended source is never restarted, so
+/// the status surface must not advertise Available for a source the loop will
+/// never ask again — that is a liveness lie in the other direction.
+///
+/// FIXTURE NOTE: a `WindowSource` cannot drive this — after a Gone failure its
+/// internal state stays `Ended`, so its `availability()` reports Ended with or
+/// without the retired override, and the first version of this test passed
+/// while proving nothing (the class-1 defect, caught when mutation M10
+/// survived it). The source here reports its availability from a shared cell,
+/// so the "came back" condition genuinely reaches `describe()`.
 #[test]
-fn a_retired_source_is_described_as_ended_even_if_its_window_reappears() {
+fn a_retired_source_is_described_as_ended_even_if_its_availability_recovers() {
+    struct FlippableSource {
+        avail: Arc<StdMutex<Availability>>,
+    }
+    impl CaptureSource for FlippableSource {
+        fn next_frame(&mut self) -> Result<SourceFrame, SourceError> {
+            Err(SourceError::new("down"))
+        }
+        fn regions_for(&self, _f: &SourceFrame) -> Option<Vec<Region>> {
+            None
+        }
+        fn availability(&self) -> Availability {
+            *self.avail.lock().unwrap()
+        }
+        fn identity(&self) -> SourceIdentity { SourceIdentity::new("flippable", "x") }
+        fn ordinal(&self) -> u32 { 0 }
+    }
+
     let (mut run, _cfg) = run_for(vec![0]);
     let dir = tempfile::tempdir().unwrap();
-    let rect = gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 32, h: 32 };
-    let state = Arc::new(StdMutex::new(WindowState::Gone));
-    let win = WindowSource::new(
-        Box::new(ScriptedFrames { frames: vec![quadrant_frame(5, 5)], cursor: 0, ordinal: 0 }),
-        Box::new(ScriptedLocator { state: Arc::clone(&state) }),
-        "term",
-        0,
-    );
-    let mut lp = CaptureLoop::new(vec![Box::new(win)], Sampler::new(DeltaConfig::default()), dir.path());
+    let avail = Arc::new(StdMutex::new(Availability::Ended));
+    let src = FlippableSource { avail: Arc::clone(&avail) };
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
 
     let t = lp.tick(&mut run, at(30));
-    assert_eq!(t.retired, vec![0], "fixture failure: the gone window was not retired");
+    assert_eq!(t.retired, vec![0], "fixture failure: the ended source was not retired");
 
-    // The "same" window comes back — a NEW window with a matching label. The
-    // locator now says Visible, but the loop will never ask this source again.
-    *state.lock().unwrap() = WindowState::Visible(rect);
+    // The source itself now claims to be fine again. The loop will still never
+    // ask it — describe must say so.
+    *avail.lock().unwrap() = Availability::Available;
     let described = lp.describe();
+    assert_eq!(described[0].0.kind, "flippable");
     assert_eq!(
         described[0].2,
         Availability::Ended,
-        "describe() reports a retired source by its live locator answer — \
+        "describe() reports a retired source by its live self-report — \
          status would say Available for a source the loop never asks"
     );
 }
