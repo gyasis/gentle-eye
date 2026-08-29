@@ -705,6 +705,15 @@ async fn the_loop_writes_sidecars_and_the_ladder_crops() {
         }
     }
     assert!(!samples.is_empty(), "the gate kept no samples — nothing to crop");
+    // Fixture honesty: with one sample the samples x regions arithmetic still
+    // discriminates (3 vs 1), but only because REGIONS > 1 — pin BOTH factors
+    // above 1 so a future edit to either cannot quietly make the crop
+    // assertion unable to fail.
+    assert!(
+        samples.len() >= 2 && REGIONS >= 2,
+        "fixture degraded: {} samples x {REGIONS} regions cannot prove cropping",
+        samples.len()
+    );
 
     // Every kept sample has its sidecar, and it round-trips.
     for p in &samples {
@@ -855,4 +864,177 @@ fn a_cascade_less_session_reports_whole_frame_reads_on_every_surface() {
     // Surface 3 — MCP serialises the same struct; assert the shape it emits.
     let mcp = serde_json::to_value(svc.status(Utc::now()).unwrap()).expect("serialises");
     assert_eq!(mcp["samples_read_whole"].as_u64(), Some(n));
+}
+
+// ── Gate W5: the sidecar must reach the PRODUCTION summariser, not only the
+// test's hand-assembled path ──────────────────────────────────────────────────
+
+/// The T010 test above collects sample paths itself and calls the ladder
+/// directly. In production the summariser is `RoutedChunkSummarizer`, which
+/// resolves a window's PNGs ITSELF by `sample_prefix` under its OWN
+/// `sample_dir` — a second, independent directory parameter. This test drives
+/// the REAL chain — loop writes samples + sidecars, `settle_due` hands due
+/// windows to a real `RoutedChunkSummarizer` over the SAME dir — and proves by
+/// arithmetic that the sidecars were found and the ladder CROPPED. If the loop
+/// wrote sidecars anywhere the production summariser does not look, the
+/// latencies report whole-frame reads and the call count collapses to
+/// one-per-sample, and this fails.
+#[tokio::test]
+async fn the_production_summarizer_finds_the_loops_sidecars_and_crops() {
+    use gentle_eye::dayflow::summarizer::RoutedChunkSummarizer;
+
+    const REGIONS: u32 = 3;
+    let (mut run, _cfg) = run_for(vec![0]);
+    // Windows must close within the driven ticks (the engine's FR-035 seam).
+    run.set_interval(std::time::Duration::from_secs(1), at(0));
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..6).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    let mut src = FakeSource::new(0, script);
+    src.regions = Some(boxes(REGIONS));
+    let sources: Vec<Box<dyn CaptureSource>> = vec![Box::new(src)];
+    let mut lp = CaptureLoop::new(sources, Sampler::new(DeltaConfig::default()), dir.path());
+    let sid = run.session_id();
+
+    for k in 1..=3 {
+        lp.tick(&mut run, at(k * 30));
+    }
+
+    let text = Arc::new(AtomicUsize::new(0));
+    let reason = Arc::new(AtomicUsize::new(0));
+    let router = Arc::new(PerceptionRouter::new(
+        Arc::new(Counting { tier: Tier::Text, calls: Arc::clone(&text) }),
+        Arc::new(Counting { tier: Tier::Reason, calls: Arc::clone(&reason) }),
+        dayflow_budget(60, 1, 64),
+    ));
+    // The SAME directory the loop wrote into — the invariant production wiring
+    // must uphold, asserted here because nothing ties the two parameters
+    // together structurally.
+    let summarizer = RoutedChunkSummarizer::new(Arc::clone(&router), lp.sample_dir())
+        .with_max_regions(REGIONS as usize);
+
+    let entries = lp.settle_due(&summarizer, sid, at(100_000)).await;
+    assert!(
+        !entries.is_empty(),
+        "no window settled through the production summariser — the real path was never exercised"
+    );
+
+    let latencies = summarizer.latencies();
+    let settled: usize = latencies.iter().map(|l| l.samples).sum();
+    assert!(settled >= 1, "the settled windows resolved no samples");
+    assert_eq!(
+        text.load(Ordering::SeqCst),
+        settled * REGIONS as usize,
+        "the production summariser read whole frames — the loop's sidecars never reached it"
+    );
+    assert_eq!(
+        latencies.iter().map(|l| l.samples_read_whole).sum::<usize>(),
+        0,
+        "the ladder counted whole-frame reads despite the loop having written every sidecar"
+    );
+    assert_eq!(reason.load(Ordering::SeqCst), entries.len(), "one reasoning call per settled window");
+}
+
+/// An EMPTY cascade answer (`Some(vec![])` — "the cascade ran and found
+/// nothing", D014-3) is NOT the degradation: the loop writes an honest empty
+/// sidecar and counts nothing, and the ladder's per-segment counter agrees.
+/// Before this gate the ladder counted every empty sidecar as a whole-frame
+/// read while the status counter did not — two same-named numbers disagreeing
+/// on every frame of an empty desktop.
+#[tokio::test]
+async fn an_empty_cascade_answer_is_counted_as_degradation_by_neither_counter() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..6).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    // Default FakeSource: regions = Some(vec![]) — the cascade answers "nothing".
+    let sources: Vec<Box<dyn CaptureSource>> = vec![Box::new(FakeSource::new(0, script))];
+    let mut lp = CaptureLoop::new(sources, Sampler::new(DeltaConfig::default()), dir.path());
+
+    let mut samples = Vec::new();
+    for k in 1..=3 {
+        let t = lp.tick(&mut run, at(k * 30));
+        for s in &t.sources {
+            if let Some(p) = s.record.as_ref().and_then(|r| r.path.clone()) {
+                samples.push(p);
+            }
+        }
+    }
+    assert!(!samples.is_empty());
+
+    // Capture side: an answered cascade is not a degradation.
+    assert_eq!(lp.samples_read_whole(), 0, "an EMPTY answer must not count as a whole-frame read");
+    // And the sidecar says so honestly: present, and empty.
+    for p in &samples {
+        let side = regions_path(p);
+        assert!(side.exists(), "an answered cascade writes its (empty) answer");
+        let parsed: Vec<Region> =
+            serde_json::from_str(&std::fs::read_to_string(&side).unwrap()).unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    // Read side: the ladder reads the frames whole — correctly — and its
+    // same-named counter must agree with the capture-side one.
+    let text = Arc::new(AtomicUsize::new(0));
+    let reason = Arc::new(AtomicUsize::new(0));
+    let router = PerceptionRouter::new(
+        Arc::new(Counting { tier: Tier::Text, calls: Arc::clone(&text) }),
+        Arc::new(Counting { tier: Tier::Reason, calls: Arc::clone(&reason) }),
+        dayflow_budget(60, 1, 64),
+    );
+    let (_s, latency) = summarize_segment_via_ladder(&router, &samples, "what happened?", 0, 3)
+        .await
+        .expect("ladder runs");
+    assert_eq!(text.load(Ordering::SeqCst), samples.len(), "whole-frame reads, one per sample");
+    assert_eq!(
+        latency.samples_read_whole, 0,
+        "the ladder counted an ANSWERED-empty cascade as degradation — it now disagrees \
+         with the capture-side counter under the same name"
+    );
+}
+
+/// The degradation counter is SESSION-scoped, like everything else in
+/// `DayflowStatus`. Without a reset at `start`, session B's status reports
+/// session A's whole-frame reads as its own, and an operator debugs a
+/// degradation that is not there.
+#[test]
+fn a_new_session_does_not_inherit_the_old_sessions_whole_frame_count() {
+    use gentle_eye::dayflow::service::DayflowService;
+    use gentle_eye::dayflow::timeline::SqliteTimelineStore;
+
+    let store = Arc::new(SqliteTimelineStore::new(Arc::new(std::sync::Mutex::new(
+        gentle_eye::storage::database::init_in_memory().expect("db"),
+    ))));
+    let svc = DayflowService::new(store, DayflowConfig::default());
+    svc.start(DayflowMode::Session, vec![0], Utc::now()).expect("session A starts");
+
+    let dir = tempfile::tempdir().unwrap();
+    svc.start_capture(
+        Box::new(|| {
+            let script: Vec<Option<u8>> =
+                (0..200).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+            vec![Box::new(FakeSource::new(0, script).with_no_cascade()) as Box<dyn CaptureSource>]
+        }),
+        Arc::new(FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 }),
+        dir.path().to_path_buf(),
+        std::time::Duration::from_millis(5),
+    )
+    .expect("capture starts");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline
+        && svc.status(Utc::now()).unwrap().samples_read_whole == 0
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    svc.stop_capture().expect("capture stops");
+    let n = svc.status(Utc::now()).unwrap().samples_read_whole;
+    assert!(n > 0, "session A never degraded — the fixture proves nothing about inheritance");
+
+    svc.stop(Utc::now()).expect("session A stops");
+    svc.start(DayflowMode::Session, vec![0], Utc::now()).expect("session B starts");
+    assert_eq!(
+        svc.status(Utc::now()).unwrap().samples_read_whole,
+        0,
+        "session B inherited session A's degradation count ({n}) — status attributes \
+         one session's whole-frame reads to another"
+    );
 }

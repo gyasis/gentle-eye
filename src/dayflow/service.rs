@@ -176,6 +176,12 @@ impl DayflowService {
         }
         let run = DayflowRun::start(&self.config, mode, displays, now)?;
         let id = run.session_id();
+        // A NEW session starts with a clean degradation ledger. The counter is
+        // service-lifetime state while everything else in `DayflowStatus` is
+        // session-scoped (session_id, started_at, displays, liveness) — without
+        // this reset, session B's status reports session A's whole-frame reads
+        // as its own, and an operator debugs a degradation that is not there.
+        self.read_whole.store(0, std::sync::atomic::Ordering::SeqCst);
         *guard = Some(run);
         Ok(id)
     }
@@ -195,6 +201,17 @@ impl DayflowService {
     ///
     /// It stops when `stop_capture` is called, when the session ends, or when a
     /// tick panics (see the `catch_unwind` note in the body).
+    ///
+    /// `sample_dir` MUST be the directory the summariser resolves samples
+    /// under. Nothing ties the two structurally: `RoutedChunkSummarizer` is
+    /// constructed with its own directory and finds a window's PNGs (and their
+    /// region sidecars) by prefix there, so a caller that passes different
+    /// directories gets a loop that writes samples and sidecars where the
+    /// summariser never looks — every segment then reads whole frames and
+    /// `samples_read_whole` stays 0, because the capture side did its half
+    /// correctly. The wiring test in `tests/dayflow_loop.rs`
+    /// (`the_production_summarizer_finds_the_loops_sidecars_and_crops`) is the
+    /// executable form of this sentence.
     pub fn start_capture(
         &self,
         build_sources: Box<dyn FnOnce() -> Vec<Box<dyn crate::dayflow::source::CaptureSource>> + Send>,

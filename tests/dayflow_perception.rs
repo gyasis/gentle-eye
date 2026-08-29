@@ -543,7 +543,17 @@ async fn a_sample_whose_regions_all_miss_the_frame_is_still_read() {
         "the sample must still be read, whole, rather than silently lost"
     );
     assert_eq!(r.text_paths.lock().unwrap()[0], paths[0], "and it is the frame itself");
-    assert_eq!(latency.samples_read_whole, 0, "regions existed — this is not the no-sidecar path");
+    // W5 gate: this used to expect 0 ("regions existed — this is not the
+    // no-sidecar path"), which made the counter a taxonomy of CAUSES instead of
+    // what FR-103 needs it to be — visibility of every read where the crop was
+    // absent. This sample WAS read whole; regions that all miss the frame are
+    // exactly the stale-region story the fixture tells, and leaving it at 0
+    // made that degradation the one whole-frame read invisible to BOTH the
+    // capture-side counter and this one.
+    assert_eq!(
+        latency.samples_read_whole, 1,
+        "a frame read whole because no region applied must be COUNTED, not merely survived"
+    );
 }
 
 #[test]

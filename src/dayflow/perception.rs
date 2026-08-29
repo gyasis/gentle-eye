@@ -567,9 +567,17 @@ pub struct SegmentLatency {
     /// question FR-008 asks — "did this segment pay a reload?" — is answerable
     /// from the first call against the others, and needs no threshold at all.
     pub first_call: std::time::Duration,
-    /// Samples read as a whole frame because no regions were captured beside
-    /// them (T027 degraded). Counted because the degradation is otherwise
-    /// invisible: every test passes and nothing errors.
+    /// Samples read as a whole frame because no USABLE regions were beside
+    /// them (T027 degraded): a missing or unreadable sidecar, regions none of
+    /// which apply to the frame, or a failed crop. Counted because the
+    /// degradation is otherwise invisible: every test passes, nothing errors.
+    ///
+    /// An EMPTY sidecar is NOT counted — the cascade ran and found nothing
+    /// (D014-3), so the whole-frame read is correct behaviour, not degradation.
+    /// That keeps this number aligned with `DayflowStatus::samples_read_whole`,
+    /// which is counted at capture time under the same rule. This one can still
+    /// read HIGHER than the status counter when a sidecar written successfully
+    /// becomes unreadable before summarisation — a fact only the reader can see.
     pub samples_read_whole: usize,
     /// Wall time for the segment's perception.
     pub total: std::time::Duration,
@@ -663,15 +671,38 @@ pub async fn summarize_segment_via_ladder(
                 let dir = path.with_extension("crops");
                 match crop_regions(path, &regions, &dir, max_regions, display_id) {
                     Ok(crops) if !crops.is_empty() => crops,
-                    Ok(_) => vec![path.clone()],
+                    Ok(_) => {
+                        // The sidecar NAMED regions but not one was usable for
+                        // THIS frame (wrong display, or no intersection). The
+                        // frame is read whole for want of a usable region —
+                        // the same degradation as a missing sidecar, and until
+                        // this arm counted it, it was the one whole-frame read
+                        // invisible to BOTH counters (capture-side and here).
+                        tracing::warn!(sample = %path.display(),
+                            "sidecar regions exist but none apply to this frame; reading it whole");
+                        read_whole += 1;
+                        vec![path.clone()]
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, sample = %path.display(),
                             "cropping failed; reading the whole frame instead");
+                        read_whole += 1;
                         vec![path.clone()]
                     }
                 }
             }
-            _ => {
+            Some(_) => {
+                // An EMPTY sidecar: the cascade RAN and found nothing to crop
+                // (D014-3 draws this line — `Some(vec![])` is an answer, `None`
+                // is the inability to answer). The frame is read whole because
+                // there is genuinely nothing else to read, which is correct
+                // behaviour, not the degradation `samples_read_whole` exists to
+                // expose. Counting it here while the capture-side counter does
+                // not would make the two same-named numbers disagree on every
+                // frame of an empty desktop.
+                vec![path.clone()]
+            }
+            None => {
                 // Measurable, not silent. Without regions the whole benefit of
                 // T027 is absent and every test still passes, so the only way
                 // anyone learns is a counter that says so.

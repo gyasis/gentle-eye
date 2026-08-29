@@ -95,10 +95,13 @@ pub struct CaptureLoop {
     /// Samples that will be read as a WHOLE FRAME because no usable sidecar
     /// reached disk beside them.
     ///
-    /// Counted HERE, at capture, not at summarisation: the loop is the only
-    /// place that knows both causes — a source with no cascade, AND a sidecar
-    /// whose write failed. A count taken later would miss the second and
-    /// under-report the degradation it exists to expose.
+    /// Counted HERE, at capture, for IMMEDIACY: `status` must show the
+    /// degradation while the session runs, and summarisation happens minutes
+    /// later (or never, if no window has settled yet) — a count taken only at
+    /// read time is zero for exactly the period an operator is looking.
+    /// NOT because capture sees more: a failed sidecar write leaves NO file,
+    /// so the ladder's read-time count catches it too, and the ladder alone
+    /// can see a sidecar that corrupted after a successful write.
     ///
     /// Shared so the service can report it while the thread owns the loop.
     read_whole: Arc<AtomicU64>,
