@@ -122,6 +122,18 @@ fn rig(budget: u32) -> Rig {
     }
 }
 
+/// A pane region on `display`, in that display's local coordinates.
+fn pane(x: u32, y: u32, w: u32, h: u32, display: u32) -> gentle_eye::regions::Region {
+    let mut r = gentle_eye::regions::Region::new(
+        gentle_eye::target::model::PixelRect { x, y, w, h },
+        gentle_eye::regions::Source::Wm,
+        gentle_eye::regions::Granularity::Pane,
+        0.8,
+    );
+    r.display_id = display;
+    r
+}
+
 /// Write `n` samples for one window, as the sampler names them.
 fn samples(dir: &Path, display: u32, sequence: u64, n: usize) -> Vec<std::path::PathBuf> {
     let prefix = gentle_eye::dayflow::sampler::sample_prefix(display, sequence);
@@ -438,4 +450,120 @@ async fn a_sample_with_no_regions_is_still_read_whole() {
         "every sample is still read, once, as a whole frame"
     );
     assert_eq!(latency.samples, 3);
+}
+
+#[tokio::test]
+async fn crops_reach_the_text_tier_through_the_production_summarizer() {
+    // X-B: the crop guard above calls the ladder DIRECTLY with a literal
+    // max_regions, so `RoutedChunkSummarizer` could pass 0 and crops would
+    // never happen on the production path — 453 tests still green. That is the
+    // orphan class one seam up: not "nothing calls the function" but "the
+    // caller neuters the parameter". This drives sidecar -> crops -> text tier
+    // through the type the pipeline actually uses.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = samples(dir.path(), 2, 9, 2);
+    for p in &paths {
+        let mut img = image::RgbaImage::new(300, 100);
+        for (x, _y, px) in img.enumerate_pixels_mut() {
+            *px = if x < 150 {
+                image::Rgba([255, 0, 0, 255])
+            } else {
+                image::Rgba([0, 0, 255, 255])
+            };
+        }
+        img.save(p).unwrap();
+        let regions = vec![pane(0, 0, 150, 100, 2), pane(150, 0, 150, 100, 2)];
+        std::fs::write(
+            gentle_eye::dayflow::perception::regions_path(p),
+            serde_json::to_string(&regions).unwrap(),
+        )
+        .unwrap();
+    }
+
+    let r = rig(1_000);
+    let s = RoutedChunkSummarizer::new(r.router.clone(), dir.path());
+    let chunk = ChunkRef {
+        index: 0,
+        path: dir.path().join("x.mp4"),
+        start_wall: Utc::now(),
+        end_wall: Utc::now(),
+        display_id: 2,
+        sequence: 9,
+        summarized: false,
+    };
+    s.summarize_chunk(&chunk, &RollingContext::default()).await.unwrap();
+
+    assert_eq!(
+        r.text_calls.load(Ordering::SeqCst),
+        4,
+        "2 samples x 2 regions THROUGH the summarizer — a max_regions of 0 gives 2"
+    );
+
+    // X-A: the recorded latency must actually be kept, not merely computed.
+    let recorded = s.latencies();
+    assert_eq!(recorded.len(), 1, "FR-013 records a latency PER SEGMENT");
+    assert_eq!(recorded[0].samples, 2);
+    assert_eq!(recorded[0].perception_calls, 5, "4 crops + 1 reasoning call");
+    assert_eq!(recorded[0].samples_read_whole, 0, "regions were present for both");
+}
+
+#[tokio::test]
+async fn a_sample_whose_regions_all_miss_the_frame_is_still_read() {
+    // X-H: the fail-open tests covered missing, corrupt and EMPTY sidecars, but
+    // not "regions present and every one skipped" — which is precisely the
+    // stale-region story the docs tell (a resize, or boxes from another
+    // display). Each fixture was missing a different half of reality again.
+    // R13: never drop, dayflow cannot re-capture yesterday.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = samples(dir.path(), 0, 0, 1);
+    let mut img = image::RgbaImage::new(200, 100);
+    for (_x, _y, px) in img.enumerate_pixels_mut() {
+        *px = image::Rgba([10, 10, 10, 255]);
+    }
+    img.save(&paths[0]).unwrap();
+
+    // every region is off-frame or belongs to another display
+    let regions = vec![pane(9_000, 9_000, 50, 50, 0), pane(0, 0, 50, 50, 7)];
+    std::fs::write(
+        gentle_eye::dayflow::perception::regions_path(&paths[0]),
+        serde_json::to_string(&regions).unwrap(),
+    )
+    .unwrap();
+
+    let r = rig(1_000);
+    let (_, latency) = gentle_eye::dayflow::perception::summarize_segment_via_ladder(
+        &r.router, &paths, "categorise", 0, 8,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        r.text_calls.load(Ordering::SeqCst),
+        1,
+        "the sample must still be read, whole, rather than silently lost"
+    );
+    assert_eq!(r.text_paths.lock().unwrap()[0], paths[0], "and it is the frame itself");
+    assert_eq!(latency.samples_read_whole, 0, "regions existed — this is not the no-sidecar path");
+}
+
+#[test]
+fn a_region_exactly_touching_the_frame_edge_yields_no_crop() {
+    // X-E: `x1 <= x0` versus `x1 < x0` is one character, and no fixture had a
+    // region that exactly kisses the edge. The consequence is not cosmetic: a
+    // zero-width crop makes `save` fail, which errors `crop_regions`, which
+    // sends the ladder down its whole-frame fallback for the ENTIRE sample —
+    // one stale region abandoning cropping for everything else on screen.
+    let dir = tempfile::tempdir().unwrap();
+    let frame = dir.path().join("f.png");
+    image::RgbaImage::new(200, 100).save(&frame).unwrap();
+
+    let regions = vec![
+        pane(200, 0, 50, 50, 0), // starts exactly at the right edge
+        pane(0, 100, 50, 50, 0), // starts exactly at the bottom edge
+        pane(0, 0, 50, 50, 0),   // genuinely inside
+    ];
+    let crops =
+        gentle_eye::dayflow::perception::crop_regions(&frame, &regions, &dir.path().join("c"), 8, 0)
+            .unwrap();
+    assert_eq!(crops.len(), 1, "edge-kissing regions produce no crop, and no error");
 }

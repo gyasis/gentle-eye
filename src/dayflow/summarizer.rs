@@ -163,7 +163,10 @@ impl ChunkSummarizer for RoutedChunkSummarizer {
             samples = latency.samples,
             calls = latency.perception_calls,
             total_ms = latency.total.as_millis() as u64,
-            mean_call_ms = latency.mean_call().as_millis() as u64,
+            first_call_ms = latency.first_call.as_millis() as u64,
+            mean_warm_ms = latency.mean_warm_call().as_millis() as u64,
+            cold_load = latency.paid_a_cold_load(),
+            read_whole = latency.samples_read_whole,
             "dayflow segment perception"
         );
         if let Ok(mut v) = self.latencies.lock() {

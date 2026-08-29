@@ -1722,3 +1722,74 @@ call could not satisfy the assertions — and a module-boundary rule is a lint, 
 ~33 MB at 4K × 8 regions × every sample. `crop_imm` borrows. And `SegmentLatency`'s hardcoded
 500 ms cold-load threshold was an absolute valid only for one model on one machine; it now reports
 mean-time-per-call, which compares without a magic constant.
+
+
+## R29 — Wave 7 re-review: the orphan class moves one seam up each time (2026-08-26)
+
+**PASS WITH NOTES.** All eight prior findings held, and the four surviving mutants were gaps
+*around* the new code rather than defects *in* it — which turns out to be the pattern worth
+recording.
+
+### "Nothing calls it" became "the caller neuters the parameter"
+
+`crop_regions` is now called, and guarded by a test that drives sidecar → crops → text tier. But
+that test calls the ladder **directly**, with a literal `max_regions`. So
+`RoutedChunkSummarizer` — the type the pipeline actually uses — could pass **0** and crops would
+never happen on the production path, with all 453 tests green.
+
+That is the sixth appearance of one class, and it has moved every time:
+
+| # | shape |
+|---|---|
+| 1–5 | the function exists, is correct, is tested, and **nothing calls it** |
+| 6 | the function is called, and **the caller passes a value that disables it** |
+
+A guard proves a specific seam. It says nothing about the seam above it, and writing one makes the
+whole class *feel* handled — which is precisely why the next one goes unnoticed. **The test must
+run through the type the production path uses, not through the function the unit test finds
+convenient.**
+
+Two smaller instances of the same thing: `latencies.push` could be deleted with all tests green
+(FR-013 recorded to a Vec nothing read), and `with_max_regions`/`latencies()` had no callers at all.
+
+### The fail-open fixtures were each missing a different half — again
+
+The sidecar tests covered **missing**, **corrupt** and **empty-list**. Not covered: regions
+*present* and *every one skipped* — which is exactly the stale-region story the docs tell (a resize,
+or boxes belonging to another display). Dropping the sample there violates R13's never-drop rule,
+and the mutation survived. R26's axis-list lesson applied to a principle rather than a metric:
+**fail-open needs a fixture per way the input can be unusable**, not one representative.
+
+### A budget large enough to livelock
+
+Found by derivation, not by a test: the burst is `samples × regions + 1`, spent back-to-back. A
+config the validator **accepts** (30-minute segment, 60 s interval, default 12 regions) needs 361
+calls against a budget of 240. The segment is refused mid-burst, requeued by retry-never-drop, and
+retries forever — **spending the entire budget on every attempt, starving every other segment, and
+never completing.** Silently.
+
+That is worse than an error in the specific way this project keeps rediscovering: it produces no
+failure anyone can see. Now refused up front, with a message naming the arithmetic and the three
+knobs that fix it.
+
+### A mean that cannot see what it was built to detect
+
+`mean_call()` replaced a hardcoded 500 ms threshold — correctly, since an absolute is only valid
+for one model on one machine — but at realistic call counts it is useless: with the default 12
+regions a 5-sample segment is 61 calls, so a 3.74 s cold load moves a 180 ms mean to 241 ms, well
+inside the measured warm spread. My own unit fixture manufactured separability by implying ~48 ms
+warm calls, a rate R27's measurement says does not exist. **The fixture proved the metric by
+assuming a system that isn't this one** — R26's failure mode, on a metric this time.
+
+The cold load is deterministically the FIRST call of a burst, so recording `first_call` separately
+answers the question with no threshold at all, on any model or machine.
+
+### An owed producer, written down rather than left implied
+
+Nothing writes `.regions.json` yet — the capture loop owes it — and because the path fails open,
+its absence is **permanently invisible**: whole-frame reads, every test green, T027's entire benefit
+silently absent. Recorded as an explicit deliverable on the task, and `samples_read_whole` now
+counts the degradation so it is measurable rather than inferred. Same for
+`ResidencyPolicy::keep_alive`, which is computed correctly but has no channel to be sent:
+`analyze_image(path, prompt)` cannot carry it, so `Resident` remains a policy the running system
+cannot express. Both say so on the task instead of reading as done.

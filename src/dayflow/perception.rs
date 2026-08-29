@@ -110,6 +110,7 @@ pub struct PerceptionRouter {
     reason: Arc<dyn VisionProvider>,
     escalations: Mutex<Vec<Escalation>>,
     limiter: RateLimiter,
+    budget: u32,
 }
 
 impl PerceptionRouter {
@@ -124,6 +125,7 @@ impl PerceptionRouter {
             reason,
             escalations: Mutex::new(Vec::new()),
             limiter: RateLimiter::new(f64::from(budget), BUDGET_WINDOW),
+            budget,
         }
     }
 
@@ -181,6 +183,11 @@ impl PerceptionRouter {
             Ok(mut v) => v.push(record),
             Err(poisoned) => poisoned.into_inner().push(record),
         }
+    }
+
+    /// The perception budget this router was built with.
+    pub fn budget(&self) -> u32 {
+        self.budget
     }
 
     /// Every escalation so far, in order.
@@ -541,34 +548,52 @@ pub fn crop_regions(
 // ─── T029: residency policy (FR-008/013) ──────────────────────────────────
 
 /// What one segment's perception actually cost (FR-013).
-///
-/// Recorded per segment INCLUDING any model reload, because the reload is the
-/// thing residency exists to avoid: a latency figure that excluded it would
-/// report the policy as free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentLatency {
     /// Samples in the segment.
     pub samples: usize,
-    /// Perception calls actually made — text calls (one per region crop, or one
-    /// per frame when no regions were captured) plus the single reasoning call.
-    ///
-    /// NOT equal to `samples`: cropping turns one sample into one call per
-    /// region, which is exactly what the budget is derived from, so reporting
-    /// samples as if they were calls would understate the spend.
+    /// Perception calls actually made — one per region crop per sample (or one
+    /// per frame when no regions were captured), plus the single reasoning
+    /// call. NOT equal to `samples`: cropping turns one sample into one call
+    /// per region, which is what the budget is derived from.
     pub perception_calls: usize,
+    /// Wall time of the FIRST call of the burst.
+    ///
+    /// Recorded separately because the cold load is deterministically the first
+    /// call — the rest of a segment's text calls fire back-to-back, inside the
+    /// model's window. A mean cannot see it: at the default 12 regions a
+    /// 5-sample segment is 61 calls, so one 3.74 s load moves a 180 ms mean to
+    /// 241 ms, which is inside the measured warm SPREAD (R5: 0.5–3.2 s). The
+    /// question FR-008 asks — "did this segment pay a reload?" — is answerable
+    /// from the first call against the others, and needs no threshold at all.
+    pub first_call: std::time::Duration,
+    /// Samples read as a whole frame because no regions were captured beside
+    /// them (T027 degraded). Counted because the degradation is otherwise
+    /// invisible: every test passes and nothing errors.
+    pub samples_read_whole: usize,
     /// Wall time for the segment's perception.
     pub total: std::time::Duration,
 }
 
 impl SegmentLatency {
-    /// Mean wall time per perception call.
+    /// Mean wall time of the calls AFTER the first.
+    pub fn mean_warm_call(&self) -> std::time::Duration {
+        let rest = self.perception_calls.saturating_sub(1);
+        if rest == 0 {
+            return std::time::Duration::ZERO;
+        }
+        self.total.saturating_sub(self.first_call).checked_div(rest as u32).unwrap_or_default()
+    }
+
+    /// Whether this segment paid for a cold model load.
     ///
-    /// The useful comparison for residency: a segment whose first call paid a
-    /// cold load shows a higher mean than one that ran entirely warm, without
-    /// needing a hardcoded absolute threshold that is only valid for one model
-    /// on one machine.
-    pub fn mean_call(&self) -> std::time::Duration {
-        self.total.checked_div(self.perception_calls.max(1) as u32).unwrap_or_default()
+    /// Relative, not absolute: a hardcoded millisecond threshold is only ever
+    /// valid for one model on one machine, and both endpoints move with the
+    /// model, the host and the disk. A first call several times the warm mean
+    /// is a reload on any of them.
+    pub fn paid_a_cold_load(&self) -> bool {
+        let warm = self.mean_warm_call();
+        warm > std::time::Duration::ZERO && self.first_call > warm * 3
     }
 }
 
@@ -598,7 +623,28 @@ pub async fn summarize_segment_via_ladder(
         ));
     }
 
+    // ADMISSION CHECK. The burst is samples x regions + 1, spent back-to-back
+    // at segment close. If that exceeds the whole bucket, the segment is
+    // refused MID-BURST — and since a failed summary is requeued rather than
+    // dropped (retry-never-drop, FR-025), it retries forever, burning the
+    // entire budget on every attempt, starving every other segment and never
+    // completing. A livelock that spends everything and reports nothing is
+    // far worse than an error, so refuse it up front and say what to change.
+    let burst = samples.len().saturating_mul(max_regions.max(1)).saturating_add(1);
+    if burst as u32 > router.budget() {
+        return Err(DayflowError::Invalid(format!(
+            "segment needs {burst} perception calls ({} samples x {max_regions} regions + 1) \
+             but the budget is {} — it could never complete, and retrying would starve \
+             every other segment. Shorten the segment, widen the interval, or lower \
+             max_regions_per_segment.",
+            samples.len(),
+            router.budget()
+        )));
+    }
+
     let started = std::time::Instant::now();
+    let mut first_call = None;
+    let mut read_whole = 0usize;
     let mut extracted = Vec::with_capacity(samples.len());
 
     for path in samples {
@@ -625,14 +671,26 @@ pub async fn summarize_segment_via_ladder(
                     }
                 }
             }
-            _ => vec![path.clone()],
+            _ => {
+                // Measurable, not silent. Without regions the whole benefit of
+                // T027 is absent and every test still passes, so the only way
+                // anyone learns is a counter that says so.
+                tracing::info!(
+                    sample = %path.display(),
+                    "no regions beside this sample; reading the whole frame (T027 degraded)"
+                );
+                read_whole += 1;
+                vec![path.clone()]
+            }
         };
 
         for target in &targets {
+            let call_started = std::time::Instant::now();
             let (result, tier) = router
                 .perceive(PerceptionKind::Text, target, "Transcribe all visible text.", "")
                 .await?;
             debug_assert_eq!(tier, Tier::Text);
+            first_call.get_or_insert_with(|| call_started.elapsed());
             extracted.push(result.analysis_text);
         }
     }
@@ -657,6 +715,8 @@ pub async fn summarize_segment_via_ladder(
         SegmentLatency {
             samples: samples.len(),
             perception_calls: extracted.len() + 1,
+            first_call: first_call.unwrap_or_default(),
+            samples_read_whole: read_whole,
             total: started.elapsed(),
         },
     ))
@@ -754,6 +814,22 @@ mod tests {
 
     fn prompts() -> Arc<Mutex<Vec<String>>> {
         Arc::new(Mutex::new(Vec::new()))
+    }
+
+    fn router_with_budget(
+        budget: u32,
+    ) -> (PerceptionRouter, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (t, r) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let router = PerceptionRouter::new(
+            Arc::new(CountingProvider { name: "text-tier", calls: t.clone(), prompts: prompts() }),
+            Arc::new(CountingProvider {
+                name: "reason-tier",
+                calls: r.clone(),
+                prompts: prompts(),
+            }),
+            budget,
+        );
+        (router, t, r)
     }
 
     fn router() -> (PerceptionRouter, Arc<AtomicUsize>, Arc<AtomicUsize>) {
@@ -1176,6 +1252,63 @@ mod tests {
         assert_eq!(ResidencyPolicy::default(), ResidencyPolicy::OnDemand);
     }
 
+    #[tokio::test]
+    async fn a_segment_too_big_for_its_budget_is_refused_before_it_livelocks() {
+        // A burst larger than the whole bucket is refused MID-burst, and since
+        // a failed summary is REQUEUED rather than dropped, it retries forever
+        // — burning the entire budget on every attempt, starving every other
+        // segment, and never completing. A livelock that spends everything and
+        // reports nothing is far worse than an error.
+        let (router, text_calls, reason_calls) = router_with_budget(10);
+        let samples: Vec<std::path::PathBuf> =
+            (0..5).map(|i| std::path::PathBuf::from(format!("/tmp/s{i}.png"))).collect();
+
+        // 5 samples x 12 regions + 1 = 61 calls against a budget of 10
+        let err = summarize_segment_via_ladder(&router, &samples, "categorise", 0, 12).await;
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("could never complete"), "must say WHY: {msg}");
+        assert!(msg.contains("max_regions_per_segment"), "and what to change: {msg}");
+        assert_eq!(text_calls.load(Ordering::SeqCst), 0, "nothing is spent on a doomed segment");
+        assert_eq!(reason_calls.load(Ordering::SeqCst), 0);
+
+        // and a segment that DOES fit is not refused
+        assert!(summarize_segment_via_ladder(&router, &samples[..1], "c", 0, 2).await.is_ok());
+    }
+
+    #[test]
+    fn a_cold_load_is_detected_relative_to_the_warm_calls_not_by_a_threshold() {
+        // At the default 12 regions a 5-sample segment is 61 calls, so one
+        // 3.74 s cold load moves a 180 ms mean to 241 ms — inside the measured
+        // warm spread. A mean cannot see it; the FIRST call against the rest
+        // can, on any model and any machine, with no constant.
+        let cold = SegmentLatency {
+            samples: 5,
+            perception_calls: 61,
+            first_call: std::time::Duration::from_millis(3_740),
+            samples_read_whole: 0,
+            total: std::time::Duration::from_millis(3_740 + 60 * 180),
+        };
+        let warm = SegmentLatency {
+            first_call: std::time::Duration::from_millis(190),
+            total: std::time::Duration::from_millis(190 + 60 * 180),
+            ..cold.clone()
+        };
+        assert!(cold.paid_a_cold_load(), "3.74s against a 180ms warm mean is a reload");
+        assert!(!warm.paid_a_cold_load(), "and a normal first call is not");
+
+        // The mean these replaced cannot separate them.
+        let mean = |l: &SegmentLatency| l.total / l.perception_calls as u32;
+        let (mc, mw) = (mean(&cold), mean(&warm));
+        assert!(
+            mc.as_millis() as f64 / mw.as_millis() as f64 > 1.0,
+            "sanity: {mc:?} vs {mw:?}"
+        );
+        assert!(
+            (mc.as_millis() as f64) < 1.5 * mw.as_millis() as f64,
+            "a mean over 61 calls barely moves ({mc:?} vs {mw:?}) — which is why it was replaced"
+        );
+    }
+
     #[test]
     fn segment_latency_counts_calls_not_samples() {
         // Cropping turns one sample into one call per region, which is exactly
@@ -1184,10 +1317,12 @@ mod tests {
         let l = SegmentLatency {
             samples: 5,
             perception_calls: 21, // 5 samples x 4 regions + 1 reasoning call
+            first_call: std::time::Duration::from_millis(200),
+            samples_read_whole: 0,
             total: std::time::Duration::from_millis(4_200),
         };
         assert_ne!(l.perception_calls, l.samples);
-        assert_eq!(l.mean_call(), std::time::Duration::from_millis(200));
+        assert_eq!(l.mean_warm_call(), std::time::Duration::from_millis(200));
 
         // A segment that paid a cold load shows a higher mean than one that ran
         // warm — no hardcoded absolute threshold, which would only ever be
@@ -1195,9 +1330,11 @@ mod tests {
         let warm = SegmentLatency {
             samples: 5,
             perception_calls: 21,
+            first_call: std::time::Duration::from_millis(50),
+            samples_read_whole: 0,
             total: std::time::Duration::from_millis(1_000),
         };
-        assert!(l.mean_call() > warm.mean_call());
+        assert!(l.mean_warm_call() > warm.mean_warm_call());
     }
 
     // ─── T052/T053: content aggregation ───────────────────────────────────
