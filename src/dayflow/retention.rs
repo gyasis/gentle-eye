@@ -157,8 +157,6 @@ impl SegmentRecord {
 pub enum Refusal {
     /// It was never summarised — its raw samples are the only record.
     NotSummarized,
-    /// It is not old enough for this tier yet.
-    TooRecent,
     /// There is nothing in that tier to reclaim.
     NothingToReclaim,
     /// Reclaiming it was not necessary — the budget was already satisfied.
@@ -222,7 +220,7 @@ pub fn plan(
     // Oldest first, deterministically: sequence breaks ties so two windows that
     // closed in the same instant are still ordered the same way on every run.
     let mut order: Vec<&SegmentRecord> = segments.iter().collect();
-    order.sort_by_key(|s| (s.closed_at, s.sequence));
+    order.sort_by_key(|s| (s.closed_at, s.key()));
 
     // Pass 1 — age. What has simply timed out of its tier.
     let mut planned: std::collections::HashMap<WindowKey, Action> =
@@ -279,13 +277,16 @@ pub fn plan(
                 Refusal::NotSummarized
             } else if s.tier() == Tier::Cold {
                 Refusal::NothingToReclaim
-            } else if total.saturating_sub(freed) <= cfg.budget_bytes {
-                // Not "too recent" — it simply was not needed. Reporting the
-                // wrong reason is the same class of lie the return-everything
-                // design exists to prevent.
-                Refusal::WithinBudget
             } else {
-                Refusal::TooRecent
+                // Always `WithinBudget` here, and that is not a shortcut: pass 2
+                // exhausts EVERY summarised Hot/Warm segment before it can end
+                // over budget, so an unplanned summarised segment can only exist
+                // because the budget was met. Age is never the binding
+                // constraint — pass 2 ignores it — so a "too recent" label would
+                // name something that was not protecting the window. The enum no
+                // longer carries that variant rather than leaving a reason the
+                // planner cannot produce.
+                Refusal::WithinBudget
             })
         });
         decisions.push(Decision { display_id: s.display_id, sequence: s.sequence, action });
@@ -386,26 +387,56 @@ where
         )));
     }
 
-    // Only now, with a verified replacement on disk, do the originals go.
-    for p in &segment.raw {
-        reclaim_file(p, validator)?;
-    }
+    // RECORD FIRST, then the disk.
+    //
+    // The obvious order — delete, then update — has no safe failure point: an
+    // error partway through leaves files gone while the record still lists
+    // them, so `tier()` reports Hot for a window whose samples do not exist and
+    // the next plan schedules a shrink whose encode is handed deleted paths.
+    // With a real encoder that wedges the window permanently.
+    //
+    // Pointing the record at the new timelapse first means every failure lands
+    // in the mixed raw-and-warm state `tier()` was taught to read as Hot: the
+    // raw frames are still there, still the better record, and a retry
+    // completes the job.
+    let stale = segment.warm_artifact.replace(timelapse.clone());
+    segment.warm_bytes = bytes;
 
-    // A leftover timelapse from a crashed earlier attempt would otherwise be
-    // orphaned: nothing would point at it, so retention could never delete it.
-    if let Some(stale) = segment.warm_artifact.take() {
+    // Best-effort: a leftover timelapse from a crashed earlier attempt would be
+    // orphaned otherwise — nothing points at it, so retention could never
+    // reclaim it. A failure to delete it must not abort the shrink, or one
+    // transient error strands the window forever.
+    if let Some(stale) = stale {
         if stale != timelapse {
-            reclaim_file(&stale, validator)?;
+            if let Err(e) = reclaim_file(&stale, validator) {
+                tracing::warn!(error = %e, path = %stale.display(),
+                    "could not reclaim a superseded timelapse; it will leak");
+            }
         }
     }
 
-    // The record is updated HERE rather than by the caller. A caller that
-    // forgot would leave a record whose tier lies about the disk, and the next
-    // plan would schedule a shrink whose encode reads files already deleted.
-    segment.raw.clear();
-    segment.raw_bytes = 0;
-    segment.warm_artifact = Some(timelapse.clone());
-    segment.warm_bytes = bytes;
+    // Now the originals, dropping each from the record as it goes so a partial
+    // failure leaves a record that MATCHES the disk rather than one that lies
+    // about it in either direction.
+    let mut failure: Option<DayflowError> = None;
+    segment.raw.retain(|p| match reclaim_file(p, validator) {
+        Ok(()) => false,
+        Err(e) => {
+            failure.get_or_insert(e);
+            true
+        }
+    });
+    // Measured, not assumed: whatever survived is what the budget must count.
+    segment.raw_bytes = segment
+        .raw
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
+
+    if let Some(e) = failure {
+        return Err(e);
+    }
 
     Ok(WarmArtifact { timelapse, text: extracted_text.to_string(), bytes })
 }
@@ -684,6 +715,114 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn a_failure_reclaiming_the_stale_timelapse_does_not_strand_the_window() {
+        // The bug the &mut refactor introduced: `take()` ran BEFORE the fallible
+        // reclaim, so a transient delete error erased the record's only pointer
+        // to the stale file — orphaning it — while the raw samples were already
+        // gone. The record then claimed Hot for a window whose samples did not
+        // exist, and every retry handed the encoder deleted paths.
+        let dir = tempfile::tempdir().unwrap();
+        let v = crate::security::path_validator::PathValidator::new(dir.path());
+
+        // A stale artifact OUTSIDE the validator root: reclaiming it will fail,
+        // which is exactly the transient error being simulated.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let stale = elsewhere.path().join("stale.mp4");
+        std::fs::write(&stale, b"stale").unwrap();
+
+        let mut s = SegmentRecord {
+            warm_artifact: Some(stale.clone()),
+            warm_bytes: 1,
+            ..tmp_segment(dir.path(), 1, true, 3)
+        };
+        let fresh = dir.path().join("fresh.mp4");
+        std::fs::write(&fresh, b"x").unwrap();
+
+        let art = shrink(&mut s, "t", &v, |_| Ok((fresh.clone(), 1_000)))
+            .expect("an unreclaimable stale artifact must not fail the shrink");
+
+        assert_eq!(art.timelapse, fresh);
+        assert_eq!(
+            s.warm_artifact.as_deref(),
+            Some(fresh.as_path()),
+            "the record points at the NEW timelapse, never at nothing"
+        );
+        assert_eq!(s.tier(), Tier::Warm, "and the shrink completed");
+        assert!(s.raw.is_empty());
+    }
+
+    #[test]
+    fn a_partial_delete_leaves_a_record_that_matches_the_disk() {
+        // If some raw samples cannot be removed, the record must list exactly
+        // the ones that survived — not all of them (the next encode reads
+        // deleted paths) and not none of them (the bytes vanish from the budget
+        // while still occupying disk).
+        let dir = tempfile::tempdir().unwrap();
+        let v = crate::security::path_validator::PathValidator::new(dir.path());
+        let mut s = tmp_segment(dir.path(), 1, true, 3);
+
+        // One sample is outside the root, so its reclaim is refused.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let stubborn = elsewhere.path().join("stubborn.png");
+        std::fs::write(&stubborn, vec![0u8; 1_000_000]).unwrap();
+        s.raw.push(stubborn.clone());
+        s.raw_bytes += 1_000_000;
+
+        let fresh = dir.path().join("f.mp4");
+        std::fs::write(&fresh, b"x").unwrap();
+        let err = shrink(&mut s, "t", &v, |_| Ok((fresh.clone(), 1_000)));
+        assert!(err.is_err(), "the failure is reported, not swallowed");
+
+        assert_eq!(s.raw, vec![stubborn.clone()], "only the survivor is listed");
+        assert_eq!(s.raw_bytes, 1_000_000, "and its bytes are measured, not assumed");
+        assert!(stubborn.exists());
+        assert_eq!(s.tier(), Tier::Hot, "recoverable: a retry finishes the job");
+        assert_eq!(
+            s.warm_artifact.as_deref(),
+            Some(fresh.as_path()),
+            "the new timelapse is already recorded, so it cannot be orphaned"
+        );
+    }
+
+    #[test]
+    fn the_warm_tier_is_also_evicted_oldest_first() {
+        // Every warm test had at most ONE warm segment, so sweeping the tier
+        // newest-first survived the suite — and that mutant destroys the most
+        // recent timelapse, the one a person is most likely to read back.
+        let segments = vec![warm(1, 0, true), warm(2, 500, true)];
+        // 20MB total, budget forces exactly one drop.
+        let d = plan(&segments, at(600), &cfg(15 * 1024 * 1024));
+        assert_eq!(*action_for(&d, 1), Action::DropWarm, "the OLDER timelapse goes");
+        assert_eq!(*action_for(&d, 2), Action::Keep(Refusal::WithinBudget), "the newer stays");
+    }
+
+    #[test]
+    fn the_net_credit_is_load_bearing_inside_the_ten_percent_margin() {
+        // The unit test above pins the FORMULA; this pins that `plan` uses it.
+        // Reverting both call sites to the gross figure survived the suite,
+        // because no fixture put the budget inside the gross/net gap — the
+        // extremes problem again, in a 10%-wide band.
+        //
+        // Two 100MB windows, budget 105MB. Net: each shrink frees 90MB, so one
+        // is not enough (110 > 105) and BOTH must go. Gross: the first appears
+        // to free 100MB, the plan stops, and real disk lands at 110MB — over.
+        //
+        // Evaluated BEFORE either is age-expired (hot is 3600s), so the budget
+        // path is what decides. An earlier version used t=10_000, where pass 1
+        // shrinks both unconditionally and the arithmetic under test never
+        // runs — the mutation survived it.
+        let segments = vec![seg(1, 0, true), seg(2, 100, true)];
+        let d = plan(&segments, at(1_000), &cfg(105 * 1024 * 1024));
+        assert_eq!(*action_for(&d, 1), Action::Shrink);
+        assert_eq!(
+            *action_for(&d, 2),
+            Action::Shrink,
+            "a gross credit would stop after one and leave the disk over budget"
+        );
+    }
+
     #[test]
     fn a_stale_timelapse_is_removed_rather_than_orphaned() {
         // Overwriting `warm_artifact` without deleting the old file leaves it
@@ -844,11 +983,9 @@ mod tests {
             let i = segments.iter().position(|s| s.sequence == d.sequence).unwrap();
             let lapse = dir.path().join(format!("w{}.mp4", d.sequence));
             std::fs::write(&lapse, b"x").unwrap();
-            let art = shrink(&mut segments[i], "kept text", &v, |_| Ok((lapse.clone(), 100_000))).unwrap();
-            segments[i].raw.clear();
-            segments[i].raw_bytes = 0;
-            segments[i].warm_bytes = art.bytes;
-            segments[i].warm_artifact = Some(art.timelapse);
+            // No manual record fix-up: `shrink` maintains it. Doing it here as
+            // well would mask a regression in exactly that behaviour.
+            shrink(&mut segments[i], "kept text", &v, |_| Ok((lapse.clone(), 100_000))).unwrap();
         }
 
         let after: u64 = segments.iter().map(SegmentRecord::bytes).sum();
@@ -867,8 +1004,38 @@ mod tests {
         let keys: std::collections::HashSet<_> =
             after_plan.iter().map(|d| (d.display_id, d.sequence)).collect();
         assert_eq!(keys.len(), 6, "six distinct windows, none collapsed");
-        // Every remaining action is a warm drop or a refusal — the raw is gone.
-        assert!(after_plan.iter().all(|d| d.action != Action::Shrink));
+        assert!(after_plan.iter().all(|d| d.action != Action::Shrink), "the raw is gone");
+
+        // Now the EVICT leg, executed against real files rather than planned.
+        // T040 is "summarise -> shrink -> evict" and the evict half was
+        // planner-only, so a DropWarm that failed to delete anything would have
+        // passed.
+        let warm_before = segments.iter().filter(|s| s.tier() == Tier::Warm).count();
+        assert!(warm_before > 0, "there is something to evict");
+        let mut dropped = 0;
+        for d in &after_plan {
+            if d.action != Action::DropWarm {
+                continue;
+            }
+            let i = segments
+                .iter()
+                .position(|s| s.key() == (d.display_id, d.sequence))
+                .unwrap();
+            let art = segments[i].warm_artifact.take().unwrap();
+            reclaim_file(&art, &v).unwrap();
+            assert!(!art.exists(), "the timelapse is actually gone from disk");
+            segments[i].warm_bytes = 0;
+            dropped += 1;
+        }
+        assert!(dropped > 0, "the evict leg ran");
+
+        let finally: u64 = segments.iter().map(SegmentRecord::bytes).sum();
+        assert!(finally < after, "evicting freed more: {after} -> {finally}");
+
+        // Through all of it, every unsummarised window kept every sample.
+        for s in segments.iter().filter(|s| !s.summarized) {
+            assert!(s.raw.iter().all(|p| p.exists()), "window {} lost data", s.sequence);
+        }
     }
 
     #[test]

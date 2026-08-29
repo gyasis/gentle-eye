@@ -2085,3 +2085,48 @@ oversized file the encode already wrote.
 `RetentionConfig.hot` said raw samples are "kept this long before they may be shrunk". Budget
 pressure shrinks a summarised window of any age. The only real floor is `summarized`, and the doc
 now says so.
+
+
+## R35 — Wave 9 re-review: the fix introduced the bug it was written to prevent (2026-08-26)
+
+**PASS WITH NOTES**, and the note was a defect my own previous fix had created.
+
+### `take()` before a fallible call
+
+R34 made `shrink` take `&mut` and reclaim the stale timelapse from a crashed earlier attempt —
+precisely so nothing would be orphaned. The implementation did `warm_artifact.take()` and then
+`reclaim_file(&stale)?`. On a delete failure that returns early with the record's ONLY pointer to
+the stale file already erased: **the exact orphan the change was written to prevent**, plus the raw
+samples already gone while the record still listed them, so `tier()` claimed Hot for a window whose
+files did not exist and every retry handed the encoder deleted paths.
+
+The order was the whole bug. Now: point the record at the new timelapse **first**, reclaim the
+stale one best-effort (a failure logs and continues — one transient error must not strand a window
+forever), then delete the raw samples, `retain`-ing the ones that could not be removed so the record
+matches the disk in both directions, with the surviving bytes **measured** rather than assumed.
+
+**Generalisable: `Option::take()` before a `?` is a lost pointer waiting to happen.** More broadly,
+when a function mutates a record and touches the disk, order the mutation so that every early return
+leaves a state the system can still act on. Here that state is "raw and warm both present", which
+`tier()` already reads as Hot — recoverable, and a retry finishes the job.
+
+### Two fixes that were correct and undefended
+
+The warm tier's oldest-first sweep and the net-of-timelapse credit were both right, and both
+survived mutation: every warm fixture had a single warm segment, and no fixture put the budget
+inside the 10% gross/net band. Correct code with no test defending it is one refactor from being
+wrong code.
+
+And my first attempt at the net-credit test **still** did not discriminate: I evaluated at a time
+where both windows were already age-expired, so pass 1 took them unconditionally and the budget
+arithmetic under test never ran. **A test for pass-2 logic has to be built at a time pass 1 does not
+handle** — otherwise it exercises the wrong pass and passes for the wrong reason. Tenth instance of
+the fixture not producing the condition the assertion names.
+
+### A refusal reason the planner cannot produce
+
+`Refusal::TooRecent` turned out to be unreachable: pass 2 exhausts every summarised Hot/Warm segment
+before it can end over budget, so an unplanned summarised segment exists only because the budget was
+met. Age is never the binding constraint — pass 2 ignores it — so labelling a window "too recent"
+would name something that was not protecting it. The variant is deleted rather than left advertising
+a state that cannot occur.
