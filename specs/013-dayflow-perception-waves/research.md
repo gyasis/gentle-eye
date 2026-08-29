@@ -1971,3 +1971,52 @@ every region has at most one parent, so it lands in exactly one group and is rea
 a mutation replacing that branch with `panic!` passes the whole suite. The cycle handling is
 elsewhere, in the fallback that sweeps unplaced indices. The guard is kept as defence, with a
 comment that says what is actually true.
+
+
+## R33 — Wave 9 (US5): reclaiming storage may never destroy the only record (2026-08-26)
+
+Retention is the only part of dayflow that deletes, so its whole design is one rule: **eviction is
+gated on `summarized`, never on age or on being over budget.** An unsummarised window's raw samples
+are the only evidence that period existed; dropping them turns a backend outage into permanent loss
+that nothing downstream can tell apart from a genuinely idle hour.
+
+The dangerous shape is the disk emergency — exactly when a "just free something" path gets added.
+So the test for it asserts that with every window unsummarised and a one-byte budget, the correct
+outcome is to free **nothing** and stay over budget. The fix for that state is to stop capturing,
+which is a decision for a layer that can tell the user.
+
+### Two orderings that look equivalent and are not
+
+**Tier before age.** Sweeping both tiers in one oldest-first pass reads naturally and is wrong: the
+oldest window is usually already warm, so a single pass drops the timelapse a person actually reads
+back while a hundred megabytes of superseded raw frames sit untouched. All reclaimable raw first,
+then warm. Caught by my own test during construction.
+
+**Encode before delete.** `shrink` verifies the replacement — including the SC-008 size ceiling —
+*before* removing a single raw sample. Delete-then-encode is the ordering that spends the only copy
+to save nothing when ffmpeg fails, and a failed encode must cost exactly zero.
+
+### A test that passed because the KERNEL refused
+
+`deleting_outside_the_capture_directory_is_refused` pointed at `/etc/passwd`, which fails with
+permission-denied whether or not the validator runs. Removing path validation entirely **survived**
+the test: it was proving the OS's refusal, not ours. Now the file outside is one this process owns
+and could trivially delete, so only validation can stop it.
+
+**Ninth instance of "the fixture does not produce the condition the assertion names",** and a
+distinct sub-species worth naming: *the right outcome arriving through the wrong mechanism*. It is
+especially easy in security tests, where the environment often refuses on your behalf — a test that
+the sandbox would pass with the check deleted is testing the sandbox.
+
+### The tier is read from disk, not inferred
+
+A window whose raw samples are gone is warm however recent it is; one never shrunk is hot however
+old. Deriving the tier from age would report a state the filesystem does not have — and retention
+acts on that state by deleting.
+
+### And the planner reports on everything it did NOT do
+
+`plan` returns a decision for every segment, including the untouched ones and the reason. A planner
+returning only its actions makes "nothing was reclaimed" and "everything was refused"
+indistinguishable — which are precisely the two answers an operator needs to tell apart when the
+disk fills up anyway.

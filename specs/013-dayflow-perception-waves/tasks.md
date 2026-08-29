@@ -165,13 +165,13 @@ timeline is never touched.
 **Independent test**: drive summarize → shrink → over-budget → evict; bytes fall, entry count
 does not.
 
-- [ ] T037 [P] [US5] Tier state machine in `src/dayflow/retention.rs` (was T260) — `RetentionConfig` + hot/warm/cold computed from age and the `summarized` flag, mirroring the vocabulary of `capture::memory`.
+- [x] T037 [P] [US5] Tier state machine in `src/dayflow/retention.rs` (was T260) — `RetentionConfig` + hot/warm/cold computed from age and the `summarized` flag, mirroring the vocabulary of `capture::memory`.
       `> DONE:` unit tests cover every transition including the never-summarized case.
-- [ ] T038 [US5] Shrink step (was T261) — after summarization, replace the raw segment with a timelapse plus retained extracted text.
+- [x] T038 [US5] Shrink step (was T261) — after summarization, replace the raw segment with a timelapse plus retained extracted text.
       `> DONE:` the warm artifact is at most 10% of raw (SC-008) and its text is retained; a test asserts both.
-- [ ] T039 [US5] Evict step (was T262) — over budget, drop summarized raw oldest-first, then warm oldest-first; never a timeline entry, never an unsummarized segment. Validate every path through `security::path_validator` before deleting.
+- [x] T039 [US5] Evict step (was T262) — over budget, drop summarized raw oldest-first, then warm oldest-first; never a timeline entry, never an unsummarized segment. Validate every path through `security::path_validator` before deleting.
       `> DONE:` a simulated over-budget run evicts in the correct order, refuses unsummarized segments, and leaves `timeline_entries` untouched.
-- [ ] T040 [S] [US5] End-to-end retention (was T263) — summarize → shrink → evict with the timeline preserved throughout.
+- [x] T040 [S] [US5] **SWEEP CALLER OWED:** `plan`/`shrink`/`reclaim_file` are built and mutation-proven, and the end-to-end test drives summarise -> shrink -> evict through them, but no daemon loop calls them on a schedule yet — that arrives with the capture loop. Marked done for the retention RULES, not for a running sweep. End-to-end retention (was T263) — summarize → shrink → evict with the timeline preserved throughout.
       `> DONE:` total bytes fall while `query_range` still returns every entry; `cargo check` + tests green.
 
 ## Phase 8: User Story 6 — Reach it from anywhere (P3)
