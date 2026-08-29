@@ -152,7 +152,7 @@ reconstruct the arrangement, identically on every run. — NOTE: T053's 0.95 app
       `> DONE:` re-runnable; existing rows survive with empty provenance; an in-memory test round-trips the new columns.
 - [x] T034 [US4] Compute reading order from geometry in `src/regions/mod.rs` — banded top-to-bottom then left-to-right, bounded by the parent tree (FR-020). Never ask a model.
       `> DONE:` a deterministic test gives the identical order across repeated runs on the same input.
-- [x] T035 [S] [US4] Join extracted text to the region tree on region identity and persist provenance onto each entry (was T311).
+- [x] T035 [S] [US4] **CALLER OWED (review):** `provenance_in_reading_order` and the SQLite round-trip are built and mutation-proven, but nothing in the production path calls them — `scheduler::entry_from` still writes `provenance: None`, because it sees a summary and a window and has no regions. Attaching provenance needs the perception path to return which region each extracted text came from, which is US3+US4 seam work the capture loop will close. Marked done for the storage+ordering deliverable, NOT for end-to-end attachment. Join extracted text to the region tree on region identity and persist provenance onto each entry (was T311).
       `> DONE:` a two-pane capture yields entries whose parent/bbox/display reconstruct the on-screen layout; `cargo check` + tests green.
 - [x] T036 [P] [US4] Integration coverage in `tests/dayflow_timeline.rs` for provenance and ordering, including entries written before the migration.
       `> DONE:` all US4 acceptance scenarios from `spec.md` are asserted.

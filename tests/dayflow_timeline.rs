@@ -139,16 +139,54 @@ fn entries_written_before_the_migration_survive_with_empty_provenance() {
 }
 
 #[test]
-fn the_migration_is_re_runnable() {
-    // Idempotent: `init_in_memory` runs the column-adds every time, and a
-    // second run must not error on "duplicate column name".
-    for _ in 0..3 {
-        let s = store();
-        let mut e = entry_at(0, "x");
+fn provenance_survives_repeated_writes_to_one_database() {
+    // RENAMED. This was called `the_migration_is_re_runnable` and did not test
+    // that: each loop iteration built a FRESH database, so no ALTER ever hit
+    // "duplicate column name" and the idempotency it promised was never
+    // exercised. Real migration coverage lives in src/storage/database.rs
+    // (`migrations_are_idempotent`, `upgrades_old_schema_missing_columns`),
+    // which re-run against a populated connection. A test whose name promises
+    // one thing while constructing another is a trap for the next reader.
+    let s = store();
+    let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    for n in 0..3 {
+        let mut e = entry_at(n * 10, "x");
         e.provenance = Some(provenance_in_reading_order(&[pane(1, 2, 3, 4, 0)])[0]);
         s.insert_entry(&e).unwrap();
-        assert_eq!(s.count().unwrap(), 1);
     }
+    assert_eq!(s.count().unwrap(), 3);
+    let read = s.query_range(base, base + chrono::Duration::hours(1)).unwrap();
+    assert!(read.iter().all(|e| e.provenance.is_some()));
+}
+
+#[test]
+fn a_region_id_with_the_sign_bit_set_round_trips_intact() {
+    // u64 ids are stored as i64 by REINTERPRETATION — SQLite has no unsigned
+    // integer. Every id >= 2^63 therefore reads back from a NEGATIVE i64, and
+    // no fixture asserted region_id on such an id: a mutation replacing the
+    // cast with `unsigned_abs()` — wrong for exactly half of all ids —
+    // survived the whole suite. The cast is correct; the proof was missing.
+    // Chosen because its identity actually has the high bit set — the whole
+    // point of the fixture. An arbitrary box has a 50% chance of proving
+    // nothing, which is how the gap arose in the first place.
+    let big = pane(1, 10, 100, 100, 0);
+    let p = provenance_in_reading_order(&[big])[0];
+    assert!(
+        p.region_id >= 1 << 63,
+        "fixture must actually produce a sign-bit id, or it proves nothing: {:x}",
+        p.region_id
+    );
+
+    let s = store();
+    let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let mut e = entry_at(0, "big id");
+    e.provenance = Some(p);
+    s.insert_entry(&e).unwrap();
+
+    let read = s.query_range(base, base + chrono::Duration::hours(1)).unwrap();
+    let back = read[0].provenance.expect("provenance survives");
+    assert_eq!(back.region_id, p.region_id, "the id must survive the i64 round-trip");
+    assert_eq!(back, p, "and so must every other field");
 }
 
 #[test]

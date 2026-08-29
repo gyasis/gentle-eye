@@ -1845,3 +1845,70 @@ A missing comma in a multi-line SQL string turned `summary, region_id` into `sum
 — eight columns returned where sixteen were read, caught immediately by an existing round-trip test.
 Worth noting only because concatenated SQL strings make this failure invisible on inspection: the
 line reads correctly, and the bug lives in the whitespace between two lines.
+
+
+## R31 — Wave 8 review: the band ended at its tallest member (2026-08-26)
+
+Verdict **FAIL**, on the one thing I had flagged as untested and shipped anyway.
+
+### A tall region absorbed every row beneath it
+
+`band_bottom` grew by `max`, so a band extended to its TALLEST member. Any full-height region — a
+sidebar, a file tree, or the window that contains everything — therefore swallowed every
+subsequent row into one band, which then sorted column-major: **down the left column, then down
+the right.** Measured on a window plus a 2×2 pane grid, and on a sidebar beside two stacked rows.
+
+Two things make this worse than an edge case. It fires on the **ordinary** shape of a capture:
+`assign_parents` produces exactly a container plus its panes, and `provenance_in_reading_order`
+feeds that whole set in. And it is a **spec deviation I did not notice writing the code** — T034
+says "banded top-to-bottom then left-to-right, **bounded by the parent tree**", and my
+implementation never read `parent` at all.
+
+The fix is two changes, and the first is one word: a band ends where its **shortest** member ends,
+not its tallest. Plus real parent-awareness — siblings ordered among themselves, each region
+followed immediately by its own children — without which two windows side by side interleave their
+panes into an order describing no screen anyone saw.
+
+**I predicted this failure in the review request and shipped the code anyway.** Writing "I did not
+test nesting at all" and marking the task done are not compatible; the honest move was to write the
+fixture before the checkbox.
+
+### Every fixture avoided the shape that breaks it
+
+All shipped layouts were full-height columns or clean disjoint rows: no nesting, no mixed heights
+in a band, no exact abutment. **Same fixture-family blindness as R26/R29, third occurrence.** The
+axes for a layout are now written down — one display or several · side-by-side, stacked, or nested
+· overlapping or disjoint · equal or wildly different heights · touching exactly or separated — and
+each new fixture should say which cell it occupies.
+
+### `DefaultHasher` is not an identity you can write to disk
+
+Std explicitly does not guarantee its algorithm across releases. That is fine for a `HashMap` and
+fatal for an id **persisted to SQLite**: a toolchain upgrade would silently rebind every stored
+`region_id`, so pre-upgrade rows stop matching post-upgrade captures — breaking exactly the
+cross-day query US4 exists for, with no error anywhere. Replaced with FNV-1a written out in full,
+and the value **pinned in a test**, because a stability guarantee nothing checks is a comment.
+
+Identity also hashed geometry alone, so a maximized pane and the window containing it — a routine
+layout — collided onto one id, making `parent_region_id` potentially equal to a different region's
+`region_id` by construction. `granularity` is now in the key.
+
+### A 50/50 fixture proves nothing half the time
+
+The mutation "read the id back with `unsigned_abs()`" — wrong for every id ≥ 2^63, i.e. half of
+them — **survived**. The one fixture whose identity had the sign bit set never asserted `region_id`,
+and the fixture that did assert it happened to have the bit clear. **Eighth instance of "the fixture
+does not produce the condition the assertion names",** and the sharpest, because the condition here
+is a coin flip: an arbitrary box has a 50% chance of proving nothing. The new fixture is chosen for
+its id, and asserts the sign bit is set before testing the round-trip.
+
+### Two smaller things
+
+A doc comment ended up separated from its function: my insertion landed between `locate`'s `///`
+block and `pub fn locate`, so rustdoc showed `reading_order` opening with "Resolve a
+natural-language target…" and `locate` had no docs at all. **Inserting before a `pub fn` is not the
+same as inserting before its documentation**, and the compiler is happy either way.
+
+And `the_migration_is_re_runnable` built a **fresh** database each iteration, so no `ALTER` ever hit
+"duplicate column name" — it never tested the property in its name. Renamed to what it does; the
+real coverage was already one layer down in `database.rs`.
