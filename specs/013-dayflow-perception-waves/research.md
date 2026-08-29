@@ -1332,3 +1332,70 @@ already marks, and the real hazard — a caller that BINDS the window and then e
 invisible to the attribute. It is now documented as unenforced rather than counted as a fix.
 Recording a non-fix as a fix is worse than leaving the item open, because it removes it from the
 list without removing the risk.
+
+
+## R23 — Wave 6 build: three thresholds that did not survive contact (2026-08-26)
+
+The perception ladder (T026/T028/T030/T031/T052/T053). Every defect found here was found by
+**mutation testing or by a test failing during construction**, not by review — worth noting,
+because it is the first wave where that happened before the reviewer saw it.
+
+### A per-minute budget cannot express a 3-minute cadence
+
+`dayflow_budget_per_minute` computed `ceil(60 / interval)`, which clamps to **1** for every
+interval longer than a minute — so the coarse 3-minute default (D10) asked for exactly the same
+budget as a 1-minute focused session, and the "derived from the sampling shape" claim was empty.
+Caught by the assertion `fine > coarse`. The budget is now measured over a **10-minute window**,
+which is long enough for the coarsest supported cadence to be more than one tick.
+
+**General form: a rate window must be longer than the slowest event it meters.**
+
+### Importing a threshold across a change of metric
+
+T052 specifies 0.85, from videolocr. That figure is for difflib's **character-level**
+`SequenceMatcher`; mine is **line-level**. Ported unchanged, 0.85 sat ABOVE the legitimate case
+— a pane scrolled two lines in a ten-line view shares 80% of its text and scored 0.80 — so every
+sample of a scrolling document started a new block, the exact failure T052 exists to prevent.
+Recalibrated to **0.65** against the two cases that must be separated (0.80 scroll must merge,
+0.50 half-different screen must not), with the calibration itself asserted so a future change to
+the metric fails there and says why.
+
+### The metric itself was wrong, and only five samples showed it
+
+Deeper than the threshold: I matched captures against blocks with a **symmetric** ratio
+(`2·common / (len(a)+len(b))`). The block GROWS with every merge while a capture stays one
+screenful, so the score **decays mechanically** even when each capture overlaps the block's tail
+perfectly — 0.80, 0.73, 0.67, **0.62 → splits**. A symmetric metric guarantees every long
+document eventually fragments and the threshold only decides when.
+
+**Two samples cannot show this. Five can.** The fixture that found it was the one that modelled
+the real usage rather than the minimum case — the same lesson as R22's partial outage, in a
+different shape: *a scenario long enough for drift to accumulate.*
+
+Fixed with asymmetric `coverage(block, incoming)` — "is this capture material I already have?" —
+which is stable however large the block grows. That property is now its own test.
+
+### Two constants that no behaviour depended on
+
+Mutation `M4` (never merge) **survived**: the `SAME_BLOCK` arm and the `COMPARABLE` (0.3) arm did
+the same thing, so everything merged through the weaker one. That is not just redundancy — it
+meant two screens sharing **30%** of their lines were folded into one document, 70% unrelated
+material. My "unrelated screen" test could not catch it because it shares ZERO lines and passes
+under any threshold; the discriminating fixture is one sharing about half.
+
+Mutation `M6` (drop the 0.95 skip) also survived, and correctly: line-level `diff_merge` adds
+only lines the block lacks, so a near-identical capture contributes nothing **by construction**.
+Deleted rather than wrapped in a test that would only have asserted the optimization was taken.
+`tasks.md` records T053's gate as **subsumed**, not implemented — a difference worth writing down
+rather than leaving a checkbox to imply the code contains a threshold it does not.
+
+**Both are the same lesson: a surviving mutant sometimes means the code is redundant, not that
+the test is weak.** The response is to delete the redundancy, not to manufacture a test for a
+distinction that carries no behaviour.
+
+### Test-premise errors, again (two more)
+
+`grown = scrolled(0, 40)` to prove coverage does not decay — but that block genuinely *contains*
+more of the capture, so a higher score was correct and the metric was fine. The block has to grow
+with material **unrelated to the capture** for the property to be about growth at all. Fifth
+occurrence of the same class: **the fixture did not produce the condition the assertion named.**

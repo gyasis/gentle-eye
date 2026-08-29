@@ -26,6 +26,7 @@ pub mod models;
 pub mod sampler;
 pub mod scheduler;
 pub mod window;
+pub mod perception;
 pub mod retention;
 pub mod summarizer;
 pub mod timeline;

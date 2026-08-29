@@ -122,23 +122,23 @@ leaves the box by default.
 **Independent test**: a text request is served without loading the vision tier; a semantic
 request escalates exactly once, with a logged reason.
 
-- [ ] T026 [P] [US3] New `src/dayflow/perception.rs` (was T300) — a `PerceptionRouter` over two configured `VisionProvider` instances (text tier, reason tier), dispatching on an explicit caller-supplied request kind, never by sniffing the prompt.
+- [x] T026 [P] [US3] New `src/dayflow/perception.rs` (was T300) — a `PerceptionRouter` over two configured `VisionProvider` instances (text tier, reason tier), dispatching on an explicit caller-supplied request kind, never by sniffing the prompt.
       `> DONE:` a stub-provider test proves a text request never touches the reason tier; `cargo check` green.
 - [ ] T027 [US3] Crop before extract (was T301) — feed the text tier full-resolution region crops from the region cascade, never a downscaled full frame (FR-011). Reuse the existing target/measure path; no new detection code.
       `> DONE:` a two-pane frame yields per-pane text in correct order and a test asserts the full-frame column-scramble does NOT occur.
-- [ ] T028 [US3] Log every escalation with its reason and serving tier (FR-007/010).
+- [x] T028 [US3] Log every escalation with its reason and serving tier (FR-007/010).
       `> DONE:` a semantic request emits exactly one escalation record naming the reason; a normal recording interval emits none.
 - [ ] T029 [US3] Residency policy (was T331) — keep the text tier warm while a recording is active, using the unload window measured in T006; record per-segment latency including any reload (FR-008/013). Three-valued knob: resident / on-demand / off.
       `> DONE:` a multi-segment run records per-segment latency; with residency on, no segment pays a cold load; the knob is documented.
-- [ ] T030 [US3] Give Dayflow's internal perception traffic its own rate-limit key and budget derived from interval, display count and `max_regions_per_segment`, leaving the interactive `analyze_video` 10/min ceiling untouched. See the plan's Complexity Tracking — the limiter currently has no call sites anywhere in the repo.
+- [x] T030 [US3] Give Dayflow's internal perception traffic its own rate-limit key and budget derived from interval, display count and `max_regions_per_segment`, leaving the interactive `analyze_video` 10/min ceiling untouched. See the plan's Complexity Tracking — the limiter currently has no call sites anywhere in the repo.
       `> DONE:` a test proves Dayflow's traffic cannot exhaust the interactive bucket and vice versa; the region cap bounds work at the source.
-- [ ] T031 [S] [US3] Route the summarizer through the router (was T302) so per-segment perception uses the text tier by default and escalates only for category and meaning.
+- [x] T031 [S] [US3] Route the summarizer through the router (was T302) so per-segment perception uses the text tier by default and escalates only for category and meaning.
       `> DONE:` a text query resolves without a vision model, a semantic query escalates once, both covered by tests; `cargo check` + clippy `-D warnings` = 0.
 - [ ] T032 [P] [US3] Integration coverage in `tests/dayflow_perception.rs`, including an assertion that the demoted tesseract path is never used as the text tier.
       `> DONE:` all US3 acceptance scenarios from `spec.md` are asserted.
-- [ ] T052 [US3] Content intent — rolling OCR aggregation in `src/dayflow/perception.rs`, ported from videolocr's `OCRAggregator` (research R13): a 5-block history, `SequenceMatcher`-style overlap at 0.85, APPENDING to the matched block instead of creating a new one. Runs only when `intent.aggregates_text()`.
+- [x] T052 [US3] Content intent — rolling OCR aggregation in `src/dayflow/perception.rs`, ported from videolocr's `OCRAggregator` (research R13): a 5-block history, `SequenceMatcher`-style overlap at 0.85, APPENDING to the matched block instead of creating a new one. Runs only when `intent.aggregates_text()`.
       `> DONE:` a scrolling pane sampled repeatedly yields ONE growing block, not N near-duplicates; under Activity intent the aggregator is never invoked; `cargo check` green.
-- [ ] T053 [S] [US3] Content intent — text diff-merge (research R12): append a block only below 0.95 similarity, treat above 0.3 as comparable, and merge preserving unique lines. Every gate in the ladder FAILS OPEN (research R13) — on any error the sample is KEPT, never dropped, because dayflow cannot re-capture yesterday.
+- [x] T053 [S] [US3] Content intent — text diff-merge (research R12): append a block only below 0.95 similarity, treat above 0.3 as comparable, and merge preserving unique lines. Every gate in the ladder FAILS OPEN (research R13) — on any error the sample is KEPT, never dropped, because dayflow cannot re-capture yesterday.
       `> DONE:` a test proves the union of two overlapping captures is preserved with no duplication; a fault injected into each gate results in the sample being KEPT; both intents covered; `cargo check` + tests green.
 
 ## Phase 6: User Story 4 — Entries that remember the layout (P2)
@@ -147,8 +147,7 @@ request escalates exactly once, with a logged reason.
 deterministic.
 
 **Independent test**: a two-pane capture yields entries whose region and parent references
-reconstruct the arrangement, identically on every run.
-
+reconstruct the arrangement, identically on every run. — NOTE: T053's 0.95 append gate is SUBSUMED, not implemented: line-level `diff_merge` adds only lines the block lacks, so a near-identical capture contributes nothing by construction. Implemented as an explicit branch first; mutation testing showed removing it changed no behaviour.
 - [ ] T033 [US4] Additive migration in `src/storage/database.rs` (was T310) — `region_id`, `bbox_*`, `parent_region_id`, `display_id`, `reading_order` on `timeline_entries`, all nullable, idempotent, not rewriting T240.
       `> DONE:` re-runnable; existing rows survive with empty provenance; an in-memory test round-trips the new columns.
 - [ ] T034 [US4] Compute reading order from geometry in `src/regions/mod.rs` — banded top-to-bottom then left-to-right, bounded by the parent tree (FR-020). Never ask a model.
