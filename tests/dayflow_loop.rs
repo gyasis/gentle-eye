@@ -549,8 +549,16 @@ fn a_panicking_tick_halts_capture_without_poisoning_the_service() {
     }
     assert!(!svc.capture_running(), "a panicking tick must halt capture, not spin");
 
-    // The service still answers, and the run mutex is NOT poisoned: with_run
-    // would only observe a poison if the panic unwound through the guard.
+    // The run mutex must NOT be poisoned. This must be asserted through the
+    // probe, not through `with_run` succeeding: `lock()` RECOVERS poison, so
+    // every public call succeeds either way and would pass with the
+    // catch_unwind deleted — a fixture unable to fail on the condition it
+    // names (013's dominant defect class).
+    assert!(
+        !svc.run_lock_poisoned(),
+        "the tick's panic unwound through the run guard — catch_unwind is not \
+         protecting the multi-step mutation"
+    );
     let status = svc.status(Utc::now()).expect("the service still answers");
     assert!(status.running, "the session itself survives the capture panic");
     let sid = svc.with_run(|r| r.session_id()).expect("the run is still serveable");

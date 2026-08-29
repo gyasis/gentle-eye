@@ -456,6 +456,18 @@ impl DayflowService {
         }
     }
 
+    /// Whether the run mutex has ever been poisoned.
+    ///
+    /// Observability for the D014-11 guarantee: the capture thread's multi-step
+    /// tick must never poison this lock (its panics are caught at the tick
+    /// boundary), so poison here can only mean a single-assignment mutation
+    /// site panicked — the case `lock()`'s recovery is documented sound for.
+    /// Without this probe the guarantee is untestable: the recovery itself
+    /// masks poison from every public call path.
+    pub fn run_lock_poisoned(&self) -> bool {
+        self.run.is_poisoned()
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Option<DayflowRun>>, DayflowError> {
         // A poisoned lock means another thread panicked while holding it.
         // Recovering is safe HERE FOR A SPECIFIC REASON, not in general: every
