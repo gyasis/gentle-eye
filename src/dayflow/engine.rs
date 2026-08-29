@@ -243,6 +243,51 @@ impl DayflowRun {
         }
     }
 
+    /// Record that NO source can produce: the session-wide arm of FR-113.
+    ///
+    /// D014-9 split availability into two records — one source failing among
+    /// producers is a per-source `SampleDrop`, but when EVERY source is
+    /// unavailable, capture has stopped for the whole session and that is a
+    /// GAP with a cause. For the single-source sessions US2 introduces (one
+    /// window, one target) the two coincide: the window minimising IS the
+    /// session pausing. Without this record, a watched window that quits
+    /// leaves a silent hole — the timeline shows nothing, with no gap saying
+    /// why, which is precisely the "dead source reads as quiet" conflation
+    /// FR-113 forbids.
+    ///
+    /// Idempotent while already paused (the windows layer keeps the original
+    /// interval), and a deliberate `UserOff` is never downgraded by it.
+    pub fn sources_unavailable(
+        &mut self,
+        cause: PauseCause,
+        now: DateTime<Utc>,
+    ) -> Vec<ClosedWindow> {
+        if self.stopped {
+            return Vec::new();
+        }
+        self.pause(cause, now)
+    }
+
+    /// A source produced a frame again: lift a SOURCE pause, and nothing else.
+    ///
+    /// Deliberately narrower than `resume_if_automatic` — a frame arriving
+    /// says nothing about the USER's state, so it must not lift an `Idle`,
+    /// `Locked` or `DisplaySleep` pause (frames keep changing while the user
+    /// is away; that is why those causes exist). `SourceEnded` stays too: it
+    /// is not automatic by design, and a retired source never produces again.
+    pub fn sources_recovered(&mut self, now: DateTime<Utc>) -> bool {
+        if matches!(self.windows.pause_cause(), Some(PauseCause::SourceOccluded)) {
+            self.windows.resume(now);
+            // Restart the staleness clock, as every real resume path does: a
+            // just-recovered source has not had time to produce a chunk, and
+            // must not read as a fault for the length of the outage.
+            self.producing_since = now;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Turn capture OFF. The in-progress windows close and are accounted for.
     ///
     /// A no-op on a stopped run: recording a pause that can never close would

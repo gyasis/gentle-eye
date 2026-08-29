@@ -155,7 +155,13 @@ pub struct SourceStatus {
     pub name: String,
     /// Its position in the session's source list (the `display_id` field).
     pub ordinal: u32,
-    /// Whether it is producing right now.
+    /// Whether it was producing AS OF THE LAST CAPTURE TICK.
+    ///
+    /// Republished each tick, so it is live while capture runs — but when the
+    /// capture thread has halted (stop_capture, a panicked tick, the session
+    /// ending under it) this is the last observed value, not a current claim.
+    /// `liveness` is the staleness authority for that window: silence past the
+    /// threshold reports the session Degraded whatever this field says.
     pub availability: crate::dayflow::source::Availability,
 }
 

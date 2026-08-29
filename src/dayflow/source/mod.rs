@@ -114,6 +114,60 @@ impl SourceIdentity {
     }
 }
 
+/// Clip `regions` to `rect` and translate the survivors into RECT-LOCAL
+/// coordinates, for a source that hands downstream a crop of its inner frame.
+///
+/// Shared by the window and target sources — one implementation, because two
+/// copies of the same filter is how they drift apart untested (013/R40).
+///
+/// # Clipped, not gated on containment
+///
+/// A region PARTIALLY overlapping the crop is kept as its intersection rather
+/// than dropped. Containment-only filtering silently discarded any pane that
+/// extends past the crop's edge by a pixel — WM frame geometry and detected
+/// pane boxes routinely disagree by a border's width — and every pixel of the
+/// intersection genuinely exists in the cropped frame. Confinement (FR-114)
+/// holds either way: a clip can never exceed the crop.
+///
+/// # The empty answer is two different answers (D014-3, the W5 rule)
+///
+/// - inner produced NOTHING → `Some(vec![])`: the cascade ran and found
+///   nothing, which is an answer, and is not a whole-frame read.
+/// - inner produced regions but NONE intersect the crop → `None`: nothing the
+///   cascade said is attributable to this crop, so this source cannot answer.
+///   `Some(vec![])` here would claim "looked, found nothing" and hide the
+///   whole-frame read from `samples_read_whole` — the exact defect the W5 gate
+///   fixed in `DisplaySource::select_regions`, reintroduced one seam up.
+pub(crate) fn clip_regions_to(
+    regions: Vec<Region>,
+    rect: crate::target::model::PixelRect,
+) -> Option<Vec<Region>> {
+    let had_input = !regions.is_empty();
+    let kept: Vec<Region> = regions
+        .into_iter()
+        .filter_map(|mut r| {
+            let x0 = r.bbox.x.max(rect.x);
+            let y0 = r.bbox.y.max(rect.y);
+            let x1 = (r.bbox.x + r.bbox.w).min(rect.x + rect.w);
+            let y1 = (r.bbox.y + r.bbox.h).min(rect.y + rect.h);
+            if x1 <= x0 || y1 <= y0 {
+                return None; // no overlap at all
+            }
+            r.bbox = crate::target::model::PixelRect {
+                x: x0 - rect.x,
+                y: y0 - rect.y,
+                w: x1 - x0,
+                h: y1 - y0,
+            };
+            Some(r)
+        })
+        .collect();
+    if kept.is_empty() && had_input {
+        return None;
+    }
+    Some(kept)
+}
+
 /// One frame taken from a source, owning its pixels.
 ///
 /// Owned rather than borrowed because a source generally decodes into its own

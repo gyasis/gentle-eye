@@ -313,6 +313,12 @@ impl CaptureLoop {
 
             match source.next_frame() {
                 Ok(frame) => {
+                    // A frame arrived: lift a SOURCE pause BEFORE recording it
+                    // — `on_sample` is a no-op on a paused run, so resuming
+                    // after the loop would silently uncount the first frame of
+                    // every recovery. Lifts ONLY `SourceOccluded`: a frame
+                    // says nothing about the user's idle/lock state.
+                    run.sources_recovered(now);
                     let regions = source.regions_for(&frame);
                     // No re-acquire closure: the source is already borrowed
                     // for this frame. A source that can retry does so behind
@@ -389,6 +395,44 @@ impl CaptureLoop {
                         failure: Some(availability),
                     });
                 }
+            }
+        }
+
+        // The SESSION-WIDE arm of FR-113 (D014-9's second row). A drop is
+        // per-source; a gap says capture stopped for the whole session — and
+        // it did exactly when NO source produced a frame this tick for
+        // availability reasons. One occluded source among producers is NOT a
+        // gap (that would claim the session stopped while others record), but
+        // for the single-source sessions this feature exists for, the watched
+        // window minimising IS the session pausing — and a watched window
+        // that QUIT must leave a gap saying so, not silence: `SourceEnded` is
+        // what lets health read the difference between quiet-on-purpose and
+        // dead (models.rs maps it to Degraded, a mapping nothing reached
+        // until this wire existed).
+        let any_frame = outcome.sources.iter().any(|s| s.failure.is_none());
+        if !any_frame && !self.sources.is_empty() {
+            let all_ended = self
+                .sources
+                .iter()
+                .all(|s| self.retired.contains(&s.ordinal()));
+            let session = if all_ended {
+                // Nothing will ever produce again; `SourceEnded` is not
+                // automatic, so this gap does not lift on its own — the
+                // condition "clears" never happens for a retired source.
+                Availability::Ended
+            } else if !outcome.sources.is_empty() {
+                // Every source still being asked failed this tick (any
+                // produced frame would have made `any_frame` true).
+                Availability::Occluded
+            } else {
+                // No live source was asked yet none are retired — a shape
+                // that cannot occur today (every live source pushes a
+                // SourceTick). Fail toward "no gap" rather than inventing
+                // one: `Available` warrants none (D014-9).
+                Availability::Available
+            };
+            if let Some(cause) = session.gap_cause() {
+                outcome.closed.extend(run.sources_unavailable(cause, now));
             }
         }
 

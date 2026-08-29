@@ -337,3 +337,47 @@ The production answerer MUST have:
 
 Without both, a user's first `ask_day` of the day fails while every test passes.
 Reference implementation of the split-timeout shape: `atelier-governor.md` R-AG7.
+
+## D014-13 — W6 gate: geometry cannot see a minimised X11 window (measured)
+
+**The defect.** `WmLocator` decided "minimised" by `bbox.w == 0 || bbox.h == 0`
+over `WmProvider::windows()`. Both halves of that are wrong, and both were
+measured live (2026-08-29, DISPLAY=:1, xterm + xdotool + xprop):
+
+1. **A minimised window keeps its geometry.** Minimised: still in
+   `_NET_CLIENT_LIST`, geometry unchanged (184×69 at the same position),
+   `WM_STATE` = Iconic, and `_NET_WM_STATE_HIDDEN` set. X11 retains an
+   iconified window's last rectangle, so the zero-area test never fires.
+2. **`windows()` filters zero-area anyway** (`continue` on `width==0`), so the
+   branch was doubly unreachable — dead code shaped like a safety check.
+
+Consequence in production: a minimised window reported `Visible(stale rect)`,
+and the source **cropped the screen at the stale rectangle, recording whatever
+was underneath it** — an FR-114 violation with nothing erroring anywhere.
+`WindowState::Minimised` was reachable only through the test harness's
+`ScriptedLocator`: green in test, inert in production (the R29/R36 shape).
+
+**Also measured: the other-workspace case needs its own check.** A window moved
+to desktop 1 (current 0) keeps geometry, does NOT get `_NET_WM_STATE_HIDDEN`
+on this WM — only `_NET_WM_DESKTOP` moves. So "hidden" must be
+`_NET_WM_STATE_HIDDEN` **or** (`_NET_WM_DESKTOP` ≠ current ∧ ≠ 0xFFFFFFFF).
+
+**The fix.** `WmProvider::window_states()` — one enumeration path (`windows()`
+is now built on it, R40) returning bbox + label + `showing`, from the EWMH
+state, not the geometry. `WmLocator` maps `!showing` → `Minimised`. Verified
+end-to-end against 14 real windows: a controlled minimise flipped `showing`
+true→false with the geometry unchanged.
+
+**What remains true.** `Gone` was always real (a killed window leaves
+`_NET_CLIENT_LIST` — measured), and Err-from-the-WM → `Minimised` (retry, don't
+retire) stands. So minimised vs quit IS now distinguishable in production;
+before this fix only quit was.
+
+**Sibling defects fixed at the same gate:** the two cropping sources
+reintroduced the W5 `select_regions` defect one seam up (a filter that dropped
+every region answered `Some(vec![])`, hiding the whole-frame read — now
+clip-to-intersection with `None` when nothing overlaps, shared in
+`source::clip_regions_to`); `NamedTargetSource::availability` served a stale
+`Available` while its inner source was Occluded (now passes every
+non-Available inner state through); and the T014 session-gap arm (see the
+amended T014 DONE line).

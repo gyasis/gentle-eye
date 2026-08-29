@@ -37,7 +37,7 @@ pub struct WmLocator;
 
 impl WindowLocator for WmLocator {
     fn locate(&self, label: &str) -> WindowState {
-        let windows = match crate::regions::providers::wm::WmProvider::windows() {
+        let windows = match crate::regions::providers::wm::WmProvider::window_states() {
             Ok(w) => w,
             // The WM could not be asked. That is NOT evidence the window is
             // gone — treating it as `Gone` would retire a live source on a
@@ -46,6 +46,17 @@ impl WindowLocator for WmLocator {
         };
         for r in windows {
             if r.label.as_deref().is_some_and(|l| l.contains(label)) {
+                // The EWMH state, not the geometry: X11 keeps a minimised
+                // window's last rectangle and `_NET_CLIENT_LIST` keeps the
+                // window (measured live, 2026-08-29 — geometry unchanged
+                // 184x69 while `_NET_WM_STATE_HIDDEN` was set). Judging by
+                // bbox alone reported every minimised window Visible, and the
+                // source then cropped the screen at the stale rectangle —
+                // recording whatever was UNDERNEATH it (FR-114), with
+                // `Minimised` unreachable outside the test harness.
+                if !r.showing {
+                    return WindowState::Minimised;
+                }
                 // A zero-area window is managed but showing nothing, which is
                 // what a minimised window looks like through this API.
                 if r.bbox.w == 0 || r.bbox.h == 0 {
@@ -137,24 +148,13 @@ impl CaptureSource for WindowSource {
     fn regions_for(&self, frame: &SourceFrame) -> Option<Vec<Region>> {
         let rect = self.rect().ok()?;
         let inner = self.inner.regions_for(frame)?;
-        // Keep only what lies inside the window, and translate to WINDOW-LOCAL
-        // coordinates: the frame handed downstream is the crop, so a region in
-        // screen coordinates would address the wrong pixels of it.
-        let kept: Vec<Region> = inner
-            .into_iter()
-            .filter(|r| {
-                r.bbox.x >= rect.x
-                    && r.bbox.y >= rect.y
-                    && r.bbox.x + r.bbox.w <= rect.x + rect.w
-                    && r.bbox.y + r.bbox.h <= rect.y + rect.h
-            })
-            .map(|mut r| {
-                r.bbox.x -= rect.x;
-                r.bbox.y -= rect.y;
-                r
-            })
-            .collect();
-        Some(kept)
+        // Clip to the window and translate to WINDOW-LOCAL coordinates: the
+        // frame handed downstream is the crop, so a region in screen
+        // coordinates would address the wrong pixels of it. `clip_regions_to`
+        // also draws the D014-3 line — inner regions with NO overlap at all
+        // yield `None` (this source cannot answer for its crop), never
+        // `Some(vec![])` (a claim the cascade looked here and found nothing).
+        super::clip_regions_to(inner, rect)
     }
 
     fn availability(&self) -> Availability {

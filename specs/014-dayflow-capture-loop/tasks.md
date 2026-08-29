@@ -59,7 +59,7 @@ line says so.
 - [x] T013 [P] [US2] `TargetSource`-backed source in `src/dayflow/source/target.rs`, using the existing named-target store.
       `> DONE:` a defined target drives a session; the stored entries carry that target's region provenance.
 - [x] T014 [US2] Availability handling in the loop: a failed frame records a gap with its CAUSE and continues; `Ended` stops retrying, `Occluded`/`Available` retry next tick.
-      `> DONE:` three fixtures — minimised, dropped, quit — produce three DIFFERENT gap causes. Collapsing them makes a minimised window read as a fault, or a dead source read as quiet (FR-113).
+      `> DONE:` **AMENDED (D014-9, W6 gate)** — the original wording said "three DIFFERENT gap causes"; per D014-9 a per-source failure is a DROP, not a gap, so three fixtures — minimised, dropped, quit — prove three different OUTCOMES (availability, retry, what is recorded). The wave shipped only that per-source arm; the gate found `Availability::gap_cause()` called by nothing in production and wired D014-9's SECOND row: when NO source produces (all failed, or all retired — the whole case for a single-window/target session), the loop records a session pause with the cause (`SourceOccluded` lifts on recovery, `SourceEnded` never does), which is what lets health tell quiet-on-purpose from dead (FR-113; models.rs SourceEnded→Degraded was unreachable before this wire).
 - [x] T015 [S] [US2] `DayflowStatus` names the session's source and its availability.
       `> DONE:` `status` on every surface says WHAT the record is a record of; `cargo check` + clippy = 0.
 

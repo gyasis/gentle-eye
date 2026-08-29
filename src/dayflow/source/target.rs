@@ -75,29 +75,26 @@ impl CaptureSource for NamedTargetSource {
     fn regions_for(&self, frame: &SourceFrame) -> Option<Vec<Region>> {
         let inner = self.inner.regions_for(frame)?;
         let rect = self.rect_for(frame);
-        let kept: Vec<Region> = inner
-            .into_iter()
-            .filter(|r| {
-                r.bbox.x >= rect.x
-                    && r.bbox.y >= rect.y
-                    && r.bbox.x + r.bbox.w <= rect.x + rect.w
-                    && r.bbox.y + r.bbox.h <= rect.y + rect.h
-            })
-            .map(|mut r| {
-                r.bbox.x -= rect.x;
-                r.bbox.y -= rect.y;
-                r
-            })
-            .collect();
-        Some(kept)
+        // Clip to the target and translate to TARGET-LOCAL coordinates; see
+        // `clip_regions_to` for why partial overlaps are clipped rather than
+        // dropped, and why dropping EVERYTHING must answer `None` (D014-3).
+        super::clip_regions_to(inner, rect)
     }
 
     fn availability(&self) -> Availability {
-        // A target has no existence of its own: it is a rectangle over an inner
-        // source, so when the inner source ends, so does the target.
+        // A target has no existence of its own: it is a rectangle over an
+        // inner source, so the inner source's condition IS the target's.
+        //
+        // Every non-Available inner state passes through, not just `Ended`:
+        // `self.state` is only written inside `next_frame`, so an inner source
+        // that went Occluded between frames would otherwise be reported from a
+        // stale `Available` until the next failed capture — while
+        // `WindowSource::availability` re-asks its locator live. Two sources
+        // answering the same trait question with different freshness is how a
+        // status surface ends up trusting one and not the other.
         match self.inner.availability() {
-            Availability::Ended => Availability::Ended,
-            _ => self.state,
+            Availability::Available => self.state,
+            unavailable => unavailable,
         }
     }
 

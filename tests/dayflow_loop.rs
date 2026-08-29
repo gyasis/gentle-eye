@@ -1424,17 +1424,20 @@ fn window_regions_are_translated_into_the_crops_coordinates() {
                     Granularity::Pane,
                     1.0,
                 ),
-                // Outside via the LOWER bound (before the window's origin).
+                // ENTIRELY outside (before the window's origin, no overlap):
+                // nothing of it exists in the crop, so it must be dropped.
                 Region::new(
                     gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 4, h: 4 },
                     RegionSource::Wm,
                     Granularity::Pane,
                     1.0,
                 ),
-                // Outside via the UPPER bound: starts inside but OVERFLOWS the
-                // window's far edge (window is 16,16..48,48; this ends at 52).
-                // Without this the lower-bound check alone satisfies the test
-                // and a widened upper bound survives — which it did.
+                // PARTIALLY overlapping: starts inside but overflows the far
+                // edge (window is 16,16..48,48; this ends at 52). It must be
+                // CLIPPED to the intersection, not dropped — WM frame geometry
+                // and detected pane boxes routinely disagree by a border's
+                // width, and containment-only filtering silently discarded the
+                // whole pane for a one-pixel overhang.
                 Region::new(
                     gentle_eye::target::model::PixelRect { x: 44, y: 44, w: 8, h: 8 },
                     RegionSource::Wm,
@@ -1460,9 +1463,9 @@ fn window_regions_are_translated_into_the_crops_coordinates() {
 
     assert_eq!(
         regions.len(),
-        1,
-        "a region outside the window must be dropped — both the one before its \
-         origin AND the one overflowing its far edge"
+        2,
+        "the inside region survives whole and the overflowing one survives \
+         CLIPPED; only the region with no overlap at all is dropped"
     );
     assert_eq!(
         (regions[0].bbox.x, regions[0].bbox.y),
@@ -1470,5 +1473,262 @@ fn window_regions_are_translated_into_the_crops_coordinates() {
         "the region is still in SCREEN coordinates — cropping it out of the \
          window's frame would read the wrong pixels, silently"
     );
-    assert_eq!((regions[0].bbox.w, regions[0].bbox.h), (8, 8), "the size must not change");
+    assert_eq!((regions[0].bbox.w, regions[0].bbox.h), (8, 8), "a contained region keeps its size");
+    // The overflowing region: intersection is 44,44..48,48 → window-local
+    // 28,28 with the overhang cut off.
+    assert_eq!(
+        (regions[1].bbox.x, regions[1].bbox.y, regions[1].bbox.w, regions[1].bbox.h),
+        (28, 28, 4, 4),
+        "a partially overlapping region is clipped to the crop, in local coordinates"
+    );
+}
+
+/// When the cascade answered but NOTHING it said intersects the crop, the
+/// source must answer `None` — "I cannot answer for this crop" — never
+/// `Some(vec![])`, which claims the cascade looked here and found nothing and
+/// hides the whole-frame read from `samples_read_whole` (D014-3, FR-103).
+/// This is the exact defect the W5 gate fixed in
+/// `DisplaySource::select_regions`; the two cropping sources reintroduced it.
+#[test]
+fn a_crop_that_can_keep_no_region_answers_none_not_found_nothing() {
+    struct FarRegions;
+    impl CaptureSource for FarRegions {
+        fn next_frame(&mut self) -> Result<SourceFrame, SourceError> {
+            Ok(quadrant_frame(3, 9))
+        }
+        fn regions_for(&self, _f: &SourceFrame) -> Option<Vec<Region>> {
+            // A real answer, entirely outside the 0,0..32,32 crop below.
+            Some(vec![Region::new(
+                gentle_eye::target::model::PixelRect { x: 40, y: 40, w: 8, h: 8 },
+                RegionSource::Wm,
+                Granularity::Pane,
+                1.0,
+            )])
+        }
+        fn availability(&self) -> Availability { Availability::Available }
+        fn identity(&self) -> SourceIdentity { SourceIdentity::new("inner", "x") }
+        fn ordinal(&self) -> u32 { 0 }
+    }
+    struct NoRegions;
+    impl CaptureSource for NoRegions {
+        fn next_frame(&mut self) -> Result<SourceFrame, SourceError> {
+            Ok(quadrant_frame(3, 9))
+        }
+        fn regions_for(&self, _f: &SourceFrame) -> Option<Vec<Region>> {
+            Some(Vec::new()) // the cascade ran and found nothing anywhere
+        }
+        fn availability(&self) -> Availability { Availability::Available }
+        fn identity(&self) -> SourceIdentity { SourceIdentity::new("inner", "x") }
+        fn ordinal(&self) -> u32 { 0 }
+    }
+
+    let rect = gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 32, h: 32 };
+    let frame = quadrant_frame(3, 9);
+
+    // WindowSource: regions exist, none in the window → cannot answer.
+    let win = WindowSource::new(
+        Box::new(FarRegions),
+        Box::new(ScriptedLocator { state: Arc::new(StdMutex::new(WindowState::Visible(rect))) }),
+        "term",
+        0,
+    );
+    assert_eq!(
+        win.regions_for(&frame),
+        None,
+        "WindowSource turned 'nothing attributable to this crop' into \
+         Some(vec![]) — the whole-frame read is hidden from the counter"
+    );
+
+    // NamedTargetSource: same rule, same seam.
+    let target = Target::new(
+        "panel",
+        TargetSource::Display { index: 0 },
+        NormRect::new(0.0, 0.0, 0.5, 0.5), // 0,0..32,32 of the 64x64 frame
+    );
+    let tgt = NamedTargetSource::new(Box::new(FarRegions), &target, 0);
+    assert_eq!(
+        tgt.regions_for(&frame),
+        None,
+        "NamedTargetSource turned 'nothing attributable to this crop' into \
+         Some(vec![]) — the whole-frame read is hidden from the counter"
+    );
+
+    // And the OTHER empty stays an answer: an empty cascade result is
+    // Some(vec![]) — the cascade ran, there was nothing to find, and that is
+    // not a whole-frame read (D014-3 draws exactly this line).
+    let win2 = WindowSource::new(
+        Box::new(NoRegions),
+        Box::new(ScriptedLocator { state: Arc::new(StdMutex::new(WindowState::Visible(rect))) }),
+        "term",
+        0,
+    );
+    assert_eq!(win2.regions_for(&frame), Some(Vec::new()));
+    let tgt2 = NamedTargetSource::new(Box::new(NoRegions), &target, 0);
+    assert_eq!(tgt2.regions_for(&frame), Some(Vec::new()));
+}
+
+/// A target's availability must follow its INNER source between frames.
+/// `state` is only written inside `next_frame`, so without the passthrough an
+/// inner source that went Occluded after the last frame kept reporting a stale
+/// `Available` — while `WindowSource` re-asks its locator live. Two sources
+/// answering the same trait question with different freshness is a defect, not
+/// a style choice.
+#[test]
+fn a_targets_availability_follows_its_inner_source_between_frames() {
+    struct MoodySource {
+        mood: Availability,
+    }
+    impl CaptureSource for MoodySource {
+        fn next_frame(&mut self) -> Result<SourceFrame, SourceError> {
+            Err(SourceError::new("not the point of this test"))
+        }
+        fn regions_for(&self, _f: &SourceFrame) -> Option<Vec<Region>> {
+            None
+        }
+        fn availability(&self) -> Availability {
+            self.mood
+        }
+        fn identity(&self) -> SourceIdentity { SourceIdentity::new("inner", "x") }
+        fn ordinal(&self) -> u32 { 0 }
+    }
+
+    let target = Target::new(
+        "panel",
+        TargetSource::Display { index: 0 },
+        NormRect::new(0.0, 0.0, 0.5, 0.5),
+    );
+    // NO next_frame call happens in this test: the inner state must reach the
+    // trait surface on its own.
+    let occluded = NamedTargetSource::new(Box::new(MoodySource { mood: Availability::Occluded }), &target, 0);
+    assert_eq!(
+        occluded.availability(),
+        Availability::Occluded,
+        "the inner source is Occluded and the target reports a stale Available"
+    );
+    let ended = NamedTargetSource::new(Box::new(MoodySource { mood: Availability::Ended }), &target, 0);
+    assert_eq!(ended.availability(), Availability::Ended);
+    let fine = NamedTargetSource::new(Box::new(MoodySource { mood: Availability::Available }), &target, 0);
+    assert_eq!(fine.availability(), Availability::Available);
+}
+
+/// The SESSION-WIDE arm of FR-113 (D014-9's second row): a watched window that
+/// QUITS must leave a gap in the session's ledger saying why — not silence.
+/// Before this wire existed, `Availability::gap_cause()` was called by nothing
+/// outside tests, and the health mapping for `SourceEnded` (models.rs →
+/// Degraded) was unreachable in production.
+#[test]
+fn a_watched_window_that_quits_leaves_a_gap_with_its_cause_not_silence() {
+    use gentle_eye::dayflow::window::PauseCause;
+
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let win = WindowSource::new(
+        Box::new(ScriptedFrames { frames: vec![quadrant_frame(5, 5)], cursor: 0, ordinal: 0 }),
+        Box::new(ScriptedLocator { state: Arc::new(StdMutex::new(WindowState::Gone)) }),
+        "term",
+        0,
+    );
+    let mut lp = CaptureLoop::new(vec![Box::new(win)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    lp.tick(&mut run, at(30));
+    let pauses = run.pauses_seen();
+    assert_eq!(pauses.len(), 1, "the session recorded no gap for its only source dying");
+    assert_eq!(pauses[0].cause, PauseCause::SourceEnded, "the gap must carry the CAUSE");
+    assert!(pauses[0].to.is_none(), "SourceEnded never lifts on its own — the source is retired");
+
+    // Health reads the difference: quiet-on-purpose vs dead. This is the
+    // models.rs SourceEnded→Degraded arm, reachable for the first time.
+    assert_eq!(
+        run.liveness(at(60)).health,
+        gentle_eye::dayflow::models::DayflowHealth::Degraded,
+        "a session whose only source is dead must not read as healthy or as paused-on-purpose"
+    );
+
+    // Idempotent: later ticks over the retired source add no second interval.
+    lp.tick(&mut run, at(60));
+    assert_eq!(run.pauses_seen().len(), 1, "re-ticking a dead session must not stack gaps");
+}
+
+/// The occluded half of the same arm: a minimised window pauses the session
+/// with `SourceOccluded` (auto-lifting), and the FIRST frame after restore
+/// both lifts the pause and is COUNTED — the resume must run before
+/// `on_sample`, or the run is still paused when the recovered frame arrives
+/// and silently uncounts it.
+#[test]
+fn a_minimised_window_pauses_the_session_and_recovery_counts_its_first_frame() {
+    use gentle_eye::dayflow::window::PauseCause;
+
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let rect = gentle_eye::target::model::PixelRect { x: 0, y: 0, w: 32, h: 32 };
+    let state = Arc::new(StdMutex::new(WindowState::Minimised));
+    let win = WindowSource::new(
+        Box::new(ScriptedFrames {
+            frames: vec![quadrant_frame(5, 5), quadrant_frame(80, 80)],
+            cursor: 0,
+            ordinal: 0,
+        }),
+        Box::new(ScriptedLocator { state: Arc::clone(&state) }),
+        "term",
+        0,
+    );
+    let mut lp = CaptureLoop::new(vec![Box::new(win)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    lp.tick(&mut run, at(30));
+    assert_eq!(run.pauses_seen().len(), 1, "a minimised only-source must pause the session");
+    assert_eq!(run.pauses_seen()[0].cause, PauseCause::SourceOccluded);
+    assert!(run.pauses_seen()[0].to.is_none(), "still minimised — the pause is open");
+
+    // Restore the window: the next tick produces, lifts the pause, and the
+    // recovered frame itself is recorded.
+    *state.lock().unwrap() = WindowState::Visible(rect);
+    let t = lp.tick(&mut run, at(60));
+    assert!(t.sources[0].failure.is_none(), "the restored window must produce");
+    assert_eq!(
+        run.pauses_seen()[0].to,
+        Some(at(60)),
+        "the pause must lift when the source recovers"
+    );
+
+    // The window that closes at stop STARTED at the recovery tick with a real
+    // sample in it. If resume ran after `on_sample`, the run was paused when
+    // the frame arrived, `on_sample` no-opped, and this window starts later
+    // (or holds no sample).
+    let closed = run.stop(at(90));
+    let w = closed
+        .iter()
+        .find(|w| w.sample_count > 0)
+        .expect("the recovered frame must land in a window — it was silently uncounted");
+    assert_eq!(w.start_wall, at(60), "the window must open AT the recovery frame, not after it");
+}
+
+/// One occluded source AMONG PRODUCERS is a per-source drop, never a session
+/// gap — a gap claims capture stopped, which is false while the other source
+/// records (D014-9's first row, guarding the any/all boundary in the loop).
+#[test]
+fn one_occluded_source_among_producers_is_a_drop_not_a_session_gap() {
+    let (mut run, _cfg) = run_for(vec![0, 1]);
+    let dir = tempfile::tempdir().unwrap();
+    let producing = ScriptedFrames { frames: vec![quadrant_frame(5, 5)], cursor: 0, ordinal: 0 };
+    let minimised = WindowSource::new(
+        Box::new(ScriptedFrames { frames: vec![quadrant_frame(5, 5)], cursor: 0, ordinal: 1 }),
+        Box::new(ScriptedLocator { state: Arc::new(StdMutex::new(WindowState::Minimised)) }),
+        "term",
+        1,
+    );
+    let mut lp = CaptureLoop::new(
+        vec![Box::new(producing), Box::new(minimised)],
+        Sampler::new(DeltaConfig::default()),
+        dir.path(),
+    );
+
+    let t = lp.tick(&mut run, at(30));
+    assert!(t.sources[0].failure.is_none(), "source 0 produced");
+    assert_eq!(t.sources[1].failure, Some(Availability::Occluded), "source 1 failed");
+    assert!(
+        run.pauses_seen().is_empty(),
+        "one occluded source among producers must NOT pause the session — \
+         that gap would claim the whole session stopped while source 0 records"
+    );
+    assert_eq!(lp.drops().len(), 1, "the failure is recorded per-source, as a drop");
 }
