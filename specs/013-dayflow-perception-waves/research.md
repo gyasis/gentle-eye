@@ -2183,3 +2183,59 @@ The tool-list test now asserts that every advertised tool has a dispatch arm, no
 count matches. A tool the server answers but never advertises is undiscoverable; one it advertises
 but cannot dispatch returns "unknown tool" to a client that did exactly what the catalog told it to.
 Both are silent until someone tries.
+
+
+## R37 — Wave 10 review: I wrote that the duplication had moved out, while it sat in the tree (2026-08-26)
+
+Verdict **FAIL**, on two things: a crash reachable from one request line, and a parity claim proven
+for one surface out of the three it names.
+
+### A str slice on bytes that are not a character boundary
+
+`&s[i + 1..i + 3]` in the percent decoder panics when those two bytes fall inside a multi-byte
+character. A request line is any valid UTF-8, so `GET /dayflow/ask?question=%aé` **killed the
+serving thread** — no `catch_unwind`, no per-connection thread, so every later request went
+unanswered with nothing logged to say why.
+
+And the test named `a_malformed_request_is_refused_without_stopping_the_surface` could not have
+caught it: its fixtures were a bad path, a bad method and a bad date, and it drove `route()`
+in-process — never the socket loop where "stopping the surface" is even possible. **Eleventh
+instance of a fixture not producing the condition the assertion names**, and the name was the most
+specific promise of the lot.
+
+Fixed with a byte slice, plus a read timeout (a client that connects and says nothing blocked the
+single-threaded loop **forever**) and a panic guard so a future crash degrades one request instead
+of the surface.
+
+### The duplication I claimed to have removed was in the tree as I wrote the claim
+
+R36 says the range default "moved out of the surfaces". It did not: `parse_range`,
+`parse_cli_range` and `range_from_query` were three verbatim copies. Two of them had no test —
+mutating the MCP default and the CLI default to produce an **empty** range, so every question would
+be answered about nothing, survived the whole suite.
+
+There is one implementation now and the surfaces call it. The lesson is not "don't duplicate": it is
+that **a design claim in a commit message is not evidence, and I wrote one that the diff
+contradicted.** The check is mechanical — grep for the second copy before claiming there isn't one.
+
+### Parity executed for one surface, narrated for the other two
+
+Nothing invoked the MCP tool methods or the CLI subcommand. The parity tests drove HTTP against
+direct service calls and labelled those "the call the MCP tool and the CLI subcommand both make" —
+which tests the service, not the adapters. Replacing `tool_dayflow_status`'s body with a **constant**
+survived the entire suite, producing exactly the "the CLI says running and the dashboard says
+stopped" contradiction the design argues against.
+
+**An adapter is code. Testing what it adapts to is not testing it.**
+
+### And two things scoped honestly instead of quietly
+
+The CLI's `start`/`stop`/`status` cannot share a session across processes — each invocation builds
+its own in-memory service, so `dayflow start` prints an id and the session dies with the process.
+`timeline` and `ask` do share state, through SQLite. That is now in `tasks.md` and the help text
+rather than implied by a checkbox.
+
+`ask_day` is advertised as answering questions and its answerer is a stub on every surface: only the
+refusal path works as described. The tool description says so. A catalog entry that promises more
+than the code does is a lie told to every client that reads it — and the stub strings even differed
+per surface, which is a parity violation in the wave about parity.

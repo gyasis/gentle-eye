@@ -180,9 +180,9 @@ does not.
 
 **Independent test**: start → status → timeline through each surface against the same state.
 
-- [x] T041 [US6] MCP tools in `src/mcp/tools.rs` + `src/mcp/server.rs` (was T270) — `start_dayflow`, `stop_dayflow`, `dayflow_status`, `get_timeline`, `ask_day` per `contracts/mcp-tools.md`, with schemars schemas.
+- [x] T041 [US6] **SCOPE (review F10):** `ask_day` is wired end-to-end but its answerer is a STUB on every surface — only the refusal path (empty range → NO_RECORD) behaves as advertised; a non-empty range returns a placeholder plus the prompt. The tool description says so rather than promising an answer it cannot give. MCP tools in `src/mcp/tools.rs` + `src/mcp/server.rs` (was T270) — `start_dayflow`, `stop_dayflow`, `dayflow_status`, `get_timeline`, `ask_day` per `contracts/mcp-tools.md`, with schemars schemas.
       `> DONE:` `tools/list` shows all five; a `call_tool` round-trip for each returns valid JSON against a stub provider.
-- [x] T042 [P] [US6] CLI subcommands in `src/bin/gentle-eye.rs` (was T271) per `contracts/cli.md`. `status` reporting `degraded` still exits 0.
+- [x] T042 [P] [US6] **SCOPE (review F7):** `timeline` and `ask` genuinely share state with the other surfaces via SQLite. `start`/`stop`/`status` do NOT: each CLI invocation is a fresh process with its own in-memory session, so `dayflow start` prints an id and the session dies with the process. The CLI's help text says so. Real cross-process sessions need the daemon (US7); until then those three verbs are honest only against a session started in the same process. CLI subcommands in `src/bin/gentle-eye.rs` (was T271) per `contracts/cli.md`. `status` reporting `degraded` still exits 0.
       `> DONE:` each subcommand prints valid JSON; a degraded status exits 0 with the degradation in the payload.
 - [x] T043 [P] [US6] HTTP endpoints in **`src/dayflow/http.rs`** (the spec said `src/api.rs`; that file is the library-facing convenience API, not a server, so the routes live with the rest of dayflow) (was T272) per `contracts/http.md`, no new dependency; a degraded recorder still returns 200.
       `> DONE:` each endpoint returns correct JSON on the hand-rolled server; a live curl test passes.

@@ -29,10 +29,24 @@ pub fn bind(port: u16) -> std::io::Result<TcpListener> {
 /// Serve until `listener` is closed.
 pub fn serve(listener: TcpListener, service: Arc<DayflowService>) {
     for stream in listener.incoming().flatten() {
-        // One bad request must not end the server: a malformed line from a port
-        // scanner would otherwise stop the surface for everyone.
-        if let Err(e) = handle(stream, &service) {
-            tracing::warn!(error = %e, "dayflow http request failed");
+        // A read timeout, because `read_line` on a client that connects and
+        // says nothing blocks FOREVER — and this loop is single-threaded, so
+        // one silent socket froze the timeline surface for everyone until that
+        // client died.
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+
+        // And a panic guard. One bad request must not end the server: without
+        // this, a single panic anywhere in parsing unwinds out of the loop and
+        // every later request goes unanswered, with nothing logged to say why.
+        let svc = Arc::clone(&service);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            handle(stream, &svc)
+        }));
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "dayflow http request failed"),
+            Err(_) => tracing::error!("dayflow http request PANICKED; surface continues"),
         }
     }
 }
@@ -76,10 +90,16 @@ pub fn route_at(
     service: &DayflowService,
     now: DateTime<Utc>,
 ) -> (&'static str, String) {
-    if method != "GET" && method != "POST" {
+    let mutating = matches!(path, "/dayflow/start" | "/dayflow/stop");
+    let allowed = if mutating { method == "POST" } else { method == "GET" };
+    if !allowed {
         return (
             "405 Method Not Allowed",
-            json_err("only GET and POST are served"),
+            json_err(if mutating {
+                "start and stop change state and require POST"
+            } else {
+                "only GET is served for reads"
+            }),
         );
     }
     match path {
@@ -102,7 +122,11 @@ pub fn route_at(
             Ok(s) => ("200 OK", serde_json::to_string(&s).unwrap_or_else(|_| json_err("serialize"))),
             Err(e) => ("500 Internal Server Error", json_err(&e.to_string())),
         },
-        "/dayflow/timeline" => match range_from_query(query, now) {
+        "/dayflow/timeline" => match crate::dayflow::service::resolve_range(
+            param(query, "from").as_deref(),
+            param(query, "to").as_deref(),
+            now,
+        ) {
             Err(e) => ("400 Bad Request", json_err(&e)),
             Ok((from, to)) => match service.timeline(from, to) {
                 Ok(entries) => (
@@ -122,7 +146,11 @@ pub fn route_at(
             if question.is_empty() {
                 return ("400 Bad Request", json_err("question is required"));
             }
-            match range_from_query(query, now) {
+            match crate::dayflow::service::resolve_range(
+                param(query, "from").as_deref(),
+                param(query, "to").as_deref(),
+                now,
+            ) {
                 Err(e) => ("400 Bad Request", json_err(&e)),
                 Ok((from, to)) => match service.ask(&question, from, to, |p| {
                     format!("[no model configured for ask]\n{p}")
@@ -158,27 +186,6 @@ fn start_from_query(query: &str, service: &DayflowService, now: DateTime<Utc>) -
         .map_err(|e| e.to_string())
 }
 
-/// The same "today so far" default the other two surfaces use.
-fn range_from_query(query: &str, now: DateTime<Utc>) -> Result<(DateTime<Utc>, DateTime<Utc>), String> {
-    let parse = |s: &str| {
-        DateTime::parse_from_rfc3339(s)
-            .map(|d| d.with_timezone(&Utc))
-            .map_err(|e| format!("bad timestamp '{s}': {e}"))
-    };
-    let to = match param(query, "to") {
-        Some(s) => parse(&s)?,
-        None => now,
-    };
-    let from = match param(query, "from") {
-        Some(s) => parse(&s)?,
-        None => to.date_naive().and_hms_opt(0, 0, 0).map(|d| d.and_utc()).unwrap_or(to),
-    };
-    if from > to {
-        return Err(format!("range starts after it ends: {from} > {to}"));
-    }
-    Ok((from, to))
-}
-
 fn param(query: &str, key: &str) -> Option<String> {
     query.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=')?;
@@ -205,7 +212,12 @@ fn percent_decode(s: &str) -> String {
                 i += 1;
             }
             b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                // BYTE slice, not a str slice. `&s[i+1..i+3]` panics when those
+                // two bytes fall inside a multi-byte character — and a request
+                // line is any valid UTF-8, so `?question=%aé` was a one-line
+                // remote kill for the whole surface.
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()).ok_or(()) {
                     Ok(b) => {
                         out.push(b);
                         i += 3;
@@ -213,7 +225,7 @@ fn percent_decode(s: &str) -> String {
                     // A malformed escape is kept verbatim rather than dropped:
                     // silently eating part of a user's question is worse than
                     // showing them the stray percent sign.
-                    Err(_) => {
+                    Err(()) => {
                         out.push(bytes[i]);
                         i += 1;
                     }
@@ -230,4 +242,50 @@ fn percent_decode(s: &str) -> String {
 
 fn json_err(message: &str) -> String {
     serde_json::json!({ "error": message }).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_percent_escape_straddling_a_multibyte_character_does_not_panic() {
+        // `&s[i+1..i+3]` on a str panics when those bytes fall inside a
+        // multi-byte character — and a request line is any valid UTF-8, so
+        // `?question=%aé` was a one-line remote kill for the whole surface.
+        // Every one of these used to abort the serving thread.
+        for hostile in ["%aé", "%é", "%\u{00e9}\u{00e9}", "a%bécd", "%🎉x", "100%é"] {
+            let decoded = percent_decode(hostile);
+            assert!(!decoded.is_empty(), "{hostile:?} decoded to nothing");
+        }
+    }
+
+    #[test]
+    fn decoding_is_faithful_and_keeps_what_it_cannot_decode() {
+        assert_eq!(percent_decode("what%20was%20I%20doing"), "what was I doing");
+        assert_eq!(percent_decode("a+b"), "a b", "+ is a space in a query string");
+        assert_eq!(percent_decode("100%"), "100%", "a bare trailing percent is kept");
+        assert_eq!(percent_decode("%zz"), "%zz", "a malformed escape is kept verbatim");
+        assert_eq!(percent_decode("%2B"), "+", "and an escaped plus is a plus");
+        assert_eq!(percent_decode(""), "");
+    }
+
+    #[test]
+    fn state_changing_routes_refuse_a_safe_method() {
+        // GET is safe by definition, and anything that speculatively fetches
+        // localhost URLs — a browser preconnect, a link checker, a monitoring
+        // probe — would otherwise be able to stop someone's recording.
+        let store = std::sync::Arc::new(crate::dayflow::timeline::SqliteTimelineStore::new(
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::storage::database::init_in_memory().unwrap(),
+            )),
+        ));
+        let svc = DayflowService::new(store, crate::config::DayflowConfig::default());
+
+        assert_eq!(route("GET", "/dayflow/start", "", &svc).0, "405 Method Not Allowed");
+        assert_eq!(route("GET", "/dayflow/stop", "", &svc).0, "405 Method Not Allowed");
+        // …while reads stay available over GET.
+        assert_eq!(route("GET", "/dayflow/status", "", &svc).0, "200 OK");
+        assert_eq!(route("GET", "/dayflow/timeline", "", &svc).0, "200 OK");
+    }
 }

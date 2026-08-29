@@ -10,7 +10,7 @@
 //! `GentleEyeServer`'s wiring — no duplicated logic).
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use gentle_eye::capture::display::{DisplayConfig, DisplayManager};
 use gentle_eye::config::AppConfig;
 use gentle_eye::contracts::traits::{RecordingConfig, RecordingStatus, TimeRange};
@@ -1139,7 +1139,12 @@ async fn run_dayflow(args: &[String]) -> Result<()> {
             // payload for anything that wants to act on it.
         }
         "timeline" => {
-            let (from, to) = parse_cli_range(rest)?;
+            let (from, to) = gentle_eye::dayflow::service::resolve_range(
+                flag(rest, "--from").as_deref(),
+                flag(rest, "--to").as_deref(),
+                Utc::now(),
+            )
+            .map_err(|e| anyhow!(e))?;
             let entries = df.timeline(from, to)?;
             println!(
                 "{}",
@@ -1151,11 +1156,32 @@ async fn run_dayflow(args: &[String]) -> Result<()> {
             );
         }
         "ask" => {
-            let question = rest
-                .iter()
-                .find(|a| !a.starts_with("--"))
-                .ok_or_else(|| anyhow!("usage: gentle-eye dayflow ask \"<question>\""))?;
-            let (from, to) = parse_cli_range(rest)?;
+            // Skip the VALUE of every two-token flag, not just the flags
+            // themselves: `ask --from <ts> "what did I do"` otherwise picks the
+            // timestamp as the question and answers it, successfully and
+            // silently, with the wrong question.
+            let mut question: Option<&String> = None;
+            let mut skip_next = false;
+            for a in rest {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if a.starts_with("--") {
+                    skip_next = true;
+                    continue;
+                }
+                question = Some(a);
+                break;
+            }
+            let question = question
+                .ok_or_else(|| anyhow!("usage: gentle-eye dayflow ask \"<question>\" [--from T] [--to T]"))?;
+            let (from, to) = gentle_eye::dayflow::service::resolve_range(
+                flag(rest, "--from").as_deref(),
+                flag(rest, "--to").as_deref(),
+                Utc::now(),
+            )
+            .map_err(|e| anyhow!(e))?;
             let answer = df.ask(question, from, to, |prompt| {
                 format!("[no model configured for ask]\n{prompt}")
             })?;
@@ -1166,23 +1192,3 @@ async fn run_dayflow(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The same range defaulting the other surfaces use — today so far.
-fn parse_cli_range(args: &[String]) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
-    let parse = |s: &str| -> Result<DateTime<Utc>> {
-        Ok(DateTime::parse_from_rfc3339(s)
-            .map_err(|e| anyhow!("bad timestamp '{s}': {e}"))?
-            .with_timezone(&Utc))
-    };
-    let to = match flag(args, "--to") {
-        Some(s) => parse(&s)?,
-        None => Utc::now(),
-    };
-    let from = match flag(args, "--from") {
-        Some(s) => parse(&s)?,
-        None => to.date_naive().and_hms_opt(0, 0, 0).map(|d| d.and_utc()).unwrap_or(to),
-    };
-    if from > to {
-        return Err(anyhow!("range starts after it ends: {from} > {to}"));
-    }
-    Ok((from, to))
-}

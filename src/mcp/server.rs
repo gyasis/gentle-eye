@@ -189,19 +189,38 @@ impl GentleEyeServer {
         }
     }
 
-    fn tool_dayflow_status(&self, _input: DayflowStatusInput) -> CallToolResult {
+    fn tool_dayflow_status(&self, input: DayflowStatusInput) -> CallToolResult {
+        self.tool_dayflow_status_at(input, Utc::now())
+    }
+
+    /// [`Self::tool_dayflow_status`], with the clock supplied.
+    fn tool_dayflow_status_at(
+        &self,
+        _input: DayflowStatusInput,
+        now: chrono::DateTime<Utc>,
+    ) -> CallToolResult {
         // A DEGRADED session is reported as a successful call with the
         // degradation in the payload. Returning an MCP error for "recording but
         // not producing" would make every caller treat a recoverable state as a
         // failed request.
-        match self.dayflow.status(Utc::now()) {
+        match self.dayflow.status(now) {
             Ok(status) => ok_json(status),
             Err(e) => err_text(e.to_string()),
         }
     }
 
     fn tool_get_timeline(&self, input: GetTimelineInput) -> CallToolResult {
-        let (from, to) = match parse_range(input.from.as_deref(), input.to.as_deref()) {
+        self.tool_get_timeline_at(input, Utc::now())
+    }
+
+    /// [`Self::tool_get_timeline`], with the clock supplied.
+    ///
+    /// The seam exists for the same reason `http::route_at` has one: a rule
+    /// that reads the clock itself cannot be driven into the state where it
+    /// matters, so it is undefended by construction. R36 learned that and then
+    /// applied it to one surface out of three.
+    fn tool_get_timeline_at(&self, input: GetTimelineInput, now: chrono::DateTime<Utc>) -> CallToolResult {
+        let (from, to) = match crate::dayflow::service::resolve_range(input.from.as_deref(), input.to.as_deref(), now) {
             Ok(r) => r,
             Err(e) => return err_text(e),
         };
@@ -216,7 +235,12 @@ impl GentleEyeServer {
     }
 
     fn tool_ask_day(&self, input: AskDayInput) -> CallToolResult {
-        let (from, to) = match parse_range(input.from.as_deref(), input.to.as_deref()) {
+        self.tool_ask_day_at(input, Utc::now())
+    }
+
+    /// [`Self::tool_ask_day`], with the clock supplied.
+    fn tool_ask_day_at(&self, input: AskDayInput, now: chrono::DateTime<Utc>) -> CallToolResult {
+        let (from, to) = match crate::dayflow::service::resolve_range(input.from.as_deref(), input.to.as_deref(), now) {
             Ok(r) => r,
             Err(e) => return err_text(e),
         };
@@ -688,7 +712,9 @@ fn tool_catalog() -> Vec<Tool> {
             "ask_day",
             "Answer a question about a time range, grounded STRICTLY on recorded \
              entries. Says so plainly when the range holds no record rather than \
-             inventing one.",
+             inventing one. NOTE: no model is wired yet — a range WITH records \
+             returns the grounding prompt rather than an answer, so only the \
+             refusal path is fully functional today.",
             schema_for::<AskDayInput>(),
         ),
         Tool::new(
@@ -774,34 +800,6 @@ fn parse_args<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ErrorDa
         .map_err(|e| ErrorData::invalid_params(format!("invalid arguments: {e}"), None))
 }
 
-/// Parse an optional RFC-3339 range, defaulting to "today so far".
-///
-/// Shared rather than repeated per surface: a default that differs between the
-/// CLI and MCP means the same question returns different answers depending on
-/// how it was asked, which is the parity failure US6 exists to prevent.
-fn parse_range(
-    from: Option<&str>,
-    to: Option<&str>,
-) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), String> {
-    let parse = |s: &str| {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .map(|d| d.with_timezone(&Utc))
-            .map_err(|e| format!("bad timestamp '{s}': {e}"))
-    };
-    let to = match to {
-        Some(s) => parse(s)?,
-        None => Utc::now(),
-    };
-    let from = match from {
-        Some(s) => parse(s)?,
-        None => to.date_naive().and_hms_opt(0, 0, 0).map(|d| d.and_utc()).unwrap_or(to),
-    };
-    if from > to {
-        return Err(format!("range starts after it ends: {from} > {to}"));
-    }
-    Ok((from, to))
-}
-
 fn ok_json<T: serde::Serialize>(value: T) -> CallToolResult {
     match Content::json(value) {
         Ok(content) => CallToolResult::success(vec![content]),
@@ -840,6 +838,98 @@ fn path_to_string(p: PathBuf) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server whose dayflow engine is in-memory, so the MCP ADAPTERS can be
+    /// driven directly. Without this, nothing tested them: replacing
+    /// `tool_dayflow_status`'s body with a constant survived the entire suite,
+    /// producing exactly the "the CLI says running and the dashboard says
+    /// stopped" contradiction the design claims to prevent.
+    fn test_server() -> GentleEyeServer {
+        let store = Arc::new(crate::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+            std::sync::Mutex::new(crate::storage::database::init_in_memory().unwrap()),
+        )));
+        let config = AppConfig::default();
+        let dayflow = Arc::new(crate::dayflow::service::DayflowService::new(
+            store,
+            config.dayflow.clone(),
+        ));
+        GentleEyeServer {
+            config,
+            recording: Arc::new(crate::capture::service::CaptureService::new(
+                Arc::new(StorageManager::new(std::env::temp_dir()).unwrap()),
+                0,
+            )),
+            vision: Arc::new(crate::analysis::ollama::OllamaProvider::with_url(
+                &VisionConfig {
+                    provider: "ollama".into(),
+                    api_key: None,
+                    model: "stub".into(),
+                    timeout_seconds: 1,
+                    max_video_size_bytes: 0,
+                },
+                "http://127.0.0.1:1".to_string(),
+            )
+            .unwrap()),
+            dayflow,
+        }
+    }
+
+    fn body_of(result: &CallToolResult) -> String {
+        format!("{:?}", result.content)
+    }
+
+    #[test]
+    fn the_mcp_status_tool_reports_the_shared_engine_not_a_constant() {
+        let s = test_server();
+        let before = s.tool_dayflow_status(DayflowStatusInput {});
+        assert!(body_of(&before).contains("false"), "nothing running yet");
+
+        // Start through the SERVICE — the same instance HTTP and the CLI use.
+        s.dayflow
+            .start(crate::dayflow::models::DayflowMode::Session, vec![0], Utc::now())
+            .unwrap();
+
+        let after = s.tool_dayflow_status(DayflowStatusInput {});
+        let text = body_of(&after);
+        assert!(
+            text.contains("\"running\": true") || text.contains("running: true") || text.contains("true"),
+            "the MCP tool must report the shared engine's state: {text}"
+        );
+        assert!(text.contains("session_id"), "including which session: {text}");
+    }
+
+    #[test]
+    fn the_mcp_start_and_stop_tools_drive_the_shared_engine() {
+        let s = test_server();
+        let started = s.tool_start_dayflow(StartDayflowInput::default());
+        assert!(body_of(&started).contains("session_id"), "{:?}", started.content);
+        assert!(
+            s.dayflow.status(Utc::now()).unwrap().running,
+            "the service sees what the MCP tool started"
+        );
+
+        // A second start is refused here too, not silently replacing the first.
+        let again = s.tool_start_dayflow(StartDayflowInput::default());
+        assert_eq!(again.is_error, Some(true), "{:?}", again.content);
+
+        s.tool_stop_dayflow(StopDayflowInput {});
+        assert!(!s.dayflow.status(Utc::now()).unwrap().running, "and stop reaches it too");
+    }
+
+    #[test]
+    fn the_mcp_timeline_tool_defaults_to_today_so_far() {
+        // The default lived in three copies; two of them (MCP, CLI) had no test
+        // at all, and mutating either to produce an EMPTY range survived the
+        // whole suite — every question would have been answered about nothing.
+        let s = test_server();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-26T15:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let out = s.tool_get_timeline_at(GetTimelineInput { from: None, to: None }, now);
+        let text = body_of(&out);
+        assert!(text.contains("2026-08-26T00:00:00"), "starts at midnight: {text}");
+        assert!(text.contains("2026-08-26T15:30:00"), "ends at now: {text}");
+    }
 
     #[test]
     fn catalog_exposes_all_tools() {

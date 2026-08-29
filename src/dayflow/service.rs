@@ -72,6 +72,44 @@ impl DayflowStatus {
     }
 }
 
+/// Resolve an optional RFC-3339 range to "today so far".
+///
+/// **One implementation, called by all three surfaces.** It was written three
+/// times first — once per surface — and R36 claimed that had been avoided while
+/// the duplicates sat in the tree. Two of the three copies were then provably
+/// undefended: mutating the MCP default and the CLI default to produce an EMPTY
+/// range (so every question would be answered about nothing) survived the whole
+/// suite, because only the HTTP copy had a test.
+///
+/// Duplication is how "the same question returns different answers depending on
+/// how you asked it" gets in, and three copies means three chances. There is
+/// one now, and the surfaces call it.
+pub fn resolve_range(
+    from: Option<&str>,
+    to: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), String> {
+    let parse = |s: &str| {
+        DateTime::parse_from_rfc3339(s)
+            .map(|d| d.with_timezone(&Utc))
+            .map_err(|e| format!("bad timestamp '{s}': {e}"))
+    };
+    let to = match to {
+        Some(s) => parse(s)?,
+        None => now,
+    };
+    let from = match from {
+        Some(s) => parse(s)?,
+        // Midnight of the day the range ENDS on, so "today so far" stays one
+        // day even when `to` was supplied explicitly.
+        None => to.date_naive().and_hms_opt(0, 0, 0).map(|d| d.and_utc()).unwrap_or(to),
+    };
+    if from > to {
+        return Err(format!("range starts after it ends: {from} > {to}"));
+    }
+    Ok((from, to))
+}
+
 /// The single Dayflow engine, shared by every surface.
 pub struct DayflowService {
     run: Mutex<Option<DayflowRun>>,
