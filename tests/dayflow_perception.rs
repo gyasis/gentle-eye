@@ -556,6 +556,40 @@ async fn a_sample_whose_regions_all_miss_the_frame_is_still_read() {
     );
 }
 
+#[tokio::test]
+async fn a_failed_crop_is_a_counted_whole_frame_read() {
+    // W5 gate: the Err arm of the crop match read the frame whole WITHOUT
+    // counting it — a degradation invisible to both counters, found because
+    // the mutation deleting the count survived the whole suite. The frame
+    // here is not a decodable image, so `crop_regions` fails at open; the
+    // sidecar's regions are valid and in-frame, so no other arm can absorb it.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = samples(dir.path(), 0, 0, 1); // writes b"png" — not a real PNG
+    std::fs::write(
+        gentle_eye::dayflow::perception::regions_path(&paths[0]),
+        serde_json::to_string(&vec![pane(0, 0, 50, 50, 0)]).unwrap(),
+    )
+    .unwrap();
+
+    let r = rig(1_000);
+    let (_, latency) = gentle_eye::dayflow::perception::summarize_segment_via_ladder(
+        &r.router, &paths, "categorise", 0, 8,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        r.text_calls.load(Ordering::SeqCst),
+        1,
+        "the sample must still be read, whole, rather than dropped"
+    );
+    assert_eq!(r.text_paths.lock().unwrap()[0], paths[0], "and it is the frame itself");
+    assert_eq!(
+        latency.samples_read_whole, 1,
+        "a whole-frame read forced by a failed crop must be counted, not merely survived"
+    );
+}
+
 #[test]
 fn a_region_exactly_touching_the_frame_edge_yields_no_crop() {
     // X-E: `x1 <= x0` versus `x1 < x0` is one character, and no fixture had a
