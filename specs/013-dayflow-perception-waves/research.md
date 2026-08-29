@@ -1542,3 +1542,66 @@ A slice built from two markers in the wrong order produced an **empty** pattern,
 million**. Restored from git. Every scripted edit now goes through a helper that asserts the slice
 is non-empty and that the pattern occurs exactly as many times as expected. Same discipline as the
 mutation harness, applied to editing: **an edit script must prove it edited what it meant to.**
+
+
+## R26 — Wave 6, third pass: the metric was answering the wrong question (2026-08-26)
+
+**PASS WITH NOTES**, and the remaining gap was not a regression but a question I had never asked
+correctly.
+
+### One metric, two questions
+
+R25's `frame_split` answered *"is the CHANGED region a scroll continuation?"*. That is the right
+question for a scroll and the wrong one for everything else. Any small change — typing at the
+bottom of a file, an OCR misread of one line, a clock ticking in a status bar — produces a changed
+region that is **novel by definition**, scores exactly **0.0**, and forks a near-duplicate copy of
+the whole screen. And a mostly-static screen is the **most common state of an all-day capture**, so
+that was the common case, not the pathological one. Measured: five samples of a file being typed
+into produced five blocks; five samples of a static screen with one OCR-flubbed line, likewise.
+
+The fix is two independent kinds of evidence:
+
+| evidence | question | bar |
+|---|---|---|
+| contiguous run over the content | did this SCROLL from what I hold? | `SAME_BLOCK` 0.65 |
+| unchanged fraction of the capture | is almost none of this new? | `STABLE_SCREEN` 0.90 |
+| block's content region empty | does this strictly EXTEND what I hold? | absolute |
+
+**The bars differ because the questions differ**, and that is the part I got wrong twice by
+reaching for a single tuned number. A scroll may legitimately replace most of the screen; an edit
+may not. One bar for both merges two different files whenever chrome happens to be a large share of
+the capture — mutation-proven (E3).
+
+### Window height must not decide document identity
+
+The typing case first failed at `unchanged = 0.889` against a 0.90 bar, and the tempting fix was to
+move the bar. That would have been wrong for a reason worth writing down: **two new lines is 5% of a
+40-line view and 20% of a 10-line one**, so a fraction-of-screen rule makes the same edit "the same
+screen" on one monitor and "a new document" on another. Dayflow is explicitly multi-display with
+heterogeneous geometry (D-display selection), so that is not hypothetical.
+
+The window-independent signal was already in the decomposition and I had not read it: when the
+BLOCK's content region is empty, the capture strictly extends the block — nothing replaced, only
+added. That is a document being written into, at any window size.
+
+### Stating a judgement instead of hiding it
+
+Two of my fixtures failed under the new evidence because they were unrealistic — two content lines
+behind six lines of chrome is not an editor. Rewriting a failing fixture is how a test suite gets
+quietly fitted to its implementation, so both directions are now asserted explicitly: a realistic
+majority-chrome capture with ten differing content lines must SEPARATE, and a capture identical but
+for one line in thirteen must MERGE, with the reasoning in the test. The second is a real
+judgement — merging costs a stray line inside one block, splitting costs a near-duplicate copy of
+the whole screen every interval — and it belongs in the open, not in a threshold.
+
+### The fixture monoculture rotated rather than dissolved
+
+R25 replaced "no chrome" fixtures with "chrome + scroll" ones and I treated that as solved. Every
+pair in the family was still either a *perfect* scroll or *entirely different* content — no
+fixture had "same screen, small change", which is precisely where both remaining bugs lived. The
+blind spot moved rather than closing.
+
+**Fixture families need an axis list, not an example.** For a screen capture the axes are: chrome
+present or not · content scrolled, extended, edited, jittered, or replaced · window small or large.
+Each new fixture should name which cell it occupies, so a gap is visible as an empty cell instead
+of being discovered by the next reviewer.

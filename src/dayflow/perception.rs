@@ -228,6 +228,17 @@ const HISTORY: usize = 5;
 /// whether to fold them together.
 const SAME_BLOCK: f64 = 0.65;
 
+/// At or above this fraction UNCHANGED, a capture is the same screen with an
+/// edit in it — however novel the changed sliver is.
+///
+/// Deliberately much higher than [`SAME_BLOCK`]: this evidence is "almost
+/// nothing moved", and at a third of the screen changed that claim is false.
+/// The judgement it encodes: a capture 90% identical to one already held is
+/// the same screen, and merging it costs a stray line inside one block, where
+/// splitting it costs a near-duplicate copy of the WHOLE screen every interval
+/// — which is the exact waste the aggregator exists to prevent.
+const STABLE_SCREEN: f64 = 0.90;
+
 // T053 specifies "append a block only below 0.95 similarity". That gate is
 // SUBSUMED here rather than implemented: line-level `diff_merge` adds only lines
 // the block does not already have, so a near-identical capture contributes
@@ -304,9 +315,52 @@ pub fn coverage(block: &str, incoming: &str) -> f64 {
     if li.is_empty() {
         return 0.0;
     }
-    let (_, content_b, content_i, _) = frame_split(&lb, &li);
+    let (prefix, content_b, content_i, suffix) = frame_split(&lb, &li);
     if content_i.is_empty() {
-        return 1.0; // the whole capture is frame — the same screen again
+        // Everything in the capture is already held: the same screen, or one
+        // scrolled back to material we have.
+        return 1.0;
+    }
+    if content_b.is_empty() && !lb.is_empty() {
+        // The block has NOTHING between the shared head and tail, so the
+        // capture strictly EXTENDS it — nothing was replaced, only added. That
+        // is a document being written into, or a terminal filling up before it
+        // first scrolls, and it is the same screen no matter how much was
+        // added. Deciding it by "how much changed" instead would make the
+        // answer depend on the window's height: two new lines is 5% of a
+        // 40-line view and 20% of a 10-line one, and the same edit cannot be
+        // the same screen on one monitor and a new document on another.
+        //
+        // `!lb.is_empty()` matters: an EMPTY block also has an empty content
+        // region, but it holds no evidence about anything and must score 0.
+        return 1.0;
+    }
+
+    // TWO kinds of evidence, and the maximum of them.
+    //
+    // The run answers "did this SCROLL from what I have?". On its own that is
+    // the wrong question for every change that is not a scroll: typing at the
+    // bottom of a file, an OCR misread of one line, a cursor or clock ticking
+    // in a status bar. In all of those the changed region is NOVEL by
+    // definition, so a run-only score is exactly 0.0 and each sample forks a
+    // near-duplicate copy of the whole screen — and a mostly-static screen is
+    // the most common state of an all-day capture, so that is the common case,
+    // not the pathological one.
+    //
+    // The unchanged fraction answers the other question: "is most of this
+    // screen already what I have?". A capture whose changed region is a small
+    // slice of the screen is the same screen with an edit in it. One whose
+    // changed region is most of the screen is different material — unless the
+    // run says it scrolled.
+    // The two bars DIFFER, because the two questions differ. A scroll may
+    // replace most of the screen and still be the same document, so the run
+    // bar is SAME_BLOCK. An edit is a small perturbation — if a third of the
+    // screen changed, that is a different screen, not a typo. Using one bar for
+    // both would merge two different files whenever chrome happened to be a
+    // large share of the capture.
+    let unchanged = (prefix + suffix) as f64 / li.len() as f64;
+    if unchanged >= STABLE_SCREEN {
+        return unchanged;
     }
     let (_, len) = longest_common_run(content_b, content_i);
     len as f64 / content_i.len() as f64
@@ -1092,6 +1146,87 @@ mod tests {
     }
 
     #[test]
+    fn a_document_being_written_stays_one_block() {
+        // Append-at-bottom growth: typing into a file, or a terminal filling up
+        // before it first scrolls. The top of the capture never moves, so a
+        // run-only metric classifies ALL prior content as frame, leaving only
+        // the new lines to compare — which match nothing, score 0.0, and fork a
+        // near-duplicate copy of the whole screen every interval.
+        let mut agg = TextAggregator::new();
+        for written in 1..=5 {
+            let body: Vec<String> =
+                (0..8 + written * 2).map(|i| format!("    code line {i}")).collect();
+            agg.absorb(&windowed(&body));
+        }
+        assert_eq!(
+            agg.blocks().len(),
+            1,
+            "a file being typed into is ONE document: {:#?}",
+            agg.blocks()
+        );
+        let doc = &agg.blocks()[0];
+        for i in 0..18 {
+            assert_eq!(
+                doc.lines().filter(|l| l.trim() == format!("code line {i}")).count(),
+                1,
+                "line {i} exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn ocr_jitter_on_a_static_screen_does_not_fork_a_block() {
+        // The most common all-day state at a coarse cadence is a screen that
+        // barely changes, and OCR misreading one line per sample is the
+        // EXPECTED condition on it, not a pathological one. Under a run-only
+        // metric the changed region is exactly the misread line, which matches
+        // nothing — coverage 0.0, five near-duplicate full-screen blocks.
+        let mut agg = TextAggregator::new();
+        for sample in 0..5 {
+            let body: Vec<String> = (0..20)
+                .map(|i| {
+                    if i == 9 {
+                        // the flubbed line differs every sample
+                        format!("    the qu1ck br0wn f0x {sample}")
+                    } else {
+                        format!("    stable line {i}")
+                    }
+                })
+                .collect();
+            agg.absorb(&windowed(&body));
+        }
+        assert_eq!(
+            agg.blocks().len(),
+            1,
+            "OCR jitter must not fork the screen: {:#?}",
+            agg.blocks()
+        );
+        // Fail-open: every variant is KEPT rather than any being dropped, since
+        // we cannot know which reading was correct.
+        let doc = &agg.blocks()[0];
+        assert_eq!(
+            doc.lines().filter(|l| l.contains("qu1ck")).count(),
+            5,
+            "every reading is kept — dropping one would discard the only record"
+        );
+    }
+
+    #[test]
+    fn a_status_bar_ticking_does_not_fork_a_block() {
+        // The smallest possible change, in the frame itself: a clock or a
+        // cursor position updating while nothing else moves.
+        let mut agg = TextAggregator::new();
+        let body: Vec<String> = (0..15).map(|i| format!("    line {i}")).collect();
+        for minute in 0..5 {
+            let mut v = vec!["File  Edit  View".to_string()];
+            v.extend(body.iter().cloned());
+            v.push(format!("Ln 1, Col 1    14:0{minute}"));
+            agg.absorb(&v.join("\n"));
+        }
+        assert_eq!(agg.blocks().len(), 1, "a ticking clock is not a new document");
+    }
+
+    #[test]
     fn two_documents_behind_the_same_window_do_not_merge() {
         // The opposite error. Chrome is identical between ANY two screens of one
         // app, so only the content may decide.
@@ -1110,10 +1245,40 @@ mod tests {
 
     #[test]
     fn a_wide_sidebar_cannot_carry_two_unrelated_screens_together() {
-        // The stress version: chrome is the MAJORITY of the capture, which is
-        // what a file tree or terminal scrollback actually looks like. This is
-        // also the case that defeats the "chrome is scattered" argument — a
-        // sidebar is perfectly contiguous.
+        // Chrome is the MAJORITY of the capture — what a file tree or terminal
+        // scrollback actually looks like — and it is perfectly contiguous, so
+        // "chrome is scattered" is no defence. The content still decides.
+        let tree: Vec<String> = (0..12).map(|i| format!("  file_{i}.rs")).collect();
+        let mk = |body: &[&str]| {
+            let mut v = tree.clone();
+            v.extend(body.iter().map(|s| s.to_string()));
+            v.join("\n")
+        };
+        let alpha: Vec<&str> = vec![
+            "fn alpha() {", "    let a = 1;", "    let b = 2;", "    step_one();",
+            "    step_two();", "    step_three();", "    finish();", "    done();",
+            "    return a + b;", "}",
+        ];
+        let beta: Vec<&str> = vec![
+            "struct Beta {", "    field_x: u32,", "    field_y: String,", "}",
+            "impl Beta {", "    fn render(&self) {", "        draw();", "        flush();",
+            "    }", "}",
+        ];
+        let score = coverage(&mk(&alpha), &mk(&beta));
+        assert!(
+            score < SAME_BLOCK,
+            "12 lines of identical sidebar must not carry 10 lines of different content: {score}"
+        );
+    }
+
+    #[test]
+    fn a_screen_that_is_almost_entirely_identical_is_the_same_screen() {
+        // The boundary of the judgement above, asserted rather than left
+        // implicit. At ONE line differing out of thirteen, this deliberately
+        // merges: splitting would store a near-duplicate copy of the whole
+        // screen every interval, which is precisely the waste the aggregator
+        // exists to prevent, and the cost of merging is one stray line inside
+        // an otherwise correct block.
         let tree: Vec<String> = (0..12).map(|i| format!("  file_{i}.rs")).collect();
         let mk = |body: &str| {
             let mut v = tree.clone();
@@ -1122,8 +1287,8 @@ mod tests {
         };
         let score = coverage(&mk("fn alpha() {}"), &mk("fn beta() {}"));
         assert!(
-            score < SAME_BLOCK,
-            "12 lines of identical sidebar must not carry 1 line of different content: {score}"
+            score >= STABLE_SCREEN,
+            "12 of 13 lines identical is the same screen, not a new document: {score}"
         );
     }
 
