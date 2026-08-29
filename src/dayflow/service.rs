@@ -148,7 +148,12 @@ impl DayflowService {
     pub fn stop(&self, now: DateTime<Utc>) -> Result<Vec<crate::dayflow::window::ClosedWindow>, DayflowError> {
         let mut guard = self.lock()?;
         let mut run = guard.take().ok_or(DayflowError::NoActiveSession)?;
-        Ok(run.stop(now))
+        let closed = run.stop(now);
+        // The final durable record of the session's pauses — `stop` just closed
+        // any open one, and the run is about to be dropped. Best-effort like
+        // the mid-run flush: the closed windows still belong to the caller.
+        Self::persist_pauses(self.store.as_ref(), &run);
+        Ok(closed)
     }
 
     /// The current status, from whichever surface asks.
@@ -166,13 +171,20 @@ impl DayflowService {
         })
     }
 
-    /// Timeline entries overlapping `[from, to)`.
+    /// Timeline entries overlapping `[from, to)`, WITH the recorded gaps in it.
+    ///
+    /// One return type on purpose (T023): handing a surface the entries alone
+    /// lets it render a paused hour as missing data, so the entries and the
+    /// gaps travel together and every surface serialises both.
     pub fn timeline(
         &self,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
-    ) -> Result<Vec<TimelineEntry>, DayflowError> {
-        Ok(self.store.query_range(from, to)?)
+    ) -> Result<crate::dayflow::timeline::TimelineSlice, DayflowError> {
+        Ok(crate::dayflow::timeline::TimelineSlice {
+            entries: self.store.query_range(from, to)?,
+            gaps: self.store.query_gaps(from, to)?,
+        })
     }
 
     /// The day, categorised (US7).
@@ -185,7 +197,7 @@ impl DayflowService {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<crate::dayflow::standup::Standup, DayflowError> {
-        let entries = self.timeline(from, to)?;
+        let entries = self.timeline(from, to)?.entries;
         Ok(crate::dayflow::standup::digest(&entries, from, to))
     }
 
@@ -222,7 +234,31 @@ impl DayflowService {
     pub fn with_run<T>(&self, f: impl FnOnce(&mut DayflowRun) -> T) -> Result<T, DayflowError> {
         let mut guard = self.lock()?;
         let run = guard.as_mut().ok_or(DayflowError::NoActiveSession)?;
-        Ok(f(run))
+        let out = f(run);
+        // Pause transitions happen inside `f` (tick_idle, turn_off/on), and the
+        // engine is deliberately storage-free — so THIS seam is where they
+        // become durable. Upsert-keyed on (session, start), so re-recording an
+        // unchanged pause is idempotent, and an open pause is on disk the
+        // moment it opens: a crash mid-pause leaves a recorded fact, not an
+        // unexplained silence — the distinction the table exists for.
+        Self::persist_pauses(self.store.as_ref(), run);
+        Ok(out)
+    }
+
+    /// Best-effort durable record of a run's pauses.
+    ///
+    /// Best-effort BY DESIGN: `f`'s result (or `stop`'s closed windows) still
+    /// belong to the caller, and failing capture because a bookkeeping write
+    /// failed would trade a recoverable gap-in-the-gaps for a dead recorder.
+    /// The failure is loud in the log, not silent.
+    fn persist_pauses(store: &(dyn TimelineStore + Send + Sync), run: &DayflowRun) {
+        let sid = run.session_id();
+        for pause in run.pauses_seen() {
+            if let Err(e) = store.record_pause(sid, pause) {
+                tracing::warn!(error = %e, session = %sid,
+                    "could not persist a pause interval; the gap will read as missing data");
+            }
+        }
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Option<DayflowRun>>, DayflowError> {
@@ -352,11 +388,11 @@ mod tests {
         s.store.insert_entry(&e).unwrap();
 
         let without_session = s.timeline(at(0), at(1_000)).unwrap();
-        assert_eq!(without_session.len(), 1);
+        assert_eq!(without_session.entries.len(), 1);
 
         s.start(DayflowMode::Session, vec![0], at(2_000)).unwrap();
         let with_session = s.timeline(at(0), at(1_000)).unwrap();
-        assert_eq!(with_session.len(), 1, "and the answer does not change");
+        assert_eq!(with_session.entries.len(), 1, "and the answer does not change");
     }
 
     #[test]

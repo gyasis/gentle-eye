@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::contracts::errors::StorageError;
 use crate::dayflow::models::{ActivityCategory, TimelineEntry};
+use crate::dayflow::window::{PauseCause, PauseInterval};
 
 /// Persist + query the activity timeline.
 pub trait TimelineStore {
@@ -32,6 +33,55 @@ pub trait TimelineStore {
     ) -> Result<Vec<TimelineEntry>, StorageError>;
     /// Total number of entries.
     fn count(&self) -> Result<usize, StorageError>;
+
+    /// Record (or update) one pause interval for a session.
+    ///
+    /// Upserts on `(session_id, from)`: a pause is recorded when it OPENS —
+    /// with no end — and again when it closes, so a crash mid-pause leaves a
+    /// durable open interval rather than nothing. That is the point of the
+    /// table: without it, an idle pause and a dead recorder look identical.
+    fn record_pause(&self, session_id: Uuid, pause: &PauseInterval) -> Result<(), StorageError>;
+
+    /// Pause intervals OVERLAPPING `[from, to)`, ordered ascending.
+    ///
+    /// Overlap on the same reasoning as [`TimelineStore::query_range`], with
+    /// one addition: a pause with no recorded end is still open, so it
+    /// overlaps everything after its start.
+    fn query_gaps(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<Gap>, StorageError>;
+}
+
+/// A recorded gap in capture: a pause interval with its cause (T023).
+///
+/// Returned ALONGSIDE entries, never inferred from their absence: an interval
+/// with no entries and no gap is unexplained (a crash, a backend outage), while
+/// a gap reads as a recorded fact. `to` is `None` while the pause is still
+/// open. The cause is carried because a deliberate pause and a degraded
+/// recorder are different facts (FR-032): a pause is quiet on purpose.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Gap {
+    /// The session the pause belongs to.
+    pub session_id: Uuid,
+    /// When capture stopped.
+    pub from: DateTime<Utc>,
+    /// When it resumed — `None` while still paused.
+    pub to: Option<DateTime<Utc>>,
+    /// Why it stopped.
+    pub cause: PauseCause,
+}
+
+/// One timeline read: the entries overlapping a range AND the recorded gaps in
+/// it. A single type on purpose — a surface cannot take the entries and forget
+/// the gaps, which is how "no data" and "paused on purpose" get conflated.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TimelineSlice {
+    /// Entries overlapping the range, ordered by start time.
+    pub entries: Vec<TimelineEntry>,
+    /// Recorded pause intervals overlapping the range, ordered by start time.
+    pub gaps: Vec<Gap>,
 }
 
 /// SQLite timeline store over a shared connection (shares the `StorageManager`'s
@@ -62,6 +112,21 @@ fn category_to_db(c: &ActivityCategory) -> String {
 
 fn category_from_db(s: &str) -> ActivityCategory {
     serde_json::from_str(&format!("\"{s}\"")).unwrap_or(ActivityCategory::Other)
+}
+
+fn cause_to_db(c: &PauseCause) -> String {
+    serde_json::to_string(c)
+        .unwrap_or_else(|_| "\"user_off\"".to_string())
+        .trim_matches('"')
+        .to_string()
+}
+
+fn cause_from_db(s: &str) -> Result<PauseCause, StorageError> {
+    // Unlike a category, an unknown cause does NOT get a default: `Other`
+    // exists in the category taxonomy, but inventing a pause cause would
+    // assert a reason the recorder never gave.
+    serde_json::from_str(&format!("\"{s}\""))
+        .map_err(|e| StorageError::DatabaseError(format!("bad pause cause '{s}': {e}")))
 }
 
 fn db(e: impl std::fmt::Display) -> StorageError {
@@ -209,6 +274,69 @@ impl TimelineStore for SqliteTimelineStore {
             .map_err(db)?;
         Ok(n as usize)
     }
+
+    fn record_pause(&self, session_id: Uuid, pause: &PauseInterval) -> Result<(), StorageError> {
+        let conn = self.lock()?;
+        // The id is DERIVED from (session, start) so re-recording the same
+        // pause when it closes UPDATES the open row instead of duplicating it.
+        let id = format!("{session_id}:{}", pause.from.to_rfc3339());
+        conn.execute(
+            "INSERT OR REPLACE INTO dayflow_pauses (id, session_id, from_ts, to_ts, cause) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                id,
+                session_id.to_string(),
+                pause.from.to_rfc3339(),
+                pause.to.map(|t| t.to_rfc3339()),
+                cause_to_db(&pause.cause),
+            ],
+        )
+        .map_err(db)?;
+        Ok(())
+    }
+
+    fn query_gaps(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<Gap>, StorageError> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                // An open pause (`to_ts IS NULL`) overlaps everything after its
+                // start: it has not ended, so no range end can exclude it.
+                "SELECT session_id, from_ts, to_ts, cause FROM dayflow_pauses \
+                 WHERE (to_ts IS NULL OR to_ts > ?1) AND from_ts < ?2 \
+                 ORDER BY from_ts ASC",
+            )
+            .map_err(db)?;
+        let raw: Vec<(String, String, Option<String>, String)> = stmt
+            .query_map(params![from.to_rfc3339(), to.to_rfc3339()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(db)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db)?;
+        drop(stmt);
+        drop(conn);
+
+        let parse_ts = |s: &str| -> Result<DateTime<Utc>, StorageError> {
+            DateTime::parse_from_rfc3339(s)
+                .map(|d| d.with_timezone(&Utc))
+                .map_err(|e| StorageError::DatabaseError(format!("bad timestamp '{s}': {e}")))
+        };
+        let mut out = Vec::with_capacity(raw.len());
+        for (sid, f, t, cause) in raw {
+            out.push(Gap {
+                session_id: Uuid::parse_str(&sid)
+                    .map_err(|e| db(format!("bad session_id '{sid}': {e}")))?,
+                from: parse_ts(&f)?,
+                to: t.as_deref().map(parse_ts).transpose()?,
+                cause: cause_from_db(&cause)?,
+            });
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +409,51 @@ mod tests {
             .unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].activity, "b");
+    }
+
+    #[test]
+    fn a_recorded_pause_comes_back_as_a_gap_with_its_cause() {
+        let s = store();
+        let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let sid = Uuid::new_v4();
+
+        // Recorded when it OPENS: no end yet.
+        let mut pause = crate::dayflow::window::PauseInterval {
+            from: base + chrono::Duration::minutes(10),
+            to: None,
+            cause: crate::dayflow::window::PauseCause::Idle,
+        };
+        s.record_pause(sid, &pause).unwrap();
+
+        // An OPEN pause overlaps everything after its start — no range end can
+        // exclude an interval that has not ended.
+        let gaps = s
+            .query_gaps(base + chrono::Duration::hours(5), base + chrono::Duration::hours(6))
+            .unwrap();
+        assert_eq!(gaps.len(), 1, "an open pause is visible far past its start");
+        assert_eq!(gaps[0].cause, crate::dayflow::window::PauseCause::Idle);
+        assert_eq!(gaps[0].to, None, "still open");
+        assert_eq!(gaps[0].session_id, sid);
+
+        // Re-recorded when it CLOSES: the same row updates, no duplicate.
+        pause.to = Some(base + chrono::Duration::minutes(20));
+        s.record_pause(sid, &pause).unwrap();
+        let gaps = s.query_gaps(base, base + chrono::Duration::hours(1)).unwrap();
+        assert_eq!(gaps.len(), 1, "closing a pause updates it, never duplicates it");
+        assert_eq!(gaps[0].to, Some(base + chrono::Duration::minutes(20)));
+
+        // Once closed, it stops overlapping ranges after its end…
+        assert!(
+            s.query_gaps(base + chrono::Duration::minutes(20), base + chrono::Duration::hours(1))
+                .unwrap()
+                .is_empty(),
+            "a closed pause that merely abuts the range start is out"
+        );
+        // …and ranges entirely before its start never saw it.
+        assert!(s
+            .query_gaps(base, base + chrono::Duration::minutes(10))
+            .unwrap()
+            .is_empty());
     }
 }
 

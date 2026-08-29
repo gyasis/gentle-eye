@@ -1171,10 +1171,12 @@ fn dayflow_command(
         }
         "timeline" => {
             let (from, to) = range(rest)?;
+            let slice = df.timeline(from, to)?;
             serde_json::json!({
                 "from": from.to_rfc3339(),
                 "to": to.to_rfc3339(),
-                "entries": df.timeline(from, to)?,
+                "entries": slice.entries,
+                "gaps": slice.gaps,
             })
         }
         "ask" => {
@@ -1291,6 +1293,19 @@ mod dayflow_cli_tests {
         let entries = out["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "{out}");
         assert_eq!(entries[0]["summary"], "the surfaces");
+        // And the gaps ride alongside (T023) — asserted with a REAL recorded
+        // pause, not just key-presence, so dropping the join fails here.
+        s.start(gentle_eye::dayflow::models::DayflowMode::Session, vec![0], base).unwrap();
+        s.with_run(|r| r.turn_off(base + chrono::Duration::minutes(1))).unwrap();
+        let out = dayflow_command(
+            &s,
+            &argv(&["timeline", "--to", "2026-08-26T17:00:00Z"]),
+            base,
+        )
+        .unwrap();
+        let gaps = out["gaps"].as_array().expect("the CLI returns gaps");
+        assert_eq!(gaps.len(), 1, "{out}");
+        assert_eq!(gaps[0]["cause"], "user_off");
     }
 
     #[test]

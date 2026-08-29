@@ -225,10 +225,11 @@ impl GentleEyeServer {
             Err(e) => return err_text(e),
         };
         match self.dayflow.timeline(from, to) {
-            Ok(entries) => ok_json(serde_json::json!({
+            Ok(slice) => ok_json(serde_json::json!({
                 "from": from.to_rfc3339(),
                 "to": to.to_rfc3339(),
-                "entries": entries,
+                "entries": slice.entries,
+                "gaps": slice.gaps,
             })),
             Err(e) => err_text(e.to_string()),
         }
@@ -929,6 +930,32 @@ mod tests {
         let text = body_of(&out);
         assert!(text.contains("2026-08-26T00:00:00"), "starts at midnight: {text}");
         assert!(text.contains("2026-08-26T15:30:00"), "ends at now: {text}");
+    }
+
+    #[test]
+    fn the_mcp_timeline_tool_returns_gaps_alongside_entries() {
+        // T023 on the MCP surface, with a REAL recorded pause: key-presence
+        // alone would survive a surface that serialises an always-empty array.
+        let s = test_server();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-26T15:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        s.dayflow
+            .start(crate::dayflow::models::DayflowMode::Session, vec![0], now)
+            .unwrap();
+        s.dayflow
+            .with_run(|r| r.turn_off(now + chrono::Duration::minutes(1)))
+            .unwrap();
+        let out = s.tool_get_timeline_at(
+            GetTimelineInput { from: None, to: Some("2026-08-26T17:00:00Z".into()) },
+            now,
+        );
+        // `body_of` is a Debug render of the content, not raw JSON — assert on
+        // the serialized fact itself: the cause token can only appear if the
+        // recorded gap actually reached the tool's output.
+        let text = body_of(&out);
+        assert!(text.contains("gaps"), "the MCP surface returns gaps: {text}");
+        assert!(text.contains("user_off"), "with the recorded cause: {text}");
     }
 
     #[test]

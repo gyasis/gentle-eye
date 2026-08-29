@@ -136,12 +136,13 @@ pub fn route_at(
         ) {
             Err(e) => ("400 Bad Request", json_err(&e)),
             Ok((from, to)) => match service.timeline(from, to) {
-                Ok(entries) => (
+                Ok(slice) => (
                     "200 OK",
                     serde_json::json!({
                         "from": from.to_rfc3339(),
                         "to": to.to_rfc3339(),
-                        "entries": entries,
+                        "entries": slice.entries,
+                        "gaps": slice.gaps,
                     })
                     .to_string(),
                 ),

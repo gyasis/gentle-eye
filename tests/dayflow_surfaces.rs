@@ -117,8 +117,53 @@ fn the_timeline_reads_the_same_through_every_surface() {
     assert_eq!(http_entries["entries"].as_array().unwrap().len(), 1);
 
     let direct = svc.timeline(base, base + chrono::Duration::hours(1)).unwrap();
-    assert_eq!(direct.len(), 1, "the same answer through the service call");
-    assert_eq!(direct[0].summary, "the perception ladder");
+    assert_eq!(direct.entries.len(), 1, "the same answer through the service call");
+    assert_eq!(direct.entries[0].summary, "the perception ladder");
+}
+
+#[test]
+fn a_pause_is_a_recorded_fact_on_every_surface_not_missing_data() {
+    // T023's contract: a range spanning a pause returns the entries PLUS the
+    // gap with its cause. Driven through the real seams — the pause happens
+    // inside with_run (where the capture loop makes them happen), becomes
+    // durable there, and is read back through both the service call and the
+    // HTTP surface. A pause is quiet on purpose; only its ABSENCE from the
+    // query output would make it read as a fault.
+    let svc = service();
+    let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    svc.start(DayflowMode::Session, vec![0], t0).unwrap();
+
+    // The user switches capture off one minute in. The pause OPENS here, and
+    // must be durable from this moment — not only after stop. A crash while
+    // paused otherwise leaves an unexplained silence, which is exactly the
+    // distinction the pause table exists to preserve.
+    svc.with_run(|r| r.turn_off(t0 + chrono::Duration::minutes(1))).unwrap();
+
+    let open_slice = svc.timeline(t0, t0 + chrono::Duration::hours(1)).unwrap();
+    assert_eq!(open_slice.gaps.len(), 1, "the gap is visible while the session still runs");
+    assert_eq!(
+        open_slice.gaps[0].cause,
+        gentle_eye::dayflow::window::PauseCause::UserOff,
+        "with its cause — a deliberate off is not a degraded recorder"
+    );
+    assert_eq!(open_slice.gaps[0].to, None, "and honestly still open");
+
+    // Stopping closes the pause; the durable record follows.
+    svc.stop(t0 + chrono::Duration::minutes(5)).unwrap();
+    let closed_slice = svc.timeline(t0, t0 + chrono::Duration::hours(1)).unwrap();
+    assert_eq!(closed_slice.gaps.len(), 1, "closed, not duplicated");
+    assert_eq!(closed_slice.gaps[0].to, Some(t0 + chrono::Duration::minutes(5)));
+
+    // And the HTTP surface serialises the same fact.
+    let from = t0.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let to = (t0 + chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (code, body) =
+        http::route("GET", "/dayflow/timeline", &format!("from={from}&to={to}"), &svc);
+    assert_eq!(code, "200 OK", "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let gaps = v["gaps"].as_array().expect("the HTTP surface returns gaps");
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0]["cause"], "user_off");
 }
 
 #[test]
