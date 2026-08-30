@@ -381,3 +381,67 @@ clip-to-intersection with `None` when nothing overlaps, shared in
 `Available` while its inner source was Occluded (now passes every
 non-Available inner state through); and the T014 session-gap arm (see the
 amended T014 DONE line).
+
+## D014-14 — A source kind can be UNSUPPORTED on this OS, and that is not "occluded"
+
+**Decision.** `WindowLocator` gains a fourth answer, `Unsupported`, distinct from
+`Minimised` and `Gone`. A source that cannot work on this operating system says
+so ONCE and fails loudly; it is never retried.
+
+**Why.** Measured on this tree: `x11rb` is an **unconditional** dependency and
+`regions/providers/wm.rs` carries **no `cfg` gate**, so it compiles on macOS
+(x11rb is pure Rust) and fails at connect time. `WmLocator` maps that Err to
+`Minimised` — correct for a transient X error, wrong for a platform that has no
+X11 at all. Consequence today on macOS:
+
+> `--window` starts, `x11rb::connect` fails, the source reports `Occluded`, and
+> the loop retries it every tick until midnight, capturing nothing, while
+> `status` says the window is *minimised*. That is a lie: the truth is there is
+> no window manager of that kind here.
+
+Compare `IdleDetector`, which is `#[cfg(target_os = "linux")]` and documented as
+degrading. The difference is that idle degradation is *stated* and this one is
+*disguised*.
+
+**The seam is already right.** `WindowLocator` is a trait precisely so a
+CoreGraphics (`CGWindowListCopyWindowInfo`) or Wayland implementation drops in
+without touching `WindowSource` or the loop — D014-1 on the platform axis. What
+is missing is only the honest fourth state.
+
+**Applies to:** `WmLocator` (X11), and any future locator. `InputSource` is
+already portable (ffmpeg), and `DisplaySource` rides scrap's own per-OS backends.
+
+## D014-15 — ONE HTTP daemon; the CLI and MCP are CLIENTS of it
+
+**Decision.** Dayflow's cross-process story (T022/T023) is a single HTTP server
+that owns the session. The CLI and the MCP tool become thin clients of that
+server rather than two parallel implementations over their own in-process
+service.
+
+**Why.** Three reasons, in the order they matter:
+
+1. **It is the actual bug.** Today every CLI invocation builds its OWN in-memory
+   `DayflowService`, so `dayflow start` in one process and `dayflow status` in
+   the next are different sessions talking to nobody. That is T022's whole
+   subject.
+2. **MCP install overhead.** An MCP tool has to be registered per session/host;
+   a CLI does not. If both are clients of one server, the zero-install path
+   (CLI) and the agent path (MCP) share one implementation and one running
+   session — no capability exists on one surface only.
+3. **Platform reach (D014-14).** The DAEMON must be native on the machine being
+   captured — capture handles are thread-affine and OS-specific. A *client* need
+   not be. Splitting them means a thin client can drive a capture daemon running
+   on another box, which a single fat binary cannot.
+
+**Already half-built:** `http::bind` and `http::serve` exist in
+`src/dayflow/http.rs`. What is missing is a command that launches them — there
+is no `gentle-eye dayflow serve` — and the client mode for CLI/MCP.
+
+**Parity gap to close in the same wave:** `standup` exists on the CLI and has NO
+MCP tool. Under this decision, surface parity is structural rather than
+remembered: both call the same server.
+
+**Consequence for T022's persisted state:** it must persist the RESOLVED
+`SourceSpec` (the W7 gate's single-enumeration invariant), not the spec as
+typed — a spec re-resolved on restart can name different displays than the
+session's own ordinals.
