@@ -311,7 +311,7 @@ staleness threshold and the halt is immediately visible in `capture_running`.)
 ## D014-12 — The governed lane drops connections on a cold model load (measured)
 
 **Measured 2026-08-29**, live, against the Atelier governor
-(`192.168.0.159:8799/llm/ollama`) with three real displays:
+(`$GE_DAYFLOW_ENDPOINT`, the governed ollama lane) with three real displays:
 
 | run | models | result |
 |---|---|---|

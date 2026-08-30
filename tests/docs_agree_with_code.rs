@@ -141,3 +141,47 @@ fn the_single_vision_seam_the_guide_describes_still_exists() {
         "dayflow perception no longer goes through VisionProvider"
     );
 }
+
+/// No tracked document may contain a private host address.
+///
+/// This repository is PUBLIC. The config default is already guarded
+/// (`config::tests::perception_endpoint_leaks_no_private_host`), but that guard
+/// can only see the config value — and the leak that actually happened was a
+/// real governor address written into a research note while recording a
+/// measurement. Prose is where infra leaks, because nobody is looking there.
+///
+/// Endpoints belong in the environment. A document that needs to name one names
+/// the VARIABLE.
+#[test]
+fn no_tracked_document_names_a_private_host() {
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "*.md"])
+        .output()
+        .expect("git ls-files");
+    let files = String::from_utf8_lossy(&out.stdout);
+
+    // `10.` and `172.16.` are omitted deliberately: they collide constantly with
+    // ordinary prose ("10. the next step", version numbers). The 192.168 block
+    // and `.local` mDNS names are what actually leak here, and a guard that
+    // cries wolf is a guard that gets deleted.
+    let mut leaks = Vec::new();
+    for f in files.lines() {
+        let Ok(body) = std::fs::read_to_string(f) else { continue };
+        for (n, line) in body.lines().enumerate() {
+            // A generic RFC1918 EXAMPLE is fine; a real host is not. The
+            // distinction that matters is whether it is presented as an address
+            // to use, so any 192.168.x.y outside an obvious example is flagged.
+            if line.contains("192.168.") && !line.contains("192.168.1.100") {
+                leaks.push(format!("{f}:{}: {}", n + 1, line.trim()));
+            }
+            if line.contains("gyasis-Mac-Studio") || line.contains("localhost:3939") {
+                leaks.push(format!("{f}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        leaks.is_empty(),
+        "these tracked documents name a private host, and this repo is public:\n{}",
+        leaks.join("\n")
+    );
+}
