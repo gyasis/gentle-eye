@@ -1475,6 +1475,79 @@ mod dayflow_cli_tests {
             .with_timezone(&Utc)
     }
 
+    /// The attached CLI path, end to end against a REALLY-served daemon: every
+    /// route `dayflow_remote` names must exist on the server (a 404 makes the
+    /// attached path silently worse than the local one), the default range's
+    /// `+00:00` offset must survive the client's own percent-encoding (a raw
+    /// `+` decodes to a space server-side and fails to parse), and the
+    /// mutating verbs must go through the daemon so the state file tracks them.
+    #[test]
+    fn dayflow_remote_speaks_routes_the_daemon_actually_serves() {
+        use gentle_eye::dayflow::client::DaemonClient;
+        use gentle_eye::dayflow::daemon::Daemon;
+        use gentle_eye::dayflow::http;
+        use gentle_eye::dayflow::source::SourceSpec;
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc();
+        let daemon = Arc::new(Daemon::new(dir.path().join("daemon.json"), Arc::clone(&s)));
+        daemon
+            .start_or_resume(
+                gentle_eye::dayflow::models::DayflowMode::Daemon,
+                SourceSpec::Window { label: "w".into() },
+                Utc::now(),
+            )
+            .unwrap();
+        let listener = http::bind(0).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = Arc::clone(&daemon);
+        std::thread::spawn(move || http::serve_daemon(listener, served));
+        let client = DaemonClient::new(port);
+
+        // No args defaults to status: `&args[args.len().min(1)..]` must be
+        // empty-safe.
+        let body = dayflow_remote(&client, &[]).expect("status with no args");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["running"], true);
+
+        for sub in ["status", "timeline", "standup"] {
+            let body = dayflow_remote(&client, &argv(&[sub]))
+                .unwrap_or_else(|e| panic!("route for '{sub}' failed: {e}"));
+            serde_json::from_str::<serde_json::Value>(&body)
+                .unwrap_or_else(|e| panic!("'{sub}' returned non-JSON: {e}"));
+        }
+        let body = dayflow_remote(&client, &argv(&["ask", "--question", "what happened?"]))
+            .expect("ask with a question reaches /dayflow/ask");
+        serde_json::from_str::<serde_json::Value>(&body).expect("ask returns JSON");
+        assert!(
+            dayflow_remote(&client, &argv(&["ask"])).is_err(),
+            "ask without --question must be refused before the wire"
+        );
+        assert!(
+            dayflow_remote(&client, &argv(&["frobnicate"])).is_err(),
+            "unknown subcommands are refused, not silently mapped"
+        );
+
+        // stop goes through the DAEMON: the state file must clear, or the next
+        // serve resumes a session the user deliberately stopped.
+        dayflow_remote(&client, &argv(&["stop"])).expect("stop over the wire");
+        assert!(daemon.store().load().unwrap().is_none(), "stop must clear the state file");
+
+        // start goes through the daemon too, and a label with a SPACE must
+        // survive the client's encoding (unencoded, the request line truncates
+        // at the space and the daemon records the wrong subject).
+        let body =
+            dayflow_remote(&client, &argv(&["start", "--window", "my term"])).expect("start");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["session_id"].is_string(), "start reports the session: {v}");
+        let persisted = daemon.store().load().unwrap().expect("an HTTP start persists state");
+        assert_eq!(
+            persisted.spec,
+            Some(SourceSpec::Window { label: "my term".into() }),
+            "the space must survive percent-encoding end to end"
+        );
+    }
+
     #[test]
     fn the_cli_passes_from_and_to_in_the_right_order() {
         // Nothing executed this code, and it showed: swapping --from and --to
