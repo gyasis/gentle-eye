@@ -589,6 +589,14 @@ mod tests {
 pub struct StartDayflowInput {
     /// Displays to capture. Empty means every display.
     pub displays: Option<Vec<u32>>,
+    /// Capture ONE named window instead of whole displays, matched on its
+    /// title or class.
+    pub window: Option<String>,
+    /// Capture one persisted named target (a saved region of interest).
+    pub target: Option<String>,
+    /// Capture an INPUT — a stream or capture-device URL. Content that may
+    /// never have been rendered on this machine's screen.
+    pub input: Option<String>,
     /// `session` (explicit start/stop, the default) or `daemon` (rolls all day).
     pub mode: Option<String>,
 }

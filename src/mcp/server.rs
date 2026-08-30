@@ -168,9 +168,18 @@ impl GentleEyeServer {
             Some("daemon") => crate::dayflow::models::DayflowMode::Daemon,
             Some(other) => return err_text(format!("unknown mode '{other}': use session or daemon")),
         };
-        // Empty means every display; the engine validates the rest.
-        let displays = input.displays.unwrap_or_else(|| vec![0]);
-        match self.dayflow.start(mode, displays, Utc::now()) {
+        // The SAME parse the CLI and HTTP use: three surfaces cannot drift
+        // when there is one type to drift from (FR-115).
+        let spec = match crate::dayflow::source::SourceSpec::parse(
+            input.displays,
+            input.window,
+            input.target,
+            input.input,
+        ) {
+            Ok(s) => s,
+            Err(e) => return err_text(e),
+        };
+        match self.dayflow.start_session(mode, spec, Utc::now()) {
             Ok(id) => ok_json(serde_json::json!({
                 "session_id": id.to_string(),
                 "message": "Dayflow started",

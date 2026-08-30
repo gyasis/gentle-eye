@@ -1147,14 +1147,22 @@ fn dayflow_command(
                 Some(other) => return Err(anyhow!("unknown mode '{other}': use session or daemon")),
             };
             let displays = match flag(rest, "--displays") {
-                Some(list) => list
-                    .split(',')
-                    .map(|s| s.trim().parse::<u32>())
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| anyhow!("bad --displays: {e}"))?,
-                None => vec![0],
+                Some(list) => Some(
+                    list.split(',')
+                        .map(|s| s.trim().parse::<u32>())
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| anyhow!("bad --displays: {e}"))?,
+                ),
+                None => None,
             };
-            serde_json::json!({ "session_id": df.start(mode, displays, now)?.to_string() })
+            let spec = gentle_eye::dayflow::source::SourceSpec::parse(
+                displays,
+                flag(rest, "--window").map(str::to_string),
+                flag(rest, "--target").map(str::to_string),
+                flag(rest, "--input").map(str::to_string),
+            )
+            .map_err(|e| anyhow!(e))?;
+            serde_json::json!({ "session_id": df.start_session(mode, spec, now)?.to_string() })
         }
         "stop" => serde_json::json!({ "windows_closed": df.stop(now)?.len() }),
         "status" => serde_json::to_value(df.status(now)?)?,

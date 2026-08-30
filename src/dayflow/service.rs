@@ -162,7 +162,12 @@ pub struct SourceStatus {
     /// ending under it) this is the last observed value, not a current claim.
     /// `liveness` is the staleness authority for that window: silence past the
     /// threshold reports the session Degraded whatever this field says.
-    pub availability: crate::dayflow::source::Availability,
+    ///
+    /// `None` means NO capture tick has reported yet — the session named this
+    /// source but nothing has read from it. A distinct state on purpose:
+    /// reporting `Available` there would claim a source is producing on the
+    /// strength of the user having asked for it.
+    pub availability: Option<crate::dayflow::source::Availability>,
 }
 
 /// A capture thread and its stop signal.
@@ -345,7 +350,7 @@ impl DayflowService {
                                         kind: id.kind.to_string(),
                                         name: id.key,
                                         ordinal,
-                                        availability,
+                                        availability: Some(availability),
                                     })
                                     .collect();
                             }
@@ -399,6 +404,107 @@ impl DayflowService {
         });
         *guard = Some(CaptureHandle { stop, join });
         Ok(())
+    }
+
+    /// Start a session for `spec`, naming its source in `status`.
+    ///
+    /// This is what the CLI, MCP and HTTP call. It does NOT start capture:
+    /// driving the loop needs a summariser and a sample directory, which the
+    /// daemon owns (T022). What it does guarantee is that `status` says WHAT
+    /// the session is a record of, with availability `None` until something
+    /// actually reads from the source — because reporting `Available` on the
+    /// strength of the user having asked for it is a claim, not an observation.
+    pub fn start_session(
+        &self,
+        mode: crate::dayflow::models::DayflowMode,
+        spec: crate::dayflow::source::SourceSpec,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, DayflowError> {
+        let ordinals = spec.ordinals();
+        let ordinals = if ordinals.is_empty() {
+            crate::capture::display::DisplayManager::list_available()
+                .map_err(|e| DayflowError::Invalid(format!("enumerating displays: {e}")))?
+                .iter()
+                .map(|d| d.index as u32)
+                .collect()
+        } else {
+            ordinals
+        };
+        let id = self.start(mode, ordinals.clone(), now)?;
+        let (kind, name) = match &spec {
+            crate::dayflow::source::SourceSpec::Displays { .. } => ("display", String::new()),
+            crate::dayflow::source::SourceSpec::Window { label } => ("window", label.clone()),
+            crate::dayflow::source::SourceSpec::Target { name } => ("target", name.clone()),
+            crate::dayflow::source::SourceSpec::Input { url } => ("input", url.clone()),
+        };
+        let mut published = self.sources.lock().unwrap_or_else(|p| p.into_inner());
+        *published = ordinals
+            .iter()
+            .map(|&ordinal| SourceStatus {
+                kind: kind.to_string(),
+                name: if name.is_empty() { ordinal.to_string() } else { name.clone() },
+                ordinal,
+                availability: None,
+            })
+            .collect();
+        Ok(id)
+    }
+
+    /// Start a session AND its capture loop from one source spec.
+    ///
+    /// The single entry a surface calls. Before this existed, `start` created a
+    /// session object and nothing captured — every surface reported a running
+    /// session that produced no samples, all day, with no error anywhere.
+    ///
+    /// The spec crosses to the capture thread and the sources are built THERE:
+    /// platform capture handles are thread-affine (D014-10), and this is the
+    /// type system enforcing it rather than a comment asking.
+    pub fn start_with_source(
+        &self,
+        mode: crate::dayflow::models::DayflowMode,
+        spec: crate::dayflow::source::SourceSpec,
+        summarizer: Arc<dyn crate::dayflow::summarizer::ChunkSummarizer + Send + Sync>,
+        sample_dir: std::path::PathBuf,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, DayflowError> {
+        let ordinals = spec.ordinals();
+        let ordinals = if ordinals.is_empty() {
+            // An unqualified display session means "every display", and the
+            // enumeration happens on the capture thread — but the run needs
+            // its ordinals now. Ask here, and let the thread agree.
+            crate::capture::display::DisplayManager::list_available()
+                .map_err(|e| DayflowError::Invalid(format!("enumerating displays: {e}")))?
+                .iter()
+                .map(|d| d.index as u32)
+                .collect()
+        } else {
+            ordinals
+        };
+        let id = self.start(mode, ordinals, now)?;
+        let interval = self
+            .with_run(|r| r.sampling_interval(&self.config))
+            .unwrap_or_else(|_| std::time::Duration::from_secs(60));
+        let scratch = sample_dir.clone();
+        let built = spec.clone();
+        if let Err(e) = self.start_capture(
+            Box::new(move || {
+                crate::dayflow::source::build_sources(&built, &scratch).unwrap_or_else(|err| {
+                    // A source that cannot be built is a session that records
+                    // nothing. Say so loudly rather than ticking an empty list
+                    // and reporting a healthy run.
+                    tracing::error!(error = %err, "could not build the capture source");
+                    Vec::new()
+                })
+            }),
+            summarizer,
+            sample_dir,
+            interval,
+        ) {
+            // Do not leave a session claiming to run with no capture behind it.
+            let _ = self.stop(now);
+            return Err(e);
+        }
+        Ok(id)
     }
 
     /// Signal the capture thread to stop and wait for it.

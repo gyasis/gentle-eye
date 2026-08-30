@@ -1372,15 +1372,15 @@ fn status_names_the_source_and_tracks_its_availability() {
     assert_eq!(named.sources.len(), 1, "status did not name the source");
     assert_eq!(named.sources[0].kind, "window", "status says the wrong KIND of record");
     assert_eq!(named.sources[0].name, "my-terminal", "status does not say WHICH window");
-    assert_eq!(named.sources[0].availability, Availability::Available);
+    assert_eq!(named.sources[0].availability, Some(Availability::Available));
 
     // Minimise it: availability must FOLLOW, not stay frozen at start.
     *state.lock().unwrap() = WindowState::Minimised;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut seen = Availability::Available;
+    let mut seen = Some(Availability::Available);
     while std::time::Instant::now() < deadline {
         seen = svc.status(Utc::now()).unwrap().sources[0].availability;
-        if seen != Availability::Available {
+        if seen != Some(Availability::Available) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1388,7 +1388,7 @@ fn status_names_the_source_and_tracks_its_availability() {
     svc.stop_capture().expect("stops");
     assert_eq!(
         seen,
-        Availability::Occluded,
+        Some(Availability::Occluded),
         "status still reports the window Available after it was minimised — \
          availability is published once at start, not tracked"
     );
@@ -1853,4 +1853,244 @@ fn one_occluded_source_among_producers_is_a_drop_not_a_session_gap() {
          that gap would claim the whole session stopped while source 0 records"
     );
     assert_eq!(lp.drops().len(), 1, "the failure is recorded per-source, as a drop");
+}
+
+// ── T016: an input taken, not a display consumed ─────────────────────────────
+
+use gentle_eye::dayflow::source::input::{FrameGrabber, InputSource};
+
+/// A grabber the test drives: yields frames, or fails on command.
+struct ScriptedGrabber {
+    script: Vec<Option<u8>>,
+    cursor: usize,
+}
+
+impl FrameGrabber for ScriptedGrabber {
+    fn grab(&mut self, _url: &str) -> Result<SourceFrame, SourceError> {
+        let v = self.script.get(self.cursor).copied().flatten();
+        self.cursor += 1;
+        match v {
+            Some(seed) => Ok(quadrant_frame(seed, seed.wrapping_add(40))),
+            None => Err(SourceError::new("stream unavailable")),
+        }
+    }
+}
+
+/// A session records frames from an input — content that was never rendered on
+/// this machine's screen — and the loop needs no knowledge that it is a stream.
+#[test]
+fn a_session_records_frames_from_an_input() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let src = InputSource::new(
+        "rtsp://camera.local/live",
+        Box::new(ScriptedGrabber {
+            script: (0..5).map(|i| Some((i as u8).wrapping_mul(90))).collect(),
+            cursor: 0,
+        }),
+        0,
+    );
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let mut kept = 0;
+    for k in 1..=3 {
+        for s in &lp.tick(&mut run, at(k * 30)).sources {
+            if s.record.as_ref().and_then(|r| r.path.as_ref()).is_some() {
+                kept += 1;
+            }
+        }
+    }
+    assert!(kept >= 2, "an input session recorded {kept} samples");
+}
+
+/// `regions_for` returns None HONESTLY. Synthesising a whole-frame region would
+/// be indistinguishable from a real detection and would hide the whole-frame
+/// read — on the one source kind where it is guaranteed to happen.
+#[test]
+fn an_input_reports_no_regions_and_the_read_is_counted() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let src = InputSource::new(
+        "rtsp://camera.local/live",
+        Box::new(ScriptedGrabber {
+            script: (0..5).map(|i| Some((i as u8).wrapping_mul(90))).collect(),
+            cursor: 0,
+        }),
+        0,
+    );
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let mut samples = Vec::new();
+    for k in 1..=3 {
+        let t = lp.tick(&mut run, at(k * 30));
+        for s in &t.sources {
+            assert!(s.regions.is_none(), "an input must not synthesise regions");
+            if let Some(p) = s.record.as_ref().and_then(|r| r.path.clone()) {
+                samples.push(p);
+            }
+        }
+    }
+    assert!(!samples.is_empty());
+    for p in &samples {
+        assert!(
+            !gentle_eye::dayflow::perception::regions_path(p).exists(),
+            "no sidecar may be written for an input — an empty one would claim a cascade ran"
+        );
+    }
+    assert_eq!(
+        lp.samples_read_whole() as usize,
+        samples.len(),
+        "every input sample is a whole-frame read and must be COUNTED"
+    );
+}
+
+/// A stream hiccup is Occluded and retried; only a sustained outage ends it.
+/// One failed grab is not proof a stream is finished — an encoder restart, a
+/// flapping network and a waking camera all look identical.
+#[test]
+fn a_stream_hiccup_is_retried_but_a_sustained_outage_ends_it() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    // Two failures, a RECOVERY, then two more. With the counter resetting on
+    // success this never reaches the threshold of 3; without the reset it hits
+    // 3 on the last tick and retires. The recovery must be in the MIDDLE and
+    // the failures either side must be fewer than the threshold, or both
+    // behaviours retire at the same tick and the test proves nothing (the
+    // fixture that cannot produce the condition it names — 013).
+    let script: Vec<Option<u8>> = vec![None, None, Some(200), None, None];
+    let src = InputSource::new(
+        "rtsp://camera.local/live",
+        Box::new(ScriptedGrabber { script, cursor: 0 }),
+        0,
+    )
+    .with_give_up_after(3);
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let t1 = lp.tick(&mut run, at(30));
+    assert_eq!(t1.sources[0].failure, Some(Availability::Occluded), "one hiccup is not the end");
+    assert!(t1.retired.is_empty(), "a hiccup must not retire the input");
+    let t2 = lp.tick(&mut run, at(60));
+    assert_eq!(t2.sources[0].failure, Some(Availability::Occluded), "two is still not the end");
+
+    let t3 = lp.tick(&mut run, at(90));
+    assert!(t3.sources[0].failure.is_none(), "the input recovered");
+
+    // Two more failures. The run of failures either side is BELOW the
+    // threshold, so reaching it here proves the recovery did NOT clear the
+    // count — which is the whole property.
+    let mut retired = Vec::new();
+    for k in 4..=5 {
+        retired.extend(lp.tick(&mut run, at(k * 30)).retired);
+    }
+    assert!(
+        retired.is_empty(),
+        "a recovery must reset the failure count — the input was retired after two \
+         separate short outages that never reached the threshold of 3"
+    );
+}
+
+/// A sustained outage DOES end the input. Retrying a permanently dead URL
+/// forever spends an ffmpeg invocation every tick for the rest of the day and
+/// reports a source as "temporarily" unavailable until midnight.
+#[test]
+fn a_sustained_outage_ends_the_input() {
+    let (mut run, _cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let src = InputSource::new(
+        "rtsp://gone.local/live",
+        Box::new(ScriptedGrabber { script: vec![None, None, None, None], cursor: 0 }),
+        0,
+    )
+    .with_give_up_after(3);
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let mut retired = Vec::new();
+    for k in 1..=4 {
+        retired.extend(lp.tick(&mut run, at(k * 30)).retired);
+    }
+    assert_eq!(retired, vec![0], "three consecutive failures must end the input");
+    assert!(lp.active_ordinals().is_empty(), "an ended input is not asked again");
+}
+
+// ── T017: source selection on all three surfaces ─────────────────────────────
+
+use gentle_eye::dayflow::source::SourceSpec;
+
+/// The parse refuses two kinds rather than picking a winner. A caller who
+/// passed both `--window` and `--input` has two intentions, and silently
+/// honouring one records the wrong thing all day.
+#[test]
+fn asking_for_two_sources_is_refused_not_resolved() {
+    let both = SourceSpec::parse(None, Some("term".into()), None, Some("rtsp://x".into()));
+    let msg = both.expect_err("two kinds must be refused");
+    assert!(msg.contains("window"), "the error must name what was asked: {msg}");
+    assert!(msg.contains("input"), "the error must name BOTH: {msg}");
+
+    // One kind each is fine, and empty strings do not count as a choice.
+    assert_eq!(
+        SourceSpec::parse(None, Some("term".into()), None, Some("  ".into())).unwrap(),
+        SourceSpec::Window { label: "term".into() }
+    );
+    // Nothing named is a display session, which is what Dayflow always did.
+    assert_eq!(
+        SourceSpec::parse(None, None, None, None).unwrap(),
+        SourceSpec::Displays { indices: Vec::new() }
+    );
+}
+
+/// Every surface starts every source kind, and the three AGREE — a session
+/// started on one surface reads identically from the others (FR-115).
+#[test]
+fn all_three_surfaces_start_every_source_kind_and_agree() {
+    use gentle_eye::dayflow::http;
+    use gentle_eye::dayflow::service::DayflowService;
+    use gentle_eye::dayflow::timeline::SqliteTimelineStore;
+
+    fn service() -> DayflowService {
+        let store = Arc::new(SqliteTimelineStore::new(Arc::new(std::sync::Mutex::new(
+            gentle_eye::storage::database::init_in_memory().expect("db"),
+        ))));
+        DayflowService::new(store, DayflowConfig::default())
+    }
+
+    // (query fragment, expected kind, expected name)
+    let cases = [
+        ("window=my-term", "window", "my-term"),
+        ("target=qa-panel", "target", "qa-panel"),
+        ("input=rtsp%3A%2F%2Fcam.local%2Flive", "input", "rtsp://cam.local/live"),
+        ("displays=2", "display", "2"),
+    ];
+
+    for (query, kind, name) in cases {
+        // ── HTTP ──
+        let svc = service();
+        let (code, body) = http::route("POST", "/dayflow/start", query, &svc);
+        assert_eq!(code, "200 OK", "HTTP could not start {kind}: {body}");
+        let via_http = svc.status(Utc::now()).unwrap();
+        assert_eq!(via_http.sources.len(), 1, "{kind}: expected one source");
+        assert_eq!(via_http.sources[0].kind, kind, "HTTP named the wrong kind");
+        assert_eq!(via_http.sources[0].name, name, "HTTP named the wrong source");
+        assert_eq!(
+            via_http.sources[0].availability, None,
+            "nothing has read from {kind} yet — reporting Available would be a claim, \
+             not an observation"
+        );
+
+        // ── the service call the CLI and MCP both make, same spec ──
+        let svc2 = service();
+        let spec = match kind {
+            "window" => SourceSpec::Window { label: name.into() },
+            "target" => SourceSpec::Target { name: name.into() },
+            "input" => SourceSpec::Input { url: name.into() },
+            _ => SourceSpec::Displays { indices: vec![2] },
+        };
+        svc2.start_session(DayflowMode::Session, spec, Utc::now()).expect("starts");
+        let direct = svc2.status(Utc::now()).unwrap();
+
+        // The three must AGREE on what the session is a record of.
+        assert_eq!(direct.sources, via_http.sources, "{kind}: the surfaces disagree");
+        let as_json = serde_json::to_value(&direct).unwrap();
+        assert_eq!(as_json["sources"][0]["kind"], kind, "the serialised payload lost the kind");
+        assert_eq!(as_json["sources"][0]["name"], name);
+    }
 }

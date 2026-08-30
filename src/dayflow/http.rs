@@ -196,14 +196,23 @@ fn start_from_query(query: &str, service: &DayflowService, now: DateTime<Utc>) -
         Some(other) => return Err(format!("unknown mode '{other}': use session or daemon")),
     };
     let displays = match param(query, "displays") {
-        Some(list) => list
-            .split(',')
-            .map(|s| s.trim().parse::<u32>().map_err(|e| format!("bad displays: {e}")))
-            .collect::<Result<Vec<_>, _>>()?,
-        None => vec![0],
+        Some(list) => Some(
+            list.split(',')
+                .map(|s| s.trim().parse::<u32>().map_err(|e| format!("bad displays: {e}")))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        None => None,
     };
+    // All three surfaces parse through the SAME type, so a window session
+    // started on one is the same session read from another (FR-115).
+    let spec = crate::dayflow::source::SourceSpec::parse(
+        displays,
+        param(query, "window"),
+        param(query, "target"),
+        param(query, "input"),
+    )?;
     service
-        .start(mode, displays, now)
+        .start_session(mode, spec, now)
         .map(|id| id.to_string())
         .map_err(|e| e.to_string())
 }

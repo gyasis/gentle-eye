@@ -14,16 +14,177 @@
 //! kind would edit the driver by construction.
 
 pub mod display;
+pub mod input;
 pub mod target;
 pub mod window;
 
 pub use display::DisplaySource;
+pub use input::{FfmpegGrabber, FrameGrabber, InputSource};
 pub use target::NamedTargetSource;
 pub use window::{WindowLocator, WindowSource, WindowState};
 
 use crate::dayflow::sampler::RawFrame;
 use crate::dayflow::window::PauseCause;
 use crate::regions::Region;
+
+/// What a surface asked to capture.
+///
+/// One type shared by the CLI, MCP and HTTP so the three cannot drift: a
+/// session started as a window on one surface must be the same session read
+/// from another (FR-115). Parsing lives here, not three times over.
+///
+/// This is DATA, not sources: building a source touches the window manager,
+/// opens a display, or shells out to ffmpeg, and platform capture handles are
+/// thread-affine (D014-10) — so the spec crosses to the capture thread and the
+/// sources are built there.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SourceSpec {
+    /// Whole displays, by index. The default, and what Dayflow did before
+    /// sources existed.
+    Displays { indices: Vec<u32> },
+    /// One named window, matched on title or class.
+    Window { label: String },
+    /// A persisted named target.
+    Target { name: String },
+    /// A stream or capture-device URL.
+    Input { url: String },
+}
+
+impl SourceSpec {
+    /// The ordinals this spec will occupy — the `display_id` position on every
+    /// sample and segment it produces (D014-2).
+    pub fn ordinals(&self) -> Vec<u32> {
+        match self {
+            Self::Displays { indices } => indices.clone(),
+            // A single non-display source is ordinal 0. It is NOT display 0:
+            // the field means "which source", and a window session has one.
+            Self::Window { .. } | Self::Target { .. } | Self::Input { .. } => vec![0],
+        }
+    }
+
+    /// A short label for logs and errors.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Displays { indices } => format!("displays {indices:?}"),
+            Self::Window { label } => format!("window {label:?}"),
+            Self::Target { name } => format!("target {name:?}"),
+            Self::Input { url } => format!("input {url:?}"),
+        }
+    }
+
+    /// Parse the surface arguments into exactly one spec.
+    ///
+    /// Refuses more than one kind rather than picking a winner: a caller that
+    /// passed both `--window` and `--input` has two different intentions and
+    /// silently honouring one records the wrong thing all day.
+    pub fn parse(
+        displays: Option<Vec<u32>>,
+        window: Option<String>,
+        target: Option<String>,
+        input: Option<String>,
+    ) -> Result<Self, String> {
+        let mut chosen: Vec<Self> = Vec::new();
+        if let Some(label) = window.filter(|s| !s.trim().is_empty()) {
+            chosen.push(Self::Window { label });
+        }
+        if let Some(name) = target.filter(|s| !s.trim().is_empty()) {
+            chosen.push(Self::Target { name });
+        }
+        if let Some(url) = input.filter(|s| !s.trim().is_empty()) {
+            chosen.push(Self::Input { url });
+        }
+        if let Some(indices) = displays.filter(|d| !d.is_empty()) {
+            chosen.push(Self::Displays { indices });
+        }
+        match chosen.len() {
+            0 => Ok(Self::Displays { indices: Vec::new() }),
+            1 => Ok(chosen.remove(0)),
+            _ => Err(format!(
+                "choose ONE source: got {}. A session records one subject; \
+                 honouring one of two would record the wrong thing all day.",
+                chosen
+                    .iter()
+                    .map(Self::describe)
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )),
+        }
+    }
+}
+
+/// Build the sources a spec names.
+///
+/// MUST run on the capture thread: every branch here opens a platform handle
+/// (an X11 connection, a display capturer, an ffmpeg scratch dir) and those are
+/// thread-affine (D014-10). Returning them across a thread boundary does not
+/// compile, and that is the type system enforcing the rule rather than a
+/// comment asking for it.
+pub fn build_sources(
+    spec: &SourceSpec,
+    scratch: &std::path::Path,
+) -> Result<Vec<Box<dyn CaptureSource>>, String> {
+    match spec {
+        SourceSpec::Displays { indices } => {
+            let wanted: Vec<u32> = if indices.is_empty() {
+                crate::capture::display::DisplayManager::list_available()
+                    .map_err(|e| format!("enumerating displays: {e}"))?
+                    .iter()
+                    .map(|d| d.index as u32)
+                    .collect()
+            } else {
+                indices.clone()
+            };
+            let mut out: Vec<Box<dyn CaptureSource>> = Vec::new();
+            for i in wanted {
+                out.push(Box::new(
+                    display::DisplaySource::new(i).map_err(|e| e.detail)?,
+                ));
+            }
+            Ok(out)
+        }
+        SourceSpec::Window { label } => {
+            // A window is cropped out of the display it sits on. Display 0 is
+            // the starting point; a window on another monitor is a known limit
+            // of the region producer today, recorded in research.md.
+            let inner = display::DisplaySource::new(0).map_err(|e| e.detail)?;
+            Ok(vec![Box::new(window::WindowSource::new(
+                Box::new(inner),
+                Box::new(window::WmLocator),
+                label.clone(),
+                0,
+            ))])
+        }
+        SourceSpec::Target { name } => {
+            let store = crate::target::store::TargetStore::load()
+                .map_err(|e| format!("loading targets: {e}"))?;
+            let t = store
+                .list()
+                .iter()
+                .find(|t| t.name == *name)
+                .ok_or_else(|| format!("no target named {name:?}"))?
+                .clone();
+            let inner: Box<dyn CaptureSource> = match &t.source {
+                crate::target::model::TargetSource::Display { index } => {
+                    Box::new(display::DisplaySource::new(*index as u32).map_err(|e| e.detail)?)
+                }
+                crate::target::model::TargetSource::Stream { url } => Box::new(
+                    input::InputSource::new(
+                        url.clone(),
+                        Box::new(input::FfmpegGrabber::new(scratch)),
+                        0,
+                    ),
+                ),
+            };
+            Ok(vec![Box::new(target::NamedTargetSource::new(inner, &t, 0))])
+        }
+        SourceSpec::Input { url } => Ok(vec![Box::new(input::InputSource::new(
+            url.clone(),
+            Box::new(input::FfmpegGrabber::new(scratch)),
+            0,
+        ))]),
+    }
+}
 
 /// Whether a source can currently produce frames.
 ///
