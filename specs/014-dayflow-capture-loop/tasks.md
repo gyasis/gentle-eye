@@ -68,7 +68,7 @@ line says so.
 - [x] T016 [US2] `InputSource` in `src/dayflow/source/input.rs`: a stream or capture-device URL, using the existing stream path.
       `> DONE:` a session records frames from an input; `regions_for` returns `None` HONESTLY — it must not synthesise a whole-frame region, which would be indistinguishable from a real detection and hide the whole-frame read (contract, D014-3).
 - [x] T017 [S] [US2] Source selection on all three surfaces: `--displays` / `--window` / `--target` / `--input`, and the equivalent MCP and HTTP parameters.
-      `> DONE:` each surface starts each source kind and `status` names it; the three agree. `cargo check` + clippy = 0.
+      `> DONE:` **AMENDED (W7 gate)** — "starts" here means starts a SESSION of that kind: each surface parses through the one `SourceSpec`, `start_session` names the source in `status` (availability `None` until something actually reads from it), and each adapter is tested delivering its own fields (CLI argv, MCP input, HTTP query). It does NOT start capture — no surface has ever started capture (`start_capture` has no production caller); driving the loop needs a summariser and a sample directory, which the daemon owns, so that wire is T022's, not a regression here. `start_with_source` (the join T022 will call) exists, is documented as unwired, resolves "every display" ONCE so the run's ordinals and the thread's built sources cannot come from two disagreeing enumerations (`build_sources` refuses an unresolved display spec), and is proven end to end by an `#[ignore]`d ffmpeg test. `cargo check` + clippy = 0.
 
 ## Phase 7: User Story 1 — the loop's remaining duties (P1)
 

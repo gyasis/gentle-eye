@@ -1077,4 +1077,42 @@ mod tests {
         assert_eq!(parse_status_filter("error"), Some(RecordingStatus::Failed));
         assert_eq!(parse_status_filter("all"), None);
     }
+
+    /// The MCP surface itself must deliver its source fields to the parse —
+    /// the service-level parity test cannot see an adapter that drops
+    /// `window`/`input` on the floor and starts a whole-display session while
+    /// reporting success.
+    #[test]
+    fn the_mcp_start_tool_delivers_its_source_fields() {
+        let s = test_server();
+        let started = s.tool_start_dayflow(StartDayflowInput {
+            window: Some("my-term".into()),
+            ..Default::default()
+        });
+        assert!(body_of(&started).contains("session_id"), "{:?}", started.content);
+        let st = s.dayflow.status(Utc::now()).unwrap();
+        assert_eq!(st.sources.len(), 1);
+        assert_eq!(st.sources[0].kind, "window", "the MCP adapter dropped `window`");
+        assert_eq!(st.sources[0].name, "my-term");
+        s.tool_stop_dayflow(StopDayflowInput {});
+
+        let started = s.tool_start_dayflow(StartDayflowInput {
+            input: Some("rtsp://cam.local/live".into()),
+            ..Default::default()
+        });
+        assert!(body_of(&started).contains("session_id"), "{:?}", started.content);
+        let st = s.dayflow.status(Utc::now()).unwrap();
+        assert_eq!(st.sources[0].kind, "input", "the MCP adapter dropped `input`");
+        assert_eq!(st.sources[0].name, "rtsp://cam.local/live");
+        s.tool_stop_dayflow(StopDayflowInput {});
+
+        // Two kinds at once is the shared parse's refusal, surfaced as a tool
+        // error rather than a silently-picked winner.
+        let both = s.tool_start_dayflow(StartDayflowInput {
+            window: Some("a".into()),
+            input: Some("rtsp://b".into()),
+            ..Default::default()
+        });
+        assert_eq!(both.is_error, Some(true), "{:?}", both.content);
+    }
 }

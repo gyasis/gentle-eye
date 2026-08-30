@@ -1392,4 +1392,35 @@ mod dayflow_cli_tests {
         assert!(plain["entries"].is_array(), "{plain}");
         assert!(plain.get("digest").is_none());
     }
+
+    /// The CLI surface itself must deliver its source flags to the parse —
+    /// `all_three_surfaces_start_every_source_kind_and_agree` proves the
+    /// SERVICE call, but a CLI that dropped `--window` on the floor would pass
+    /// it while starting a whole-display session. This drives `dayflow_command`
+    /// with the real argv.
+    #[test]
+    fn the_cli_start_flags_reach_the_source_spec() {
+        let s = svc();
+        dayflow_command(&s, &argv(&["start", "--window", "my-term"]), now()).unwrap();
+        let st = s.status(now()).unwrap();
+        assert_eq!(st.sources.len(), 1);
+        assert_eq!(st.sources[0].kind, "window", "the CLI dropped --window");
+        assert_eq!(st.sources[0].name, "my-term");
+        dayflow_command(&s, &argv(&["stop"]), now()).unwrap();
+
+        dayflow_command(&s, &argv(&["start", "--input", "rtsp://cam.local/live"]), now()).unwrap();
+        let st = s.status(now()).unwrap();
+        assert_eq!(st.sources[0].kind, "input", "the CLI dropped --input");
+        assert_eq!(st.sources[0].name, "rtsp://cam.local/live");
+        dayflow_command(&s, &argv(&["stop"]), now()).unwrap();
+
+        // Two kinds at once is the parse's refusal, surfaced as the CLI error.
+        let err = dayflow_command(
+            &s,
+            &argv(&["start", "--window", "a", "--input", "rtsp://b"]),
+            now(),
+        )
+        .expect_err("two kinds must be refused on the CLI too");
+        assert!(format!("{err}").contains("ONE source"), "got: {err}");
+    }
 }

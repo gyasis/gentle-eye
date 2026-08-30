@@ -1971,6 +1971,7 @@ fn a_stream_hiccup_is_retried_but_a_sustained_outage_ends_it() {
     assert!(t1.retired.is_empty(), "a hiccup must not retire the input");
     let t2 = lp.tick(&mut run, at(60));
     assert_eq!(t2.sources[0].failure, Some(Availability::Occluded), "two is still not the end");
+    assert!(t2.retired.is_empty(), "two failures are below the threshold of 3");
 
     let t3 = lp.tick(&mut run, at(90));
     assert!(t3.sources[0].failure.is_none(), "the input recovered");
@@ -2004,11 +2005,19 @@ fn a_sustained_outage_ends_the_input() {
     .with_give_up_after(3);
     let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
 
-    let mut retired = Vec::new();
-    for k in 1..=4 {
-        retired.extend(lp.tick(&mut run, at(k * 30)).retired);
-    }
-    assert_eq!(retired, vec![0], "three consecutive failures must end the input");
+    // Tick BY tick, pinning the threshold from both sides: retirement on the
+    // 2nd failure means the knob lies low, retirement only on a 4th means it
+    // lies high ("give up after 3" that actually takes 4 survives a loop that
+    // runs one tick past the boundary — so the loop stops AT the boundary).
+    assert!(lp.tick(&mut run, at(30)).retired.is_empty(), "one failure must not end it");
+    assert!(lp.tick(&mut run, at(60)).retired.is_empty(), "two failures must not end it");
+    let third = lp.tick(&mut run, at(90));
+    assert_eq!(
+        third.retired,
+        vec![0],
+        "the THIRD consecutive failure must end the input — exactly at give_up_after, \
+         not one past it"
+    );
     assert!(lp.active_ordinals().is_empty(), "an ended input is not asked again");
 }
 
@@ -2070,6 +2079,13 @@ fn all_three_surfaces_start_every_source_kind_and_agree() {
         assert_eq!(via_http.sources.len(), 1, "{kind}: expected one source");
         assert_eq!(via_http.sources[0].kind, kind, "HTTP named the wrong kind");
         assert_eq!(via_http.sources[0].name, name, "HTTP named the wrong source");
+        // D014-2: a single non-display source occupies ordinal 0 — the
+        // `display_id` position on every sample it will produce. A display
+        // session keeps its real index (2 here), NOT a renumbered 0: renaming
+        // display 2's samples to ordinal 0 would file them under a source the
+        // run does not have.
+        let expected_ordinal = if kind == "display" { 2 } else { 0 };
+        assert_eq!(via_http.sources[0].ordinal, expected_ordinal, "{kind}: wrong ordinal");
         assert_eq!(
             via_http.sources[0].availability, None,
             "nothing has read from {kind} yet — reporting Available would be a claim, \
@@ -2093,4 +2109,68 @@ fn all_three_surfaces_start_every_source_kind_and_agree() {
         assert_eq!(as_json["sources"][0]["kind"], kind, "the serialised payload lost the kind");
         assert_eq!(as_json["sources"][0]["name"], name);
     }
+}
+
+/// End-to-end proof that `start_with_source` — the T022 entry, called by no
+/// surface yet — actually joins its two halves: the spec crosses to the capture
+/// thread, `build_sources` constructs a REAL `InputSource` with the REAL
+/// `FfmpegGrabber`, and a sample from content never rendered on this screen
+/// lands on disk with `status` naming the input.
+///
+/// The "stream" is a plain image file: ffmpeg reads a file path through the
+/// same `-i <url>` it reads rtsp://, so this exercises the whole grab+decode
+/// path with no network. `#[ignore]`d because it needs the ffmpeg binary
+/// (house rule — see tests/dayflow_segmentation.rs).
+#[test]
+#[ignore = "live: requires the ffmpeg binary"]
+fn start_with_source_records_a_real_input_end_to_end() {
+    let svc = live_service();
+    let dir = tempfile::tempdir().unwrap();
+
+    // A frame with real variation, so the sampler's content gate keeps it.
+    let src_png = dir.path().join("fake-camera.png");
+    let img = image::RgbaImage::from_fn(320, 240, |x, y| {
+        image::Rgba([(x % 256) as u8, (y % 256) as u8, ((x * y) % 256) as u8, 255])
+    });
+    img.save(&src_png).unwrap();
+
+    let sample_dir = dir.path().join("samples");
+    let id = svc
+        .start_with_source(
+            DayflowMode::Session,
+            SourceSpec::Input { url: src_png.to_string_lossy().into_owned() },
+            ok_summarizer(),
+            sample_dir.clone(),
+            Utc::now(),
+        )
+        .expect("start_with_source starts");
+
+    // The first tick is immediate; wait for its evidence.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut samples = 0;
+    let mut status = svc.status(Utc::now()).unwrap();
+    while std::time::Instant::now() < deadline {
+        samples = std::fs::read_dir(&sample_dir)
+            .map(|d| d.filter_map(Result::ok).filter(|e| e.path().extension().is_some_and(|x| x == "png")).count())
+            .unwrap_or(0);
+        status = svc.status(Utc::now()).unwrap();
+        // Wait for BOTH pieces of evidence: the sample on disk AND the tick's
+        // republish of observed availability (they land one after the other).
+        if samples >= 1 && status.sources.first().is_some_and(|s| s.availability.is_some()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    svc.stop_capture().expect("stops");
+    let _ = svc.stop(Utc::now());
+
+    assert!(samples >= 1, "no sample landed — the capture thread never grabbed the input");
+    assert_eq!(status.session_id, Some(id));
+    assert_eq!(status.sources.len(), 1, "status must name the one input");
+    assert_eq!(status.sources[0].kind, "input");
+    assert_eq!(
+        status.sources[0].availability,
+        Some(Availability::Available),
+        "after a real grab the tick republishes what it OBSERVED"
+    );
 }

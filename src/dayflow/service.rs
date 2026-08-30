@@ -452,13 +452,27 @@ impl DayflowService {
 
     /// Start a session AND its capture loop from one source spec.
     ///
-    /// The single entry a surface calls. Before this existed, `start` created a
-    /// session object and nothing captured — every surface reported a running
-    /// session that produced no samples, all day, with no error anywhere.
+    /// NOT yet called by any surface: the surfaces call `start_session`, which
+    /// names the source but starts no capture, because driving the loop needs a
+    /// summariser and a sample directory and those belong to the daemon (T022).
+    /// This is the entry the daemon will call; it exists now because the two
+    /// halves it joins (`start_session`, `start_capture`) are both live and the
+    /// join has an invariant worth pinning early — see below. The W7 gate
+    /// proves it end to end in `tests/dayflow_loop.rs`
+    /// (`start_with_source_records_a_real_input_end_to_end`, `#[ignore]`d:
+    /// it needs the ffmpeg binary).
     ///
     /// The spec crosses to the capture thread and the sources are built THERE:
     /// platform capture handles are thread-affine (D014-10), and this is the
     /// type system enforcing it rather than a comment asking.
+    ///
+    /// The invariant: "every display" is resolved to concrete indices ONCE,
+    /// here, and the RESOLVED spec is what crosses to the thread. Resolving
+    /// twice — once for the run's ordinals, once on the thread — lets the two
+    /// enumerations disagree (a monitor unplugged in between), and then the
+    /// run says displays [0,1,2] while the thread built a different set:
+    /// samples file under ordinals no run window owns and `on_sample` drops
+    /// them silently. `build_sources` refuses an unresolved spec outright.
     pub fn start_with_source(
         &self,
         mode: crate::dayflow::models::DayflowMode,
@@ -467,31 +481,36 @@ impl DayflowService {
         sample_dir: std::path::PathBuf,
         now: DateTime<Utc>,
     ) -> Result<Uuid, DayflowError> {
-        let ordinals = spec.ordinals();
-        let ordinals = if ordinals.is_empty() {
-            // An unqualified display session means "every display", and the
-            // enumeration happens on the capture thread — but the run needs
-            // its ordinals now. Ask here, and let the thread agree.
-            crate::capture::display::DisplayManager::list_available()
-                .map_err(|e| DayflowError::Invalid(format!("enumerating displays: {e}")))?
-                .iter()
-                .map(|d| d.index as u32)
-                .collect()
-        } else {
-            ordinals
+        let resolved = match &spec {
+            crate::dayflow::source::SourceSpec::Displays { indices } if indices.is_empty() => {
+                let indices = crate::capture::display::DisplayManager::list_available()
+                    .map_err(|e| DayflowError::Invalid(format!("enumerating displays: {e}")))?
+                    .iter()
+                    .map(|d| d.index as u32)
+                    .collect();
+                crate::dayflow::source::SourceSpec::Displays { indices }
+            }
+            other => other.clone(),
         };
-        let id = self.start(mode, ordinals, now)?;
+        // `start_session` derives the run's ordinals from the SAME resolved
+        // spec the thread will build from, and names the sources in `status`
+        // (availability `None` until the first tick republishes what the loop
+        // actually observes).
+        let id = self.start_session(mode, resolved.clone(), now)?;
         let interval = self
             .with_run(|r| r.sampling_interval(&self.config))
             .unwrap_or_else(|_| std::time::Duration::from_secs(60));
         let scratch = sample_dir.clone();
-        let built = spec.clone();
         if let Err(e) = self.start_capture(
             Box::new(move || {
-                crate::dayflow::source::build_sources(&built, &scratch).unwrap_or_else(|err| {
+                crate::dayflow::source::build_sources(&resolved, &scratch).unwrap_or_else(|err| {
                     // A source that cannot be built is a session that records
-                    // nothing. Say so loudly rather than ticking an empty list
-                    // and reporting a healthy run.
+                    // nothing, and this closure has no error channel. What
+                    // actually happens: the error is logged HERE, the loop
+                    // ticks an empty source list, and silence past the
+                    // staleness threshold reports the session Degraded — loud
+                    // in the log and visible in health, but NOT an immediate
+                    // failure of `start_with_source` itself.
                     tracing::error!(error = %err, "could not build the capture source");
                     Vec::new()
                 })

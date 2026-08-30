@@ -126,17 +126,24 @@ pub fn build_sources(
 ) -> Result<Vec<Box<dyn CaptureSource>>, String> {
     match spec {
         SourceSpec::Displays { indices } => {
-            let wanted: Vec<u32> = if indices.is_empty() {
-                crate::capture::display::DisplayManager::list_available()
-                    .map_err(|e| format!("enumerating displays: {e}"))?
-                    .iter()
-                    .map(|d| d.index as u32)
-                    .collect()
-            } else {
-                indices.clone()
-            };
+            // REFUSED rather than enumerated here: the caller has already
+            // resolved "every display" into concrete ordinals for the run
+            // (`start_with_source` does), and a SECOND enumeration at
+            // capture-thread time can disagree with the first — a monitor
+            // unplugged in between, or one flaky X query, and the run says
+            // displays [0,1,2] while the thread builds a different set. Samples
+            // then file under ordinals no run window owns and `on_sample`
+            // drops them silently. One enumeration, one truth.
+            if indices.is_empty() {
+                return Err(
+                    "display indices must be resolved before building sources — \
+                     the run's ordinals and the built sources must come from ONE \
+                     enumeration, or they can silently disagree"
+                        .into(),
+                );
+            }
             let mut out: Vec<Box<dyn CaptureSource>> = Vec::new();
-            for i in wanted {
+            for i in indices.iter().copied() {
                 out.push(Box::new(
                     display::DisplaySource::new(i).map_err(|e| e.detail)?,
                 ));
