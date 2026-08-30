@@ -97,12 +97,7 @@ impl WmProvider {
                 .and_then(|r| r.value32().map(|it| it.collect::<Vec<Atom>>()))
                 .is_some_and(|atoms| atoms.contains(&net_wm_state_hidden));
 
-            // On another workspace: `_NET_WM_DESKTOP` set, not sticky, and not
-            // the current one. Only meaningful when both sides are known.
-            let elsewhere = match (current_desktop, window_desktop(&conn, w, net_wm_desktop)) {
-                (Some(cur), Some(d)) => d != u32::MAX && d != cur,
-                _ => false,
-            };
+            let win_desktop = window_desktop(&conn, w, net_wm_desktop);
 
             let bbox = PixelRect {
                 x: ax.max(0) as u32,
@@ -111,11 +106,44 @@ impl WmProvider {
                 h: geo.height as u32,
             };
             let label = wm_name(&conn, w, net_wm_name, utf8).or_else(|| wm_class(&conn, w));
-            out.push(WmWindowState { bbox, label, showing: !hidden && !elsewhere });
+            out.push(WmWindowState {
+                bbox,
+                label,
+                showing: is_showing(hidden, win_desktop, current_desktop),
+            });
         }
         Ok(out)
     }
 
+}
+
+/// Whether a window is showing pixels the user can see.
+///
+/// Extracted as a PURE function on purpose. The live enumeration needs a real
+/// window manager, so it can only run behind `#[ignore]` — and a rule that only
+/// an ignored test covers is a rule nothing defends. Everything that decides
+/// visibility lives here, where the ordinary suite reaches it.
+///
+/// Measured 2026-08-29 against the real WM: a minimised window stays in
+/// `_NET_CLIENT_LIST` with its geometry UNCHANGED and `_NET_WM_STATE_HIDDEN`
+/// set — it is never zero-area, which is why an area check found nothing. A
+/// window on another workspace keeps its geometry and does NOT get HIDDEN;
+/// only `_NET_WM_DESKTOP` moves. So both signals are required.
+pub(crate) fn is_showing(hidden: bool, window_desktop: Option<u32>, current_desktop: Option<u32>) -> bool {
+    if hidden {
+        return false;
+    }
+    match (current_desktop, window_desktop) {
+        // `u32::MAX` is the sticky sentinel: shown on every desktop.
+        (Some(cur), Some(d)) => d == u32::MAX || d == cur,
+        // Either side unknown. Assume showing: a window must not be treated as
+        // hidden because the WM declined to answer a question about it, or a
+        // transient property read would stop capture on a visible window.
+        _ => true,
+    }
+}
+
+impl WmProvider {
     /// Enumerate managed top-level windows as window-granularity [`Region`]s.
     pub fn windows() -> Result<Vec<Region>> {
         // Built on `window_states` so there is exactly ONE enumeration path
@@ -209,6 +237,37 @@ mod tests {
             assert_eq!(w.granularity, Granularity::Window);
         }
         assert!(!ws.is_empty(), "expected at least one managed window");
+    }
+
+    /// The visibility rule, without a window manager.
+    ///
+    /// The live enumeration can only run behind `#[ignore]`, and an ignored
+    /// test defends nothing: reverting the rule to `showing: true` left the
+    /// live check GREEN, because it prints the table and asserts only that the
+    /// list is non-empty. These cases are what actually hold the rule.
+    #[test]
+    fn a_hidden_or_off_desktop_window_is_not_showing() {
+        // Minimised: HIDDEN is set and geometry is unchanged, so only this
+        // flag distinguishes it. Cropping at that stale rectangle would record
+        // whatever is underneath the window (FR-114).
+        assert!(!super::is_showing(true, Some(0), Some(0)), "a minimised window shows nothing");
+        assert!(!super::is_showing(true, None, None), "hidden wins regardless of desktop");
+
+        // On another workspace: NOT hidden, geometry intact, desktop differs.
+        assert!(!super::is_showing(false, Some(1), Some(0)), "another workspace shows nothing here");
+
+        // Showing.
+        assert!(super::is_showing(false, Some(0), Some(0)), "same desktop, not hidden");
+        assert!(
+            super::is_showing(false, Some(u32::MAX), Some(3)),
+            "sticky windows show on every desktop"
+        );
+
+        // Unknown must not be read as hidden: a WM that declines to answer
+        // must never stop capture on a window that is plainly visible.
+        assert!(super::is_showing(false, None, Some(0)));
+        assert!(super::is_showing(false, Some(0), None));
+        assert!(super::is_showing(false, None, None));
     }
 
     #[test]
