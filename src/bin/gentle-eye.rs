@@ -1243,7 +1243,7 @@ fn dayflow_command(
             })?;
             let (from, to) = range(rest)?;
             serde_json::to_value(df.ask(question, from, to, |prompt| {
-                format!("[no model configured for ask]\n{prompt}")
+                gentle_eye::dayflow::answerer::answer_or_explain(df.config(), prompt)
             })?)?
         }
         other => return Err(anyhow!("unknown dayflow subcommand '{other}'")),

@@ -294,7 +294,7 @@ fn build_ollama_request(
 /// - never returns empty — a response that is *entirely* reasoning is passed through
 ///   as-is rather than silently becoming "", since a wrong-but-present answer is far
 ///   easier to debug than a blank one.
-fn strip_reasoning(text: &str) -> String {
+pub fn strip_reasoning(text: &str) -> String {
     const CLOSE: &str = "</think>";
     match text.rfind(CLOSE) {
         Some(i) => {

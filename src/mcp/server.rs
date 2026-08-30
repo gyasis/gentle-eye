@@ -325,7 +325,7 @@ impl GentleEyeServer {
         // production; here the grounding rules are what matter, and they refuse
         // to consult anything at all when the range is empty.
         let result = self.dayflow.ask(&input.question, from, to, |prompt| {
-            format!("[no model configured for ask_day]\n{prompt}")
+            crate::dayflow::answerer::answer_or_explain(self.dayflow.config(), prompt)
         });
         match result {
             Ok(answer) => ok_json(answer),

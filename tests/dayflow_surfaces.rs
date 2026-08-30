@@ -370,3 +370,80 @@ fn the_standup_digest_reads_the_same_through_every_surface() {
     assert_eq!(comms.entries, 2, "more entries…");
     assert!(comms.percent < 10.0, "…and far less time: {comms:?}");
 }
+
+// ── T024: a real answer, on all three surfaces ───────────────────────────────
+
+/// LIVE: a range WITH records returns prose naming what those entries contain,
+/// through the same answerer all three surfaces call.
+///
+/// `#[ignore]`d because it needs the governed lane and a pulled reasoning
+/// model. Run it with:
+///   GE_DAYFLOW_ENDPOINT=http://<governor>:8799/llm/ollama \
+///     ./.tooling/bin/cargo test --test dayflow_surfaces -- --ignored --nocapture
+#[test]
+#[ignore = "live: needs GE_DAYFLOW_ENDPOINT (Atelier governor) and a pulled reasoning model"]
+fn a_range_with_records_returns_real_prose_about_them() {
+    use gentle_eye::dayflow::models::{ActivityCategory, TimelineEntry};
+
+    let endpoint = std::env::var("GE_DAYFLOW_ENDPOINT").unwrap_or_else(|_| {
+        panic!("\n\nGE_DAYFLOW_ENDPOINT is not set — this live test cannot run.\n")
+    });
+    println!("[live] asking through {endpoint}");
+
+    let svc = service();
+    let from = chrono::Utc::now() - chrono::Duration::hours(1);
+    let to = chrono::Utc::now();
+
+    // Two entries with DISTINCTIVE content, so a generic answer cannot pass.
+    for (app, activity, detail) in [
+        ("Blender", "modelling a hexagonal lamp shade", "Extruding a hex prism and bevelling its edges"),
+        ("Thunderbird", "replying to the plumber", "Confirming Tuesday for the boiler service"),
+    ] {
+        svc.insert_entry(&TimelineEntry {
+            id: uuid::Uuid::new_v4(),
+            recording_id: uuid::Uuid::new_v4(),
+            start_time: from + chrono::Duration::minutes(5),
+            end_time: from + chrono::Duration::minutes(20),
+            category: ActivityCategory::Other,
+            app: app.into(),
+            activity: activity.into(),
+            summary: detail.into(),
+            provenance: None,
+        })
+        .expect("insert");
+    }
+
+    let answer = svc
+        .ask("What was I doing?", from, to, |p| {
+            gentle_eye::dayflow::answerer::answer_or_explain(svc.config(), p)
+        })
+        .expect("ask runs");
+
+    println!("[live] ANSWER: {}", answer.answer);
+    assert!(
+        !answer.answer.starts_with("[ask failed"),
+        "the model call failed: {}",
+        answer.answer
+    );
+    assert!(
+        !answer.answer.starts_with("[no model"),
+        "GE_DAYFLOW_ENDPOINT was set but no answerer was built: {}",
+        answer.answer
+    );
+    assert_eq!(answer.grounding.len(), 2, "an answer must carry its grounding");
+
+    // It must name what the entries CONTAIN, not merely be long. A stub that
+    // echoed the prompt would also be long, and that is how it survived.
+    let lower = answer.answer.to_lowercase();
+    assert!(
+        lower.contains("blender") || lower.contains("lamp") || lower.contains("model"),
+        "the answer does not mention the first entry's content: {}",
+        answer.answer
+    );
+    assert!(
+        lower.contains("plumb") || lower.contains("boiler") || lower.contains("mail")
+            || lower.contains("thunderbird") || lower.contains("repl"),
+        "the answer does not mention the second entry's content: {}",
+        answer.answer
+    );
+}

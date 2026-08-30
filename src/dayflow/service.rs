@@ -781,6 +781,11 @@ impl DayflowService {
             .map_err(DayflowError::from)
     }
 
+    /// The dayflow configuration this service runs under.
+    pub fn config(&self) -> &DayflowConfig {
+        &self.config
+    }
+
     /// Write an entry to the timeline.
     ///
     /// The surfaces do not write entries — the summarisation path does — but

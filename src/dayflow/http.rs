@@ -274,7 +274,7 @@ pub fn route_at(
             ) {
                 Err(e) => ("400 Bad Request", json_err(&e)),
                 Ok((from, to)) => match service.ask(&question, from, to, |p| {
-                    format!("[no model configured for ask]\n{p}")
+                    crate::dayflow::answerer::answer_or_explain(service.config(), p)
                 }) {
                     Ok(a) => (
                         "200 OK",
