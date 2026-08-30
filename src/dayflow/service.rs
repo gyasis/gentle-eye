@@ -554,6 +554,23 @@ impl DayflowService {
         Ok(id)
     }
 
+    /// Record a pause directly, for a fact the run itself cannot know.
+    ///
+    /// The only current caller is the daemon recording a RESTART: the process
+    /// that would have noticed the interruption was not running, so no
+    /// `DayflowRun` observed it. Everything else routes through the run's own
+    /// pause machinery — this is deliberately narrow, because a second general
+    /// writer is how the pause ledger and the run disagree.
+    pub fn record_pause(
+        &self,
+        session_id: Uuid,
+        pause: &crate::dayflow::window::PauseInterval,
+    ) -> Result<(), DayflowError> {
+        self.store
+            .record_pause(session_id, pause)
+            .map_err(DayflowError::Timeline)
+    }
+
     /// Signal the capture thread to stop and wait for it.
     ///
     /// Returns promptly: the thread waits on the stop channel between ticks,

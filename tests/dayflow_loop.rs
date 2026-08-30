@@ -2573,3 +2573,237 @@ async fn provenance_names_the_first_samples_layout_when_it_changes_mid_window() 
     );
     assert_ne!(p.region_id, later_layout.identity());
 }
+
+// ── T022/T023: the record survives a restart ─────────────────────────────────
+
+use gentle_eye::dayflow::daemon::{Daemon, DaemonStateStore, ResumeDecision};
+
+fn svc_for(store_db: &std::sync::Arc<gentle_eye::dayflow::timeline::SqliteTimelineStore>)
+    -> Arc<gentle_eye::dayflow::service::DayflowService>
+{
+    Arc::new(gentle_eye::dayflow::service::DayflowService::new(
+        Arc::clone(store_db) as Arc<dyn gentle_eye::dayflow::timeline::TimelineStore + Send + Sync>,
+        DayflowConfig::default(),
+    ))
+}
+
+/// A restarted PROCESS resumes the SAME session with the SAME sources.
+///
+/// The second daemon is a genuinely separate owner over the same state file —
+/// which is what a restart is. Before this, `DaemonState`, `DaemonStateStore`
+/// and `decide_resume` had no caller at all: the machinery for surviving a
+/// restart was complete and nothing used it.
+#[test]
+fn a_restarted_daemon_resumes_the_same_session_and_the_same_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon.json");
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let spec = SourceSpec::Window { label: "my-terminal".into() };
+
+    // ── first process ──
+    let d1 = Daemon::new(&state_path, svc_for(&db));
+    let (id1, dec1) = d1
+        .start_or_resume(DayflowMode::Daemon, spec.clone(), Utc::now())
+        .expect("starts");
+    assert_eq!(dec1, ResumeDecision::Fresh, "the first start is not a resume");
+    assert_eq!(d1.service().status(Utc::now()).unwrap().sources[0].name, "my-terminal");
+
+    // ── the process dies; a NEW one starts over the same state file ──
+    drop(d1);
+    let d2 = Daemon::new(&state_path, svc_for(&db));
+    // Deliberately asked for something DIFFERENT: a resume must keep what the
+    // session has been recording, not adopt a new subject mid-timeline.
+    let (id2, dec2) = d2
+        .start_or_resume(
+            DayflowMode::Daemon,
+            SourceSpec::Displays { indices: vec![0] },
+            Utc::now(),
+        )
+        .expect("resumes");
+
+    assert_eq!(dec2, ResumeDecision::Resumed, "a same-day restart must RESUME");
+    assert_eq!(id2, id1, "a resume must continue the SAME session id, not mint a new one");
+    let after = d2.service().status(Utc::now()).unwrap();
+    assert_eq!(
+        after.sources[0].name, "my-terminal",
+        "the resumed session adopted a new subject — one timeline would then describe \
+         two different things with nothing marking the seam"
+    );
+    assert_eq!(after.sources[0].kind, "window");
+}
+
+/// The interruption is a GAP with a cause, not an absence. Without it the hole
+/// is indistinguishable from a quiet afternoon.
+#[test]
+fn a_restart_leaves_a_gap_with_a_cause_not_an_absence() {
+    use gentle_eye::dayflow::window::PauseCause;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let d = Daemon::new(dir.path().join("daemon.json"), svc_for(&db));
+    let t0 = at(0);
+    let (id, _) = d
+        .start_or_resume(DayflowMode::Daemon, SourceSpec::Window { label: "w".into() }, t0)
+        .unwrap();
+
+    let down_from = at(600);
+    let down_to = at(900);
+    d.record_interruption(id, down_from, down_to).expect("records the interruption");
+
+    let slice = d.service().timeline(at(0), at(1200)).expect("reads back");
+    let gap = slice
+        .gaps
+        .iter()
+        .find(|g| g.cause == PauseCause::DaemonRestart)
+        .expect("the interruption left NO gap — it reads as a quiet afternoon");
+    assert_eq!(gap.from, down_from);
+    assert_eq!(gap.to, Some(down_to));
+    assert_eq!(gap.session_id, id);
+}
+
+/// A restart on a DIFFERENT day starts a new session and leaves the prior day
+/// alone — resuming across midnight would merge two days into one record.
+#[test]
+fn a_restart_on_another_day_starts_a_new_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon.json");
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let spec = SourceSpec::Window { label: "w".into() };
+
+    let d1 = Daemon::new(&state_path, svc_for(&db));
+    let (id1, _) = d1.start_or_resume(DayflowMode::Daemon, spec.clone(), at(0)).unwrap();
+
+    let d2 = Daemon::new(&state_path, svc_for(&db));
+    let tomorrow = at(0) + Duration::days(1);
+    let (id2, dec) = d2.start_or_resume(DayflowMode::Daemon, spec, tomorrow).unwrap();
+    assert_eq!(dec, ResumeDecision::NewDay);
+    assert_ne!(id2, id1, "a new day must be a new session");
+}
+
+/// There is EXACTLY ONE state store, and it is the daemon's. A second is how
+/// two views of one session diverge — silently, both reporting a running
+/// session with different state (013/R29).
+#[test]
+fn the_daemon_owns_the_only_state_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon.json");
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let d = Daemon::new(&state_path, svc_for(&db));
+    d.start_or_resume(DayflowMode::Daemon, SourceSpec::Window { label: "w".into() }, at(0))
+        .unwrap();
+
+    assert_eq!(d.store().path(), state_path, "the daemon's store is the one on disk");
+
+    // A second reader of the SAME path sees the same state — one file, one truth.
+    let observer = DaemonStateStore::new(&state_path);
+    let seen = observer.load().unwrap().expect("state on disk");
+    assert_eq!(seen.session_id, d.store().load().unwrap().unwrap().session_id);
+    assert_eq!(
+        seen.spec,
+        Some(SourceSpec::Window { label: "w".into() }),
+        "the persisted spec must say what the session captures, or a restart resumes blind"
+    );
+
+    // Stopping clears it, so the next start is genuinely fresh.
+    d.stop(at(60)).unwrap();
+    assert!(d.store().load().unwrap().is_none(), "stop must clear the state");
+}
+
+/// A second daemon over the same state file is refused — the "exactly one
+/// state store" requirement, enforced rather than documented.
+///
+/// The probe is that the published port ANSWERS: a crashed daemon leaves a file
+/// naming a port too, and refusing to start on that would make a crash
+/// unrecoverable without deleting state by hand.
+#[test]
+fn a_stale_record_is_not_mistaken_for_a_live_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon.json");
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let d = Daemon::new(&state_path, svc_for(&db));
+    d.start_or_resume(DayflowMode::Daemon, SourceSpec::Window { label: "w".into() }, at(0))
+        .unwrap();
+
+    // No daemon has published a port: nothing to collide with.
+    assert_eq!(d.live_peer_port(), None, "an unserved session is not a live peer");
+
+    // A port that nothing listens on is a STALE record, not a live daemon.
+    d.publish_port(59_997).expect("publishes");
+    assert_eq!(
+        d.live_peer_port(),
+        None,
+        "a published port that does not answer is a crashed daemon's leftovers — \
+         treating it as live would make a crash unrecoverable without deleting state by hand"
+    );
+}
+
+/// A surface with no daemon to attach to discovers nothing and falls back.
+#[test]
+fn discovery_finds_nothing_when_no_daemon_is_serving() {
+    use gentle_eye::dayflow::client::DaemonClient;
+    let dir = tempfile::tempdir().unwrap();
+    let store = DaemonStateStore::new(dir.path().join("daemon.json"));
+    assert!(
+        DaemonClient::discover(&store).is_none(),
+        "discovery must return None with no state file, so the caller falls back to local"
+    );
+}
+
+/// `status` from a genuinely SEPARATE client reports the daemon's session, and
+/// `stop` from one stops it.
+///
+/// The daemon is served on a real socket and the client speaks HTTP to it — no
+/// shared objects. That is the whole point: before this, each invocation built
+/// a private in-memory service, so `start` in one process and `status` in the
+/// next were different sessions talking to nobody.
+#[test]
+fn a_separate_client_reads_and_stops_the_daemons_session() {
+    use gentle_eye::dayflow::client::DaemonClient;
+    use gentle_eye::dayflow::http;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let svc = svc_for(&db);
+    let d = Daemon::new(dir.path().join("daemon.json"), Arc::clone(&svc));
+    let (id, _) = d
+        .start_or_resume(DayflowMode::Daemon, SourceSpec::Window { label: "watched".into() }, Utc::now())
+        .unwrap();
+
+    // Serve on an ephemeral port, on its own thread.
+    let listener = http::bind(0).expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let served = Arc::clone(&svc);
+    std::thread::spawn(move || http::serve(listener, served));
+    d.publish_port(port).expect("publishes");
+
+    // Discovery finds it through the state file alone — no shared handle.
+    let store = DaemonStateStore::new(dir.path().join("daemon.json"));
+    let client = DaemonClient::discover(&store).expect("a served daemon must be discoverable");
+
+    let body = client.get("/dayflow/status").expect("status over HTTP");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(v["running"], true, "the client sees the daemon's session: {body}");
+    assert_eq!(v["session_id"], id.to_string(), "and it is the SAME session");
+    assert_eq!(
+        v["sources"][0]["name"], "watched",
+        "status must say WHAT the daemon is recording, across the process boundary"
+    );
+
+    // And stopping over the wire stops the daemon's session.
+    client.post("/dayflow/stop").expect("stop over HTTP");
+    let after: serde_json::Value =
+        serde_json::from_str(&client.get("/dayflow/status").unwrap()).unwrap();
+    assert_eq!(after["running"], false, "stop from a separate client did not stop it");
+}

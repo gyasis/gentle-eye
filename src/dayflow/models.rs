@@ -290,6 +290,10 @@ impl DayflowLiveness {
                 // purpose, which FR-113 forbids conflating, and a whole day
                 // could pass before anyone noticed.
                 Some(PauseCause::SourceEnded) => DayflowHealth::Degraded,
+                // A restart gap is recorded already CLOSED — the daemon is
+                // running again by the time it is written — so a run reporting
+                // it as its LIVE pause means something is wrong, not quiet.
+                Some(PauseCause::DaemonRestart) => DayflowHealth::Degraded,
                 Some(
                     PauseCause::Idle
                     | PauseCause::Locked

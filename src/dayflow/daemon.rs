@@ -35,6 +35,29 @@ pub struct DaemonState {
     pub last_sequence: std::collections::BTreeMap<u32, u64>,
     /// When this record was last written.
     pub updated_at: DateTime<Utc>,
+    /// WHAT the session is capturing, so a restart resumes the same subject.
+    ///
+    /// Stored RESOLVED — displays already enumerated, never `Displays { [] }`.
+    /// A spec re-resolved on restart can name a different set than the session's
+    /// own ordinals (the W7 gate's single-enumeration invariant), and samples
+    /// filed under an ordinal the run does not know are silently dropped by
+    /// `on_sample`.
+    ///
+    /// `None` for records written before sources existed: those sessions
+    /// captured displays, but WHICH displays is not recoverable, so guessing
+    /// would resume the wrong subject. A restart on such a record starts fresh.
+    #[serde(default)]
+    pub spec: Option<crate::dayflow::source::SourceSpec>,
+    /// The port the daemon's HTTP surface is listening on.
+    ///
+    /// Published here so a CLI or MCP invocation can ATTACH to the running
+    /// session instead of constructing its own engine (D014-15). Without it,
+    /// every process builds a private in-memory service and `start` in one and
+    /// `status` in the next are different sessions talking to nobody.
+    ///
+    /// `None` means no HTTP surface — the session is local to one process.
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 impl DaemonState {
@@ -47,6 +70,8 @@ impl DaemonState {
             pid,
             last_sequence: std::collections::BTreeMap::new(),
             updated_at: started_at,
+            spec: None,
+            port: None,
         }
     }
 
@@ -54,6 +79,18 @@ impl DaemonState {
     ///
     /// Monotonic: a lower value never lowers what is recorded, so an
     /// out-of-order update cannot make a restart reuse sequences.
+    /// Record WHAT this session captures. Resolved, never as typed.
+    pub fn with_spec(mut self, spec: crate::dayflow::source::SourceSpec) -> Self {
+        self.spec = Some(spec);
+        self
+    }
+
+    /// Publish the port a surface can attach on.
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
     pub fn note_sequence(&mut self, display_id: u32, sequence: u64, now: DateTime<Utc>) {
         let e = self.last_sequence.entry(display_id).or_insert(sequence);
         if sequence > *e {
@@ -217,6 +254,157 @@ pub fn decide_resume(prior: Option<&DaemonState>, now: DateTime<Utc>) -> ResumeD
         Some(_) => ResumeDecision::NewDay,
     }
 }
+
+/// The daemon: the one owner of a session's cross-process state.
+///
+/// # Why this exists
+///
+/// Before it, `DaemonState`, `DaemonStateStore` and `decide_resume` had no
+/// caller — the machinery for surviving a restart was complete and nothing used
+/// it. Each CLI invocation built its own in-memory service, so `dayflow start`
+/// in one process and `dayflow status` in the next were different sessions
+/// talking to nobody.
+///
+/// # Exactly one store
+///
+/// The daemon owns THE state store. A second store is how two views of one
+/// session diverge, and the divergence is silent — both report a running
+/// session, with different sequences (013/R29).
+pub struct Daemon {
+    store: DaemonStateStore,
+    service: std::sync::Arc<crate::dayflow::service::DayflowService>,
+}
+
+impl Daemon {
+    /// A daemon persisting to `state_path`, over `service`.
+    pub fn new(
+        state_path: impl Into<PathBuf>,
+        service: std::sync::Arc<crate::dayflow::service::DayflowService>,
+    ) -> Self {
+        Self { store: DaemonStateStore::new(state_path), service }
+    }
+
+    /// The state store. There is exactly one, and it is this.
+    pub fn store(&self) -> &DaemonStateStore {
+        &self.store
+    }
+
+    /// The service every surface reads through.
+    pub fn service(&self) -> &std::sync::Arc<crate::dayflow::service::DayflowService> {
+        &self.service
+    }
+
+    /// Start, or RESUME, a session for `spec`.
+    ///
+    /// Returns the decision alongside the session id so the caller can say which
+    /// happened. A resume that silently looked like a fresh start would make the
+    /// interruption invisible — and the interruption is the fact worth keeping.
+    pub fn start_or_resume(
+        &self,
+        mode: crate::dayflow::models::DayflowMode,
+        spec: crate::dayflow::source::SourceSpec,
+        now: DateTime<Utc>,
+    ) -> Result<(Uuid, ResumeDecision), DayflowError> {
+        let (prior, anomaly) = self.store.load_reporting()?;
+        if let Some(a) = anomaly {
+            // Not swallowed: it says the last run did not stop cleanly, so its
+            // final windows may be incomplete.
+            tracing::warn!(anomaly = a.label(), "daemon state was unusable; starting fresh");
+        }
+        let decision = decide_resume(prior.as_ref(), now);
+
+        // A resume keeps the PERSISTED spec, not the one just typed. The
+        // session is a record of what it has been capturing all along; adopting
+        // a new subject mid-session would make one timeline describe two
+        // different things with nothing marking the seam.
+        let effective = match (&decision, prior.as_ref().and_then(|p| p.spec.clone())) {
+            (ResumeDecision::Resumed, Some(persisted)) => persisted,
+            _ => spec,
+        };
+
+        let id = self.service.start_session(mode, effective.clone(), now)?;
+
+        let mut state = match (&decision, prior) {
+            // Continue the SAME session id, and keep the sequence high-water
+            // marks so windows do not collide with what is already on disk.
+            (ResumeDecision::Resumed, Some(p)) => DaemonState {
+                session_id: p.session_id,
+                day: p.day,
+                started_at: p.started_at,
+                pid: std::process::id(),
+                last_sequence: p.last_sequence,
+                updated_at: now,
+                spec: Some(effective),
+                // The NEW process's port, set by whoever serves; a resumed
+                // record must not advertise the dead process's listener.
+                port: None,
+            },
+            _ => DaemonState::new(id, now, std::process::id()).with_spec(effective),
+        };
+        state.updated_at = now;
+        self.store.save(&state)?;
+        Ok((state.session_id, decision))
+    }
+
+    /// Whether another daemon is already serving this state file.
+    ///
+    /// The T023 requirement is exactly ONE state store, and the failure it
+    /// guards against is silent: a second daemon overwrites the first's record,
+    /// both keep capturing, and the two sessions interleave sequences into one
+    /// timeline with nothing saying so. Checking the published port ANSWERS is
+    /// what distinguishes a live daemon from a stale record left by a crash —
+    /// a crashed daemon's file still names a port.
+    pub fn live_peer_port(&self) -> Option<u16> {
+        let port = self.store.load().ok()??.port?;
+        crate::dayflow::client::DaemonClient::new(port)
+            .get("/dayflow/status")
+            .ok()
+            .map(|_| port)
+    }
+
+    /// Publish the port this daemon serves on, so surfaces can attach.
+    pub fn publish_port(&self, port: u16) -> Result<(), DayflowError> {
+        let Some(mut state) = self.store.load()? else {
+            return Err(DayflowError::NoActiveSession);
+        };
+        state.port = Some(port);
+        self.store.save(&state)
+    }
+
+    /// Record the interruption a restart implies.
+    ///
+    /// A resumed session that simply carried on would show an unexplained hole:
+    /// no entries, no gap, indistinguishable from a quiet afternoon. The gap
+    /// says capture STOPPED and why — the same distinction 013 drew between an
+    /// absence and a recorded pause (FR-032).
+    pub fn record_interruption(
+        &self,
+        session_id: Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<(), DayflowError> {
+        // Through the store's EXISTING pause seam, not a second gap path: a
+        // gap IS a recorded pause read back, and a parallel writer is how the
+        // two representations drift.
+        self.service.record_pause(
+            session_id,
+            &crate::dayflow::window::PauseInterval {
+                from,
+                to: Some(to),
+                cause: crate::dayflow::window::PauseCause::DaemonRestart,
+            },
+        )
+    }
+
+    /// Stop the session and clear the state, so the next start is fresh.
+    pub fn stop(&self, now: DateTime<Utc>) -> Result<usize, DayflowError> {
+        self.service.stop_capture()?;
+        let closed = self.service.stop(now)?;
+        self.store.clear()?;
+        Ok(closed.len())
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

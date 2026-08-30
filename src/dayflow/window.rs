@@ -50,6 +50,12 @@ pub enum PauseCause {
     /// A capture source ended for good — the window closed, the display was
     /// unplugged, the stream finished. Does NOT lift on its own.
     SourceEnded,
+    /// The daemon was not running: a restart, a crash, a reboot.
+    ///
+    /// Recorded so a resumed session shows the interruption. Without it the
+    /// hole is indistinguishable from a quiet afternoon, which is exactly the
+    /// conflation gaps exist to prevent (FR-032).
+    DaemonRestart,
 }
 
 impl PauseCause {

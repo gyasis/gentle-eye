@@ -1103,6 +1103,22 @@ async fn run_serve() -> Result<()> {
 /// argv, calls the service, prints JSON. No decision is made here, because a
 /// decision made in one surface is a decision the other two do not make.
 async fn run_dayflow(args: &[String]) -> Result<()> {
+    // `serve` is the daemon itself, not a command against one.
+    if args.first().map(String::as_str) == Some("serve") {
+        return run_dayflow_serve(&args[1..]).await;
+    }
+
+    // ATTACH to a running daemon if there is one (D014-15). A surface that
+    // builds its own service gets a PRIVATE session: it reports "not running"
+    // while the daemon captures, and its `start` creates a second session
+    // nothing else can see.
+    let store = gentle_eye::dayflow::daemon::DaemonStateStore::new(daemon_state_path()?);
+    if let Some(client) = gentle_eye::dayflow::client::DaemonClient::discover(&store) {
+        let body = dayflow_remote(&client, args)?;
+        println!("{body}");
+        return Ok(());
+    }
+
     let server = GentleEyeServer::new().await?;
     let value = dayflow_command(server.dayflow(), args, Utc::now())?;
     println!("{}", serde_json::to_string_pretty(&value)?);
@@ -1217,6 +1233,148 @@ fn dayflow_command(
         other => return Err(anyhow!("unknown dayflow subcommand '{other}'")),
     };
     Ok(value)
+}
+
+
+/// Where the daemon publishes its state. ONE path, so every surface finds the
+/// same daemon — a second location is how two views of one session diverge.
+fn daemon_state_path() -> Result<std::path::PathBuf> {
+    let root = AppConfig::load()
+        .map(|c| c.storage.base_dir)
+        .map_err(|e| anyhow!("config error: {e}"))?;
+    Ok(root.join("dayflow-daemon.json"))
+}
+
+/// Run the daemon: own the session, serve the surfaces.
+async fn run_dayflow_serve(args: &[String]) -> Result<()> {
+    let port: u16 = flag(args, "--port")
+        .map(str::parse)
+        .transpose()
+        .map_err(|e| anyhow!("bad --port: {e}"))?
+        .unwrap_or(7431);
+
+    let server = GentleEyeServer::new().await?;
+    let daemon = gentle_eye::dayflow::daemon::Daemon::new(
+        daemon_state_path()?,
+        std::sync::Arc::clone(server.dayflow()),
+    );
+
+    let displays = match flag(args, "--displays") {
+        Some(list) => Some(
+            list.split(',')
+                .map(|s| s.trim().parse::<u32>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| anyhow!("bad --displays: {e}"))?,
+        ),
+        None => None,
+    };
+    let spec = gentle_eye::dayflow::source::SourceSpec::parse(
+        displays,
+        flag(args, "--window").map(str::to_string),
+        flag(args, "--target").map(str::to_string),
+        flag(args, "--input").map(str::to_string),
+    )
+    .map_err(|e| anyhow!(e))?;
+
+    // Refuse to become a SECOND daemon over the same state file. Two daemons
+    // interleave their sequences into one timeline and each overwrites the
+    // other's record, with nothing reporting the collision.
+    if let Some(live) = daemon.live_peer_port() {
+        return Err(anyhow!(
+            "a dayflow daemon is already serving on port {live}. \
+             Attach to it (`gentle-eye dayflow status`) or stop it first — \
+             a second daemon would interleave its windows into the same timeline."
+        ));
+    }
+
+    let now = Utc::now();
+    let (id, decision) = daemon.start_or_resume(
+        gentle_eye::dayflow::models::DayflowMode::Daemon,
+        spec,
+        now,
+    )?;
+
+    // The interruption between the previous process and this one is a RECORDED
+    // fact. Without it the hole reads as a quiet afternoon.
+    if decision == gentle_eye::dayflow::daemon::ResumeDecision::Resumed {
+        if let Ok(Some(prior)) = daemon.store().load() {
+            if let Err(e) = daemon.record_interruption(id, prior.updated_at, now) {
+                tracing::warn!(error = %e, "could not record the restart gap");
+            }
+        }
+    }
+
+    let listener = gentle_eye::dayflow::http::bind(port)
+        .map_err(|e| anyhow!("cannot bind port {port}: {e}"))?;
+    daemon.publish_port(port)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "session_id": id.to_string(),
+            "resume": format!("{decision:?}"),
+            "port": port,
+        })
+    );
+    gentle_eye::dayflow::http::serve(listener, std::sync::Arc::clone(server.dayflow()));
+    Ok(())
+}
+
+/// Run a dayflow subcommand against a RUNNING daemon.
+fn dayflow_remote(
+    client: &gentle_eye::dayflow::client::DaemonClient,
+    args: &[String],
+) -> Result<String> {
+    let sub = args.first().map(String::as_str).unwrap_or("status");
+    let rest = &args[args.len().min(1)..];
+    let query = |name: &str| flag(rest, name).map(str::to_string);
+    match sub {
+        "status" => Ok(client.get("/dayflow/status")?),
+        "stop" => Ok(client.post("/dayflow/stop")?),
+        "start" => {
+            let mut q: Vec<String> = Vec::new();
+            for name in ["--displays", "--window", "--target", "--input", "--mode"] {
+                if let Some(v) = query(name) {
+                    q.push(format!("{}={}", name.trim_start_matches("--"), urlencode(&v)));
+                }
+            }
+            Ok(client.post(&format!("/dayflow/start?{}", q.join("&")))?)
+        }
+        "timeline" | "standup" | "ask" => {
+            let (from, to) = gentle_eye::dayflow::service::resolve_range(
+                flag(rest, "--from"),
+                flag(rest, "--to"),
+                Utc::now(),
+            )
+            .map_err(|e| anyhow!(e))?;
+            let mut path = format!(
+                "/dayflow/{sub}?from={}&to={}",
+                urlencode(&from.to_rfc3339()),
+                urlencode(&to.to_rfc3339())
+            );
+            if sub == "ask" {
+                let q = flag(rest, "--question")
+                    .ok_or_else(|| anyhow!("ask needs --question"))?;
+                path.push_str(&format!("&question={}", urlencode(q)));
+            }
+            Ok(client.get(&path)?)
+        }
+        other => Err(anyhow!("unknown dayflow subcommand '{other}'")),
+    }
+}
+
+/// Percent-encode a query value. Small and local: the alternative is a
+/// dependency for five routes against localhost.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 

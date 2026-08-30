@@ -18,6 +18,7 @@
 
 pub mod capture_loop;
 pub mod chunking;
+pub mod client;
 pub mod daemon;
 pub mod engine;
 pub mod errors;
