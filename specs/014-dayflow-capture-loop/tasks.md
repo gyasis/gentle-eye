@@ -72,13 +72,13 @@ line says so.
 
 ## Phase 7: User Story 1 — the loop's remaining duties (P1)
 
-- [ ] T018 [US1] Run `retention::plan` on a schedule during a session and execute its decisions.
+- [x] T018 [US1] Run `retention::plan` on a schedule during a session and execute its decisions.
       `> DONE:` a simulated long run shows disk falling while NO unsummarised segment is reclaimed — the rule is unchanged and re-proven at the loop level.
-- [ ] T019 [US1] Attach provenance at `scheduler::entry_from`: entries carry the regions their text came from, replacing `provenance: None`.
+- [x] T019 [US1] Attach provenance at `scheduler::entry_from`: entries carry the regions their text came from, replacing `provenance: None`.
       `> DONE:` entries written by a live loop have non-null provenance whose region ids match the sidecar's; a two-pane capture reconstructs its arrangement from stored rows.
-- [ ] T020 [US1] DESIGN + implement the `keep_alive` channel (D014-4, deliberately open). Options: an optional request-options struct on `VisionProvider` with a default (no call-site churn, one more type) or a dayflow-local provider wrapper (no shared-trait change, a second path to keep in step). Pick one, state why in the code.
+- [x] T020 [US1] DESIGN + implement the `keep_alive` channel (D014-4, deliberately open). Options: an optional request-options struct on `VisionProvider` with a default (no call-site churn, one more type) or a dayflow-local provider wrapper (no shared-trait change, a second path to keep in step). Pick one, state why in the code.
       `> DONE:` `ResidencyPolicy::Resident` is expressible end to end — a test proves the value reaches the provider; a provider that IGNORES `keep_alive` still behaves correctly. `VisionProvider` is used well outside dayflow, so the choice is justified in a comment, not assumed.
-- [ ] T021 [S] [US1] Residency measurably works: a `Resident` multi-segment run pays the cold load once, an `OnDemand` run pays it per segment.
+- [x] T021 [S] [US1] Residency measurably works: a `Resident` multi-segment run pays the cold load once, an `OnDemand` run pays it per segment.
       `> DONE:` `SegmentLatency::first_call` shows the difference across segments; `cargo check` + clippy = 0.
 
 ## Phase 8: User Story 4 — the record survives a restart (P2)
