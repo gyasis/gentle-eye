@@ -1,7 +1,1201 @@
-//! Dayflow session engine + real-time scheduler (Wave 5).
+//! Dayflow run lifecycle: displays, idle, off/on, interval, liveness.
 //!
-//! `DayflowEngine`: start/stop sessions (with a max-duration cap), driving the
-//! record → chunk → summarize → timeline pipeline. A background task summarizes
-//! each chunk in real time (every `chunk_minutes`).
+//! A [`DayflowRun`] ties the pieces together — the [`Sampler`] that decides what
+//! is worth keeping, the [`WindowController`] that decides when a window ends,
+//! and the [`IdleTracker`] that decides when to stop entirely — and exposes the
+//! result as [`DayflowLiveness`].
 //!
-//! TODO(Wave 5): `DayflowEngine` trait + impl over the capture/summarizer/timeline layers.
+//! It owns no threads and no clock. Every entry point takes `now`, so a whole
+//! day can be simulated deterministically in a test: an eight-hour run with
+//! pauses, an interval change and a display unplug costs microseconds and yields
+//! exactly the same decisions it would make live.
+
+use chrono::{DateTime, NaiveDate, Utc};
+use uuid::Uuid;
+
+use crate::config::{DayflowConfig, DayflowIntent};
+use crate::dayflow::errors::DayflowError;
+use crate::dayflow::idle::{IdleTracker, IdleTransition};
+use crate::dayflow::models::{DayflowLiveness, DayflowMode};
+use crate::dayflow::window::{ClosedWindow, PauseCause, WindowController};
+
+/// What happened when capture was asked to start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartOutcome {
+    /// A new session began.
+    Started,
+    /// Capture was turned back on and REJOINED the same day's session.
+    Rejoined,
+}
+
+/// One dayflow run.
+#[derive(Debug)]
+pub struct DayflowRun {
+    session_id: Uuid,
+    started_at: DateTime<Utc>,
+    day: NaiveDate,
+    mode: DayflowMode,
+    intent: DayflowIntent,
+    displays: Vec<u32>,
+    windows: WindowController,
+    idle: IdleTracker,
+    stopped: bool,
+    /// Windows closed so far — the liveness evidence, counted as they close.
+    chunks_written: u64,
+    last_chunk_at: Option<DateTime<Utc>>,
+    last_summary_at: Option<DateTime<Utc>>,
+    /// When this run last started producing — start, or the most recent resume.
+    producing_since: DateTime<Utc>,
+    /// Hard cap on a bounded session's wall-clock length, if any.
+    max_duration: Option<std::time::Duration>,
+    /// Intervals whose frame could not be obtained.
+    frames_dropped: u64,
+}
+
+impl DayflowRun {
+    /// Begin a run over `displays` (already resolved from a
+    /// [`crate::config::DisplaySelection`]).
+    ///
+    /// Fails on an empty display set: a run that captures nothing would report
+    /// healthy while recording an empty day, which is the exact false-green this
+    /// feature exists to prevent.
+    pub fn start(
+        cfg: &DayflowConfig,
+        mode: DayflowMode,
+        displays: Vec<u32>,
+        now: DateTime<Utc>,
+    ) -> Result<Self, DayflowError> {
+        cfg.validate().map_err(|e| DayflowError::Invalid(e.to_string()))?;
+        if displays.is_empty() {
+            return Err(DayflowError::Invalid(
+                "no displays selected — a run capturing nothing would report healthy \
+                 while recording an empty day"
+                    .into(),
+            ));
+        }
+        Ok(Self {
+            session_id: Uuid::new_v4(),
+            started_at: now,
+            day: now.date_naive(),
+            mode,
+            intent: cfg.intent,
+            displays,
+            windows: WindowController::new(cfg.segment_duration()),
+            idle: IdleTracker::new(cfg.idle.clone()),
+            stopped: false,
+            chunks_written: 0,
+            last_chunk_at: None,
+            last_summary_at: None,
+            producing_since: now,
+            max_duration: None,
+            frames_dropped: 0,
+        })
+    }
+
+    /// Cap a bounded session's wall-clock length.
+    ///
+    /// Only meaningful for [`DayflowMode::Session`]: a daemon is unbounded by
+    /// definition. Applying it to a daemon is refused rather than ignored — a
+    /// silently-dropped cap would look like it was honoured.
+    pub fn with_max_duration(
+        mut self,
+        max: std::time::Duration,
+    ) -> Result<Self, DayflowError> {
+        if self.mode != DayflowMode::Session {
+            return Err(DayflowError::Invalid(
+                "a max duration applies to a bounded session, not a daemon".into(),
+            ));
+        }
+        if max.is_zero() {
+            return Err(DayflowError::Invalid("a session max duration must be positive".into()));
+        }
+        self.max_duration = Some(max);
+        Ok(self)
+    }
+
+    /// The configured cap, if any.
+    pub fn max_duration(&self) -> Option<std::time::Duration> {
+        self.max_duration
+    }
+
+    /// Whether the cap has been reached at `now`.
+    pub fn max_duration_reached(&self, now: DateTime<Utc>) -> bool {
+        self.max_duration.is_some_and(|max| {
+            (now - self.started_at).to_std().is_ok_and(|elapsed| elapsed >= max)
+        })
+    }
+
+    /// Enforce the cap: stop the run if it has run long enough.
+    ///
+    /// Returns the windows closed by the stop, or `None` if the cap has not been
+    /// reached (or none is set). Called automatically from
+    /// [`DayflowRun::on_sample`], so a capped session ends even if nothing else
+    /// is driving it.
+    pub fn enforce_max_duration(&mut self, now: DateTime<Utc>) -> Option<Vec<ClosedWindow>> {
+        if self.stopped || !self.max_duration_reached(now) {
+            return None;
+        }
+        // Close AT the cap boundary, not at whenever enforcement happened to
+        // run. A sleep/wake or a slow driver can deliver this call hours late,
+        // and a window stamped with that time claims the user was working
+        // through it — the same stretched-window failure the pause path clamps.
+        let boundary = self
+            .max_duration
+            .and_then(|max| chrono::Duration::from_std(max).ok())
+            .map_or(now, |max| {
+                let b = self.started_at + max;
+                if b < now { b } else { now }
+            });
+        Some(self.stop(boundary))
+    }
+
+    /// When this run started.
+    pub fn started_at(&self) -> DateTime<Utc> {
+        self.started_at
+    }
+
+    /// This run's session id.
+    pub fn session_id(&self) -> Uuid {
+        self.session_id
+    }
+
+    /// The calendar day this run belongs to.
+    pub fn day(&self) -> NaiveDate {
+        self.day
+    }
+
+    /// Session vs daemon.
+    pub fn mode(&self) -> DayflowMode {
+        self.mode
+    }
+
+    /// What this run is for.
+    pub fn intent(&self) -> DayflowIntent {
+        self.intent
+    }
+
+    /// Displays currently being captured.
+    pub fn displays(&self) -> &[u32] {
+        &self.displays
+    }
+
+    /// The sampling interval a caller should use for this run's mode.
+    pub fn sampling_interval(&self, cfg: &DayflowConfig) -> std::time::Duration {
+        cfg.sampling.interval_for(self.mode)
+    }
+
+    /// Record that a sample was taken on `display_id`.
+    ///
+    /// Returns any window that closed as a result. Windows are counted here, so
+    /// the liveness evidence advances only when something was actually produced.
+    /// The sequence a sample taken now would belong to, for `display_id`.
+    /// Read before `on_sample` — see [`WindowController::current_sequence`].
+    pub fn current_sequence(&self, display_id: u32) -> u64 {
+        self.windows.current_sequence(display_id)
+    }
+
+    /// Seed the next window sequence per display, for a resumed session.
+    ///
+    /// Call BEFORE any sample flows: a restart that reuses sequences a dead
+    /// process already wrote collides on the durable `(display, sequence)`
+    /// identity — see [`WindowController::seed_next_sequences`].
+    pub fn seed_next_sequences<I: IntoIterator<Item = (u32, u64)>>(&mut self, seeds: I) {
+        self.windows.seed_next_sequences(seeds);
+    }
+
+    /// Adopt a RESUMED session's identity: the id and true start of the
+    /// session this run CONTINUES (T022).
+    ///
+    /// `start` mints a fresh UUID, which is right for a fresh session and
+    /// wrong for a resume: the daemon's record would say "the same session"
+    /// while every entry the run settles files under a DIFFERENT id, and the
+    /// restart gap keys to the one the entries do not use — one session with
+    /// two identities, diverging silently (013/R29). Call before any entry is
+    /// produced; the resume decision guarantees `started_at` is the same day.
+    pub fn adopt_identity(&mut self, session_id: Uuid, started_at: DateTime<Utc>) {
+        self.session_id = session_id;
+        self.started_at = started_at;
+        self.day = started_at.date_naive();
+    }
+
+    pub fn on_sample(&mut self, display_id: u32, now: DateTime<Utc>) -> Option<ClosedWindow> {
+        // Enforce the cap before accepting the sample: a bounded session must not
+        // record past its own limit just because something kept feeding it.
+        //
+        // The windows it closes are RETURNED, not swallowed: every other close
+        // path hands them back for persistence, and a final window that exists
+        // only in an in-memory counter never reaches the ledger (FR-005).
+        if let Some(mut closed) = self.enforce_max_duration(now) {
+            return closed.pop();
+        }
+        if self.stopped || !self.displays.contains(&display_id) {
+            return None;
+        }
+        let closed = self.windows.on_sample(display_id, now);
+        if let Some(w) = &closed {
+            self.note_closed(w);
+        }
+        closed
+    }
+
+    /// Feed the idle detector, applying pause or resume if it transitions.
+    ///
+    /// `idle_for` is the raw reading (`None` = could not tell, treated as
+    /// active); `since_last` is the time since the previous tick.
+    pub fn tick_idle(
+        &mut self,
+        idle_for: Option<std::time::Duration>,
+        since_last: std::time::Duration,
+        now: DateTime<Utc>,
+    ) -> Vec<ClosedWindow> {
+        if self.stopped {
+            return Vec::new();
+        }
+        match self.idle.observe(idle_for, since_last) {
+            Some(IdleTransition::WentIdle) => self.pause(PauseCause::Idle, now),
+            Some(IdleTransition::BecameActive) => {
+                // Only lift an AUTOMATIC pause. Resuming unconditionally means a
+                // mouse movement silently un-does a deliberate off switch.
+                if self.windows.resume_if_automatic(now) {
+                    // Restart the staleness clock: a just-resumed recorder has
+                    // not had time to produce, and must not read as a fault.
+                    self.producing_since = now;
+                }
+                Vec::new()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Record that NO source can produce: the session-wide arm of FR-113.
+    ///
+    /// D014-9 split availability into two records — one source failing among
+    /// producers is a per-source `SampleDrop`, but when EVERY source is
+    /// unavailable, capture has stopped for the whole session and that is a
+    /// GAP with a cause. For the single-source sessions US2 introduces (one
+    /// window, one target) the two coincide: the window minimising IS the
+    /// session pausing. Without this record, a watched window that quits
+    /// leaves a silent hole — the timeline shows nothing, with no gap saying
+    /// why, which is precisely the "dead source reads as quiet" conflation
+    /// FR-113 forbids.
+    ///
+    /// Idempotent while already paused (the windows layer keeps the original
+    /// interval), and a deliberate `UserOff` is never downgraded by it.
+    pub fn sources_unavailable(
+        &mut self,
+        cause: PauseCause,
+        now: DateTime<Utc>,
+    ) -> Vec<ClosedWindow> {
+        if self.stopped {
+            return Vec::new();
+        }
+        self.pause(cause, now)
+    }
+
+    /// A source produced a frame again: lift a SOURCE pause, and nothing else.
+    ///
+    /// Deliberately narrower than `resume_if_automatic` — a frame arriving
+    /// says nothing about the USER's state, so it must not lift an `Idle`,
+    /// `Locked` or `DisplaySleep` pause (frames keep changing while the user
+    /// is away; that is why those causes exist). `SourceEnded` stays too: it
+    /// is not automatic by design, and a retired source never produces again.
+    pub fn sources_recovered(&mut self, now: DateTime<Utc>) -> bool {
+        if matches!(self.windows.pause_cause(), Some(PauseCause::SourceOccluded)) {
+            self.windows.resume(now);
+            // Restart the staleness clock, as every real resume path does: a
+            // just-recovered source has not had time to produce a chunk, and
+            // must not read as a fault for the length of the outage.
+            self.producing_since = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Turn capture OFF. The in-progress windows close and are accounted for.
+    ///
+    /// A no-op on a stopped run: recording a pause that can never close would
+    /// leave a permanently open interval in a finished run's ledger.
+    pub fn turn_off(&mut self, now: DateTime<Utc>) -> Vec<ClosedWindow> {
+        if self.stopped {
+            return Vec::new();
+        }
+        self.pause(PauseCause::UserOff, now)
+    }
+
+    /// Turn capture back ON.
+    ///
+    /// Rejoins THIS day's session (FR-033). Returns `Rejoined` when the same
+    /// calendar day, and `Err` on a different one — a new day is a new session,
+    /// and silently continuing yesterday's would put today's entries on the
+    /// wrong day.
+    pub fn turn_on(&mut self, now: DateTime<Utc>) -> Result<StartOutcome, DayflowError> {
+        if self.stopped {
+            return Err(DayflowError::Invalid(
+                "this run has stopped; start a new one rather than resurrecting it".into(),
+            ));
+        }
+        if now.date_naive() != self.day {
+            return Err(DayflowError::Invalid(format!(
+                "this run belongs to {}; {} is a different day and needs a new session",
+                self.day,
+                now.date_naive()
+            )));
+        }
+        // Only restart the staleness clock if this call ACTUALLY lifted a pause.
+        //
+        // Resetting unconditionally makes `turn_on` a health-launderer: an
+        // idempotent "ensure capture is on" caller would flip a genuinely
+        // Degraded run back to Healthy on every invocation and mask a dead
+        // sampler indefinitely. Turning on something already on is a no-op, and
+        // a no-op must not change what the evidence says.
+        if self.windows.pause_cause().is_some() {
+            self.windows.resume(now);
+            self.producing_since = now;
+        }
+        Ok(StartOutcome::Rejoined)
+    }
+
+    /// Change the segment interval, effective from the next window (FR-035).
+    pub fn set_interval(
+        &mut self,
+        interval: std::time::Duration,
+        now: DateTime<Utc>,
+    ) -> Vec<ClosedWindow> {
+        let closed = self.windows.set_interval(interval, now);
+        for w in &closed {
+            self.note_closed(w);
+        }
+        closed
+    }
+
+    /// Stop adding a display to the run (unplugged), closing its window.
+    pub fn remove_display(&mut self, display_id: u32, now: DateTime<Utc>) -> Option<ClosedWindow> {
+        self.displays.retain(|d| *d != display_id);
+        let closed = self.windows.remove_display(display_id, now);
+        if let Some(w) = &closed {
+            self.note_closed(w);
+        }
+        closed
+    }
+
+    /// Pause intervals recorded by this run.
+    pub fn pauses_seen(&self) -> &[crate::dayflow::window::PauseInterval] {
+        self.windows.pauses()
+    }
+
+    /// Record that an interval's frame could not be obtained.
+    ///
+    /// Takes the sampler's UNRECOVERED drop count so status reports real holes:
+    /// an interval that was retried successfully is not missing data, and
+    /// counting it would inflate the number a reader acts on.
+    pub fn note_frames_dropped(&mut self, unrecovered: u64) {
+        self.frames_dropped = unrecovered;
+    }
+
+    /// Pull the current hole count straight from a sampler.
+    ///
+    /// The wire that makes `frames_dropped` real rather than plumbing: a caller
+    /// that samples and never syncs would report zero holes while dropping
+    /// frames, which is exactly the false-green this feature exists to prevent.
+    pub fn sync_drops_from(&mut self, sampler: &crate::dayflow::sampler::Sampler) {
+        self.frames_dropped = sampler.unrecovered_drops().count() as u64;
+    }
+
+    /// Intervals whose frame could not be obtained.
+    pub fn frames_dropped(&self) -> u64 {
+        self.frames_dropped
+    }
+
+    /// Note that a window was summarised, advancing that evidence.
+    pub fn note_summarized(&mut self, at: DateTime<Utc>) {
+        self.last_summary_at = Some(at);
+    }
+
+    /// Stop the run, closing every open window (FR-005).
+    pub fn stop(&mut self, now: DateTime<Utc>) -> Vec<ClosedWindow> {
+        let closed = self.windows.stop(now);
+        for w in &closed {
+            self.note_closed(w);
+        }
+        self.stopped = true;
+        closed
+    }
+
+    /// Current liveness, derived from what this run has PRODUCED.
+    pub fn liveness(&self, now: DateTime<Utc>) -> DayflowLiveness {
+        let capturing = if self.stopped || self.windows.pause_cause().is_some() {
+            // S3: "currently capturing" must mean it. A paused or stopped run is
+            // capturing nothing, whatever remains selected.
+            0
+        } else {
+            u32::try_from(self.displays.len()).unwrap_or(u32::MAX)
+        };
+        DayflowLiveness::assess(crate::dayflow::models::LivenessInput {
+            now,
+            chunks_written: self.chunks_written,
+            last_chunk_at: self.last_chunk_at,
+            last_summary_at: self.last_summary_at,
+            segment_seconds: u32::try_from(self.windows.interval().as_secs())
+                .unwrap_or(u32::MAX),
+            displays_active: capturing,
+            frames_dropped: self.frames_dropped,
+            paused_cause: self.windows.pause_cause(),
+            stopped: self.stopped,
+            producing_since: self.producing_since,
+        })
+    }
+
+    fn pause(&mut self, cause: PauseCause, now: DateTime<Utc>) -> Vec<ClosedWindow> {
+        let closed = self.windows.pause(cause, now);
+        for w in &closed {
+            self.note_closed(w);
+        }
+        closed
+    }
+
+    fn note_closed(&mut self, w: &ClosedWindow) {
+        self.chunks_written += 1;
+        // Evidence of production is when a sample was last actually TAKEN, not
+        // when the window happened to close.
+        //
+        // A window closed by a pause, an interval change or a stop ends at `now`
+        // whatever the sampler was doing. Using `end_wall` here let a dead
+        // sampler read Healthy the instant any of those fired — closing a stale
+        // window is bookkeeping, not output.
+        let Some(produced_at) = w.last_sample_at else {
+            return; // a window containing no samples is not evidence of anything
+        };
+        self.last_chunk_at = Some(match self.last_chunk_at {
+            Some(prev) if prev > produced_at => prev,
+            _ => produced_at,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DisplaySelection;
+    use crate::dayflow::models::DayflowHealth;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_787_500_000 + secs, 0).unwrap()
+    }
+
+    fn cfg() -> DayflowConfig {
+        let mut c = DayflowConfig::default();
+        c.segment_seconds = 600; // 10-minute windows
+        c
+    }
+
+    fn run(displays: Vec<u32>) -> DayflowRun {
+        DayflowRun::start(&cfg(), DayflowMode::Daemon, displays, at(0)).unwrap()
+    }
+
+    /// Drive the tracker until the idle state settles, at a realistic cadence.
+    fn settle_idle(r: &mut DayflowRun, idle_secs: u64, from: i64) -> Vec<ClosedWindow> {
+        let d = std::time::Duration::from_secs(60);
+        let mut out = Vec::new();
+        for i in 0..4 {
+            out.extend(r.tick_idle(
+                Some(std::time::Duration::from_secs(idle_secs)),
+                d,
+                at(from + i * 60),
+            ));
+        }
+        out
+    }
+
+    #[test]
+    fn a_run_capturing_no_displays_is_refused() {
+        // It would report healthy while recording an empty day.
+        let err = DayflowRun::start(&cfg(), DayflowMode::Daemon, vec![], at(0)).unwrap_err();
+        assert!(format!("{err}").contains("no displays"), "got: {err}");
+    }
+
+    #[test]
+    fn an_invalid_interval_is_refused_at_start_not_discovered_later() {
+        let mut c = cfg();
+        c.segment_seconds = 30; // below the 5-minute floor
+        assert!(DayflowRun::start(&c, DayflowMode::Daemon, vec![0], at(0)).is_err());
+    }
+
+    #[test]
+    fn every_selected_display_gets_its_own_pipeline() {
+        // T012: three displays, three independent window streams.
+        let mut r = run(vec![0, 1, 2]);
+        for d in [0, 1, 2] {
+            r.on_sample(d, at(0));
+        }
+        let mut closed = Vec::new();
+        for d in [0, 1, 2] {
+            closed.extend(r.on_sample(d, at(600)));
+        }
+        assert_eq!(closed.len(), 3, "each display closes its own window");
+        let mut ds: Vec<u32> = closed.iter().map(|w| w.display_id).collect();
+        ds.sort_unstable();
+        assert_eq!(ds, vec![0, 1, 2]);
+        assert_eq!(r.liveness(at(600)).displays_active, 3);
+    }
+
+    #[test]
+    fn a_sample_from_an_unselected_display_is_ignored() {
+        // A focused session on the portrait screen must not silently record the
+        // others.
+        let mut r = run(vec![1]);
+        assert!(r.on_sample(0, at(0)).is_none());
+        r.on_sample(1, at(0));
+        assert!(r.on_sample(0, at(600)).is_none(), "display 0 is not in this run");
+        assert!(r.on_sample(1, at(600)).is_some());
+    }
+
+    #[test]
+    fn display_selection_resolves_into_a_run() {
+        // The identity selector feeding the engine, end to end.
+        use crate::capture::display::DisplayInfo;
+        let desk = vec![
+            DisplayInfo::new(0, 1920, 1080, true),
+            DisplayInfo::new(1, 1080, 2560, false),
+            DisplayInfo::new(2, 3440, 1440, false),
+        ];
+        let picked = DisplaySelection::Named(vec!["portrait".into()])
+            .resolve(&desk)
+            .expect("portrait must resolve");
+        let r = DayflowRun::start(&cfg(), DayflowMode::Session, picked, at(0)).unwrap();
+        assert_eq!(r.displays(), &[1], "only the portrait panel is captured");
+    }
+
+    #[test]
+    fn going_idle_pauses_and_returning_resumes() {
+        // T014: the detector wired to the window controller.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+
+        let closed = settle_idle(&mut r, 400, 310);
+        assert_eq!(closed.len(), 1, "the open window closes on pause");
+        assert_eq!(r.liveness(at(550)).health, DayflowHealth::Paused);
+
+        // no samples counted while paused
+        assert!(r.on_sample(0, at(400)).is_none());
+
+        // return to activity
+        settle_idle(&mut r, 0, 560);
+        assert_eq!(r.liveness(at(800)).health, DayflowHealth::Healthy);
+        r.on_sample(0, at(900));
+        let w = r.on_sample(0, at(1500)).expect("a fresh window after resume");
+        assert_eq!(w.start_wall, at(900), "resume starts a new window, no splice");
+    }
+
+    #[test]
+    fn an_unreadable_idle_signal_never_pauses_a_run() {
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        for i in 1..50 {
+            let closed = r.tick_idle(None, std::time::Duration::from_secs(60), at(i * 60));
+            assert!(closed.is_empty(), "unknown idle must never pause");
+        }
+        assert_ne!(r.liveness(at(3000)).health, DayflowHealth::Paused);
+    }
+
+    #[test]
+    fn turning_off_and_on_the_same_day_rejoins_the_same_session() {
+        // T015 / FR-033.
+        let mut r = run(vec![0]);
+        let id = r.session_id();
+        r.on_sample(0, at(0));
+
+        let closed = r.turn_off(at(300));
+        assert_eq!(closed.len(), 1, "the in-progress window is accounted for, not dropped");
+        assert_eq!(r.liveness(at(300)).health, DayflowHealth::Off);
+
+        assert_eq!(r.turn_on(at(4000)).unwrap(), StartOutcome::Rejoined);
+        assert_eq!(r.session_id(), id, "same day ⇒ same session");
+        assert_eq!(r.day(), at(0).date_naive());
+    }
+
+    #[test]
+    fn turning_on_during_a_different_day_is_refused() {
+        // Silently continuing yesterday's session would file today's entries
+        // under the wrong day.
+        let mut r = run(vec![0]);
+        r.turn_off(at(100));
+        let tomorrow = at(0) + chrono::Duration::days(1);
+        let err = r.turn_on(tomorrow).unwrap_err();
+        assert!(format!("{err}").contains("different day"), "got: {err}");
+    }
+
+    #[test]
+    fn an_off_interval_reads_as_off_not_as_degraded() {
+        // Identical silence to a fault; only the cause differs (FR-032).
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.turn_off(at(100));
+        let l = r.liveness(at(100_000));
+        assert_eq!(l.health, DayflowHealth::Off);
+        assert!(!l.health.is_fault(), "a deliberate off switch is not a fault");
+    }
+
+    #[test]
+    fn activity_must_not_resume_capture_after_a_deliberate_off() {
+        // F1, ordering A: off first, then the user walks away and comes back.
+        // Resuming on a mouse movement would override an explicit instruction to
+        // stop recording.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.turn_off(at(100));
+        assert_eq!(r.liveness(at(100)).health, DayflowHealth::Off);
+
+        // go idle while off, then return to activity
+        settle_idle(&mut r, 400, 300);
+        settle_idle(&mut r, 0, 600);
+
+        assert_eq!(
+            r.liveness(at(900)).health,
+            DayflowHealth::Off,
+            "activity must NOT lift a deliberate off"
+        );
+        assert!(r.on_sample(0, at(700)).is_none(), "and no samples are taken");
+    }
+
+    #[test]
+    fn turning_off_while_idle_paused_actually_takes_effect() {
+        // F1, ordering B: idle-pause first, THEN off. Previously the pause call
+        // returned early, the cause stayed Idle, and the next activity resumed —
+        // the off did nothing at all.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        settle_idle(&mut r, 400, 300);
+        assert_eq!(r.liveness(at(550)).health, DayflowHealth::Paused);
+
+        r.turn_off(at(600));
+        assert_eq!(
+            r.liveness(at(600)).health,
+            DayflowHealth::Off,
+            "the off must override the idle pause, not be swallowed by it"
+        );
+        // The DURABLE record must agree with the live state. Updating only one
+        // of them leaves the ledger saying Idle while liveness says Off — and a
+        // gap's recorded cause is what a later reader has to trust.
+        assert_eq!(
+            r.pauses_seen().last().expect("a pause was recorded").cause,
+            crate::dayflow::window::PauseCause::UserOff,
+            "the recorded pause interval must be upgraded too, not just live state"
+        );
+
+        // activity now must NOT resume it
+        settle_idle(&mut r, 0, 700);
+        assert_eq!(r.liveness(at(1000)).health, DayflowHealth::Off);
+    }
+
+    #[test]
+    fn turning_on_again_after_a_deliberate_off_works() {
+        // The guard must block ACTIVITY, not the user.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.turn_off(at(100));
+        assert_eq!(r.turn_on(at(200)).unwrap(), StartOutcome::Rejoined);
+        assert_eq!(r.liveness(at(200)).health, DayflowHealth::Healthy);
+        r.on_sample(0, at(200));
+        assert!(r.on_sample(0, at(800)).is_some(), "capture works again");
+    }
+
+    #[test]
+    fn turning_on_an_already_running_run_cannot_launder_a_degraded_state() {
+        // The mutation-surviving hole: turn_on unconditionally reset the
+        // staleness clock, so an idempotent "ensure capture is on" caller would
+        // flip a genuinely Degraded run back to Healthy on EVERY call and mask a
+        // dead sampler forever.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(600)); // one window closes
+
+        // sampler dies; silence past two intervals
+        assert_eq!(r.liveness(at(3_000)).health, DayflowHealth::Degraded);
+
+        // "ensure it's on" — must NOT change the evidence
+        assert_eq!(r.turn_on(at(3_000)).unwrap(), StartOutcome::Rejoined);
+        assert_eq!(
+            r.liveness(at(3_000)).health,
+            DayflowHealth::Degraded,
+            "turning on something already on is a no-op; it must not launder health"
+        );
+        // ...and repeating it must not help either
+        for t in [3_100, 3_200, 3_300] {
+            r.turn_on(at(t)).unwrap();
+            assert_eq!(
+                r.liveness(at(t)).health,
+                DayflowHealth::Degraded,
+                "repeated ensure-on must not mask a dead sampler"
+            );
+        }
+    }
+
+    #[test]
+    fn closing_a_stale_window_is_not_evidence_of_production() {
+        // The root cause behind the laundering family: an interval change (or a
+        // pause, or a stop) closes whatever window is open with end_wall = now.
+        // Treating that as output let a DEAD sampler read Healthy the instant
+        // any of them fired.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(60)); // ...then the sampler dies
+
+        assert_eq!(r.liveness(at(3_000)).health, DayflowHealth::Degraded);
+
+        // A config change closes the stale window — bookkeeping, not production.
+        // Note the new interval must not WIDEN the staleness tolerance, or the
+        // run is legitimately healthy for a longer silence and the test would be
+        // measuring the wrong thing. 300s ⇒ stale after 600s.
+        r.set_interval(std::time::Duration::from_secs(300), at(3_000));
+        assert_eq!(
+            r.liveness(at(3_000)).health,
+            DayflowHealth::Degraded,
+            "closing a stale window must NOT resurrect a dead sampler"
+        );
+        assert_eq!(
+            r.liveness(at(3_000)).last_chunk_at,
+            Some(at(60)),
+            "the evidence timestamp is the last SAMPLE, not the window close"
+        );
+    }
+
+    #[test]
+    fn turning_on_after_a_long_deliberate_off_reads_healthy() {
+        // Guards the clock-reset half that survived mutation: without it a user
+        // turning capture back on after a long off instantly reads Degraded,
+        // violating FR-032.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(600));
+        r.turn_off(at(700));
+        assert_eq!(r.liveness(at(700)).health, DayflowHealth::Off);
+
+        r.turn_on(at(20_000)).unwrap();
+        assert_eq!(
+            r.liveness(at(20_000)).health,
+            DayflowHealth::Healthy,
+            "turning it back on must give it time to produce, not fault instantly"
+        );
+        // ...and it still degrades if it then produces nothing
+        assert_eq!(r.liveness(at(22_000)).health, DayflowHealth::Degraded);
+    }
+
+    #[test]
+    fn stopping_a_paused_run_leaves_no_open_gap_in_its_ledger() {
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        settle_idle(&mut r, 400, 300);
+        assert!(r.pauses_seen().last().unwrap().to.is_none(), "open while paused");
+        r.stop(at(2_000));
+        assert!(
+            r.pauses_seen().iter().all(|p| p.to.is_some()),
+            "a finished run must not carry a pause that never closes"
+        );
+    }
+
+    #[test]
+    fn turning_off_a_stopped_run_records_no_open_pause() {
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.stop(at(100));
+        let before = r.pauses_seen().len();
+        r.turn_off(at(200));
+        assert_eq!(
+            r.pauses_seen().len(),
+            before,
+            "a stopped run must not gain a pause interval that can never close"
+        );
+    }
+
+    #[test]
+    fn unplugging_a_display_decrements_what_is_capturing() {
+        // Coverage the day-sim lost when S3 changed its stopped-state assertion.
+        let mut r = run(vec![0, 1]);
+        r.on_sample(0, at(0));
+        r.on_sample(1, at(0));
+        assert_eq!(r.liveness(at(0)).displays_active, 2);
+        r.remove_display(1, at(120));
+        assert_eq!(
+            r.liveness(at(120)).displays_active,
+            1,
+            "while STILL RUNNING, an unplug must decrement the count"
+        );
+    }
+
+    fn session(displays: Vec<u32>) -> DayflowRun {
+        DayflowRun::start(&cfg(), DayflowMode::Session, displays, at(0)).unwrap()
+    }
+
+    #[test]
+    fn dropped_frames_reach_liveness_so_holes_are_visible() {
+        // C2: without this wire, `frames_dropped` is plumbing that reports 0
+        // forever — a status showing no holes while frames are being dropped is
+        // precisely the false-green this feature exists to prevent.
+        use crate::config::{DeltaConfig, DropPolicy};
+        use crate::dayflow::sampler::{RawFrame, Sampler};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = DeltaConfig::default();
+        d.on_drop = DropPolicy::Record;
+        let mut sampler = Sampler::new(d);
+        let mut r = run(vec![0]);
+        assert_eq!(r.liveness(at(0)).frames_dropped, 0, "nothing dropped yet");
+
+        let truncated = vec![0u8; 16];
+        for i in 0..3 {
+            sampler
+                .observe(0, 1, RawFrame { bgra: &truncated, width: 64, height: 48 }, at(i * 60), dir.path())
+                .unwrap();
+        }
+        r.sync_drops_from(&sampler);
+
+        assert_eq!(
+            r.liveness(at(180)).frames_dropped,
+            3,
+            "every unrecovered hole must be visible in status"
+        );
+    }
+
+    #[test]
+    fn a_recovered_interval_is_not_counted_as_a_hole() {
+        // A retried-and-succeeded interval is not missing data; counting it
+        // would inflate the number a reader acts on.
+        use crate::config::DeltaConfig;
+        use crate::dayflow::sampler::{RawFrame, SampleRequest, Sampler};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sampler = Sampler::new(DeltaConfig::default());
+        let mut r = run(vec![0]);
+        let good = {
+            let mut v = Vec::with_capacity(64 * 48 * 4);
+            for i in 0..(64 * 48u32) {
+                let n = ((i.wrapping_mul(37) % 251) as u8) ^ 9;
+                v.extend_from_slice(&[n, n.wrapping_add(40), n.wrapping_add(80), 255]);
+            }
+            v
+        };
+        let truncated = vec![0u8; 16];
+        sampler
+            .observe_with_reacquire(
+                SampleRequest {
+                    display_id: 0,
+                    sequence: 1,
+                    frame: RawFrame { bgra: &truncated, width: 64, height: 48 },
+                    taken_at: at(0),
+                    dir: dir.path(),
+                    max_attempts: 3,
+                },
+                |_| Some(good.clone()),
+            )
+            .unwrap();
+
+        assert_eq!(sampler.dropped_count(), 1, "the near-miss is recorded");
+        r.sync_drops_from(&sampler);
+        assert_eq!(
+            r.liveness(at(60)).frames_dropped,
+            0,
+            "but a RECOVERED interval is not a hole"
+        );
+    }
+
+    #[test]
+    fn a_capped_session_stamps_its_final_window_at_the_cap_not_at_enforcement() {
+        // C3: a sleep/wake or a slow driver can deliver enforcement hours late.
+        // A window stamped with that time claims the user worked through it —
+        // the same stretched-window failure the pause path already clamps.
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(1_800))
+            .unwrap();
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(600));
+
+        // enforcement arrives 13 hours late
+        let closed = r.enforce_max_duration(at(50_000)).expect("the cap fires");
+        assert_eq!(closed.len(), 1);
+        assert_eq!(
+            closed[0].end_wall,
+            at(1_800),
+            "the window must end AT the cap boundary, not at enforcement time"
+        );
+        assert!(
+            closed[0].duration().num_seconds() <= 1_800,
+            "a capped session cannot record a window longer than its own cap"
+        );
+    }
+
+    #[test]
+    fn the_window_closed_by_the_cap_is_returned_to_the_caller() {
+        // C4: every other close path hands windows back for persistence. A final
+        // window living only in an in-memory counter never reaches the ledger.
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(900))
+            .unwrap();
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(120));
+        let returned = r.on_sample(0, at(900));
+        assert!(
+            returned.is_some(),
+            "the sample that trips the cap must return the window it closed"
+        );
+        let w = returned.unwrap();
+        assert_eq!(w.sample_count, 2, "with its samples accounted for");
+        assert_eq!(w.reason, crate::dayflow::window::CloseReason::Stopped);
+    }
+
+    #[test]
+    fn a_capped_session_stops_itself_at_the_limit() {
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(1800))
+            .unwrap();
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(600));
+        assert!(!r.max_duration_reached(at(1_799)));
+        assert_ne!(r.liveness(at(1_700)).health, DayflowHealth::Stopped);
+
+        // The sample that crosses the cap is not RECORDED, but it does return the
+        // window the cap-stop closed, so the caller can persist it (C4).
+        let closing = r.on_sample(0, at(1_800));
+        assert!(closing.is_some(), "the cap-stop's window is handed back");
+        assert_eq!(
+            r.liveness(at(1_800)).health,
+            DayflowHealth::Stopped,
+            "a capped session must end itself at the limit"
+        );
+        // ...and nothing after it is accepted
+        assert!(r.on_sample(0, at(2_400)).is_none(), "the session is over");
+    }
+
+    #[test]
+    fn a_capped_session_does_not_record_past_its_limit() {
+        // The failure that matters: something keeps feeding it and it keeps
+        // recording, silently outliving the bound the user asked for.
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(1200))
+            .unwrap();
+        r.on_sample(0, at(0));
+        let before = r.liveness(at(0)).chunks_written;
+
+        // The first call past the cap returns the window the stop closed; every
+        // later one returns None because the session has ended.
+        assert!(r.on_sample(0, at(1_200)).is_some(), "the cap-stop hands back its window");
+        for t in [1_800, 2_400, 3_000, 6_000] {
+            assert!(r.on_sample(0, at(t)).is_none(), "no sample may land past the cap");
+        }
+        let after = r.liveness(at(6_000)).chunks_written;
+        assert_eq!(
+            after,
+            before + 1,
+            "exactly the one window the stop closed — nothing recorded afterwards"
+        );
+    }
+
+    #[test]
+    fn stopping_at_the_cap_still_accounts_for_the_open_window() {
+        // FR-005: the partial window is closed, not discarded.
+        let mut r = session(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(900))
+            .unwrap();
+        r.on_sample(0, at(0));
+        r.on_sample(0, at(120));
+        let closed = r.enforce_max_duration(at(900)).expect("the cap fires");
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].sample_count, 2, "its samples are accounted for");
+        assert_eq!(closed[0].reason, crate::dayflow::window::CloseReason::Stopped);
+    }
+
+    #[test]
+    fn a_daemon_refuses_a_max_duration_rather_than_ignoring_it() {
+        // A silently dropped cap looks exactly like an honoured one.
+        let err = run(vec![0])
+            .with_max_duration(std::time::Duration::from_secs(600))
+            .unwrap_err();
+        assert!(format!("{err}").contains("daemon"), "got: {err}");
+    }
+
+    #[test]
+    fn an_uncapped_session_runs_indefinitely() {
+        let mut r = session(vec![0]);
+        assert_eq!(r.max_duration(), None);
+        r.on_sample(0, at(0));
+        assert!(!r.max_duration_reached(at(999_999)));
+        assert!(r.on_sample(0, at(600)).is_some(), "no cap ⇒ no self-stop");
+    }
+
+    #[test]
+    fn a_stopped_run_cannot_be_resurrected() {
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        r.stop(at(100));
+        let err = r.turn_on(at(200)).unwrap_err();
+        assert!(format!("{err}").contains("stopped"), "got: {err}");
+        assert_eq!(r.liveness(at(200)).health, DayflowHealth::Stopped);
+    }
+
+    #[test]
+    fn a_fresh_run_is_not_reported_as_a_fault() {
+        // F2: before this, a brand-new run read Degraded until its first window.
+        let r = run(vec![0]);
+        let l = r.liveness(at(0));
+        assert_eq!(l.health, DayflowHealth::Healthy);
+        assert_eq!(l.chunks_written, 0);
+        assert!(!l.health.is_fault(), "a run that just started is not broken");
+    }
+
+    #[test]
+    fn resuming_from_a_long_pause_is_not_reported_as_a_fault() {
+        // F2: last_chunk_at is hours stale after a long idle stretch. Measuring
+        // from it alone reports Degraded the instant capture resumes (FR-032).
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        settle_idle(&mut r, 400, 300);
+
+        // ...hours pass...
+        settle_idle(&mut r, 0, 20_000);
+
+        let l = r.liveness(at(20_300));
+        assert_eq!(l.health, DayflowHealth::Healthy, "just resumed — give it time to produce");
+        assert!(l.last_chunk_at.unwrap() < at(1_000), "its history really is stale");
+    }
+
+    #[test]
+    fn displays_active_reports_what_is_actually_capturing() {
+        // S3: "currently capturing" must mean it.
+        let mut r = run(vec![0, 1]);
+        r.on_sample(0, at(0));
+        assert_eq!(r.liveness(at(0)).displays_active, 2);
+        r.turn_off(at(100));
+        assert_eq!(r.liveness(at(100)).displays_active, 0, "off ⇒ capturing nothing");
+        r.turn_on(at(200)).unwrap();
+        assert_eq!(r.liveness(at(200)).displays_active, 2);
+        r.stop(at(300));
+        assert_eq!(r.liveness(at(300)).displays_active, 0, "stopped ⇒ capturing nothing");
+    }
+
+    #[test]
+    fn changing_the_interval_takes_effect_at_the_next_window() {
+        // T016 / FR-035.
+        let mut r = run(vec![0]);
+        r.on_sample(0, at(0));
+        let first = r.on_sample(0, at(600)).expect("closes at the 10-minute boundary");
+        assert_eq!(first.duration().num_seconds(), 600);
+
+        r.on_sample(0, at(600));
+        let truncated = r.set_interval(std::time::Duration::from_secs(1800), at(700));
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0].duration().num_seconds(), 100, "closes short, honestly");
+
+        r.on_sample(0, at(700));
+        assert!(r.on_sample(0, at(2000)).is_none(), "1300s < the new 1800s");
+        let longer = r.on_sample(0, at(2500)).expect("closes at the new boundary");
+        assert_eq!(longer.duration().num_seconds(), 1800);
+        assert_eq!(
+            r.liveness(at(2500)).segment_seconds,
+            1800,
+            "liveness reports the interval actually in force"
+        );
+    }
+
+    #[test]
+    fn liveness_counts_only_windows_that_actually_closed() {
+        // The evidence must track production, not intent.
+        let mut r = run(vec![0]);
+        assert_eq!(r.liveness(at(0)).chunks_written, 0);
+        r.on_sample(0, at(0));
+        assert_eq!(r.liveness(at(60)).chunks_written, 0, "an OPEN window is not evidence");
+        r.on_sample(0, at(600));
+        assert_eq!(r.liveness(at(600)).chunks_written, 1, "only on close");
+    }
+
+    #[test]
+    fn a_full_simulated_working_day_stays_coherent() {
+        // Eight hours with idle pauses, an interval change and an unplug. The
+        // point is that the pieces do not disagree with each other.
+        let mut r = run(vec![0, 1]);
+        let tick = std::time::Duration::from_secs(180);
+        let mut windows: Vec<ClosedWindow> = Vec::new();
+
+        for step in 0..160 {
+            let t = at(step * 180);
+            // idle for one stretch mid-morning
+            let idle = if (40..50).contains(&step) {
+                Some(std::time::Duration::from_secs(600))
+            } else {
+                Some(std::time::Duration::ZERO)
+            };
+            windows.extend(r.tick_idle(idle, tick, t));
+            for d in r.displays().to_vec() {
+                windows.extend(r.on_sample(d, t));
+            }
+            if step == 80 {
+                windows.extend(r.set_interval(std::time::Duration::from_secs(1800), t));
+            }
+            if step == 120 {
+                windows.extend(r.remove_display(1, t));
+            }
+        }
+        windows.extend(r.stop(at(160 * 180)));
+
+        assert!(!windows.is_empty(), "a day must produce windows");
+        // no window may claim a negative or zero span
+        assert!(
+            windows.iter().all(|w| w.end_wall > w.start_wall),
+            "every window must have a positive duration"
+        );
+        // windows on one display must not overlap
+        for d in [0u32, 1] {
+            let mut ws: Vec<&ClosedWindow> =
+                windows.iter().filter(|w| w.display_id == d).collect();
+            ws.sort_by_key(|w| w.start_wall);
+            for pair in ws.windows(2) {
+                assert!(
+                    pair[0].end_wall <= pair[1].start_wall,
+                    "display {d}: windows overlap: {:?} then {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        }
+        // durations are NOT uniform — the whole reason nothing may compute them
+        let mut durs: Vec<i64> = windows.iter().map(|w| w.duration().num_seconds()).collect();
+        durs.sort_unstable();
+        durs.dedup();
+        assert!(durs.len() > 1, "a real day yields varied window lengths, got {durs:?}");
+        // F6: assert the SCENARIO actually happened, not just that invariants
+        // held. Without these the test passes even if tick_idle, set_interval
+        // and remove_display were all no-ops — which is exactly the interaction
+        // coverage it is supposed to provide.
+        assert!(
+            !r.pauses_seen().is_empty(),
+            "the mid-morning idle stretch must have produced a recorded pause"
+        );
+        assert!(
+            windows.iter().any(|w| w.reason == crate::dayflow::window::CloseReason::Paused),
+            "a window must have closed BECAUSE of the pause"
+        );
+        assert!(
+            windows.iter().any(|w| w.duration().num_seconds() > 600),
+            "after the interval change windows must exceed the original 600s"
+        );
+        let last_d1 = windows
+            .iter()
+            .filter(|w| w.display_id == 1)
+            .map(|w| w.end_wall)
+            .max()
+            .expect("display 1 produced windows before being unplugged");
+        assert!(
+            last_d1 <= at(120 * 180),
+            "display 1 must produce NOTHING after it was unplugged at step 120"
+        );
+        assert!(
+            windows.iter().any(|w| w.display_id == 0 && w.end_wall > at(120 * 180)),
+            "display 0 must keep going after display 1 was removed"
+        );
+
+        // and the evidence agrees with what was produced
+        let l = r.liveness(at(160 * 180));
+        assert_eq!(l.chunks_written as usize, windows.len());
+        assert_eq!(l.health, DayflowHealth::Stopped);
+        assert_eq!(l.displays_active, 0, "a STOPPED run captures nothing (S3)");
+    }
+}

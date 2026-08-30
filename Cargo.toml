@@ -18,7 +18,12 @@ async-trait = "0.1"
 scrap = "0.5"
 
 # Region engine — X11 window enumeration (EWMH). Pure-Rust, no system libs.
-x11rb = "0.13"
+# `screensaver` (MIT-SCREEN-SAVER) backs dayflow's idle detection: it exposes the
+# X server's idle-millisecond counter, verified monotonic on this host (T005).
+# A FEATURE on an already-pinned crate, deliberately — not a new dependency.
+# NB the extension's `state` field is NOT a usable lock signal under GNOME
+# (reports 3, outside the documented 0/1/2 range); only the idle counter is used.
+x11rb = { version = "0.13", features = ["screensaver"] }
 
 # Computer vision for "target" measurement mode (Phase 2): pure-Rust Canny /
 # projection profiles / color masks. No system libraries (opencv stays deferred

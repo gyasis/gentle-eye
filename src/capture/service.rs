@@ -170,7 +170,21 @@ async fn finalize_recording(
         }
         Ok(Err(RecordingError::Cancelled)) => {
             rec.status = RecordingStatus::Cancelled;
-            let _ = std::fs::remove_file(&output);
+            // The delete path is validated like the write path: the output
+            // travelled through an async boundary, and "we generated it" is
+            // not a safety argument (see start_recording). A refusal leaves
+            // the file; it must never delete outside the recording directory.
+            let validator =
+                crate::security::path_validator::PathValidator::new(storage.base_dir());
+            match validator.validate(&output) {
+                Ok(safe) => {
+                    let _ = std::fs::remove_file(safe);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %output.display(),
+                        "refusing to delete a cancelled recording outside the recording dir");
+                }
+            }
         }
         Ok(Err(e)) => {
             rec.status = RecordingStatus::Failed;
@@ -195,13 +209,29 @@ impl RecordingService for CaptureService {
         }
         let recording = Recording::new(config.clone());
         let id = recording.id;
+
+        // The write path is validated BEFORE anything is persisted or spawned.
+        // `generate_recording_path` is a trait method: any implementation (or a
+        // misconfigured base dir) can hand back a path outside the recording
+        // directory, and the encoder would happily create it. Refusing here —
+        // rather than trusting "storage generated it" — keeps every byte this
+        // service writes inside the tree the validator allows.
+        let output = self.storage.generate_recording_path(id);
+        let validator =
+            crate::security::path_validator::PathValidator::new(self.storage.base_dir());
+        if let Err(e) = validator.validate(&output) {
+            return Err(RecordingError::Internal(format!(
+                "refusing to record to {}: {e}",
+                output.display()
+            )));
+        }
+
         self.storage
             .save_recording(&recording)
             .await
             .map_err(Self::map_storage_err)?;
 
         let control = Arc::new(RecordingControl::default());
-        let output = self.storage.generate_recording_path(id);
         let worker = {
             let storage = self.storage.clone();
             let control = control.clone();
@@ -278,6 +308,127 @@ impl RecordingService for CaptureService {
 mod tests {
     use super::*;
     use crate::storage::StorageManager;
+
+    /// A storage whose generated recording path escapes its own base dir —
+    /// the exact situation the T047 validation exists to refuse. Everything
+    /// else delegates to a real in-memory [`StorageManager`].
+    struct EscapingStorage {
+        inner: StorageManager,
+        escape_to: PathBuf,
+    }
+
+    #[async_trait]
+    impl StorageManagerTrait for EscapingStorage {
+        fn base_dir(&self) -> &Path {
+            self.inner.base_dir()
+        }
+        fn generate_recording_path(&self, id: Uuid) -> PathBuf {
+            self.escape_to.join(format!("{id}.mp4"))
+        }
+        async fn save_recording(&self, r: &Recording) -> Result<(), StorageError> {
+            self.inner.save_recording(r).await
+        }
+        async fn load_recording(&self, id: Uuid) -> Result<Recording, StorageError> {
+            self.inner.load_recording(id).await
+        }
+        async fn delete_recording(&self, id: Uuid) -> Result<(), StorageError> {
+            self.inner.delete_recording(id).await
+        }
+        async fn list_recordings(
+            &self,
+            limit: usize,
+            offset: usize,
+            f: Option<RecordingStatus>,
+        ) -> Result<crate::contracts::traits::RecordingList, StorageError> {
+            self.inner.list_recordings(limit, offset, f).await
+        }
+        async fn storage_used(&self) -> Result<u64, StorageError> {
+            self.inner.storage_used().await
+        }
+        async fn cleanup_old_recordings(&self, d: u32) -> Result<u32, StorageError> {
+            self.inner.cleanup_old_recordings(d).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recording_path_escaping_the_base_dir_is_refused_before_anything_starts() {
+        // The escape target is a directory this process could genuinely write
+        // (R33's lesson: /etc/passwd fails on permissions whether or not the
+        // validator runs). Without the validation, start_recording spawns the
+        // worker and returns Ok — so Ok-vs-Err is the code refusing, not the OS.
+        let base = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn StorageManagerTrait> = Arc::new(EscapingStorage {
+            inner: StorageManager::in_memory(base.path()).unwrap(),
+            escape_to: elsewhere.path().to_path_buf(),
+        });
+        let svc = CaptureService::new(storage.clone(), 0);
+
+        let err = svc
+            .start_recording(RecordingConfig::default())
+            .await
+            .expect_err("a write path outside the base dir must be refused");
+        assert!(
+            err.to_string().contains("refusing to record"),
+            "refused by the validator, not by some later failure: {err}"
+        );
+        // Refused BEFORE persisting: no dangling recording row was created.
+        assert!(svc.list_recordings(10, None).await.unwrap().is_empty());
+        // And nothing was written where the escaping path pointed.
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_recording_outside_the_base_dir_is_not_deleted() {
+        // Drives the real finalize path with a Cancelled result. The victim
+        // file is one this process could genuinely delete; it must survive
+        // because the VALIDATOR refuses, not because the OS does.
+        let base = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn StorageManagerTrait> =
+            Arc::new(StorageManager::in_memory(base.path()).unwrap());
+
+        let rec = Recording::new(RecordingConfig::default());
+        storage.save_recording(&rec).await.unwrap();
+        let victim = elsewhere.path().join("someone-elses.mp4");
+        std::fs::write(&victim, b"not ours").unwrap();
+
+        finalize_recording(
+            storage.clone(),
+            rec.id,
+            victim.clone(),
+            Ok(Err(RecordingError::Cancelled)),
+        )
+        .await;
+
+        assert!(victim.exists(), "a delete outside the recording dir must be refused");
+        let after = storage.load_recording(rec.id).await.unwrap();
+        assert_eq!(after.status, RecordingStatus::Cancelled, "the finalize itself completed");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_recording_inside_the_base_dir_is_cleaned_up() {
+        // The companion: the same path with an in-tree file DOES delete, so the
+        // refusal above cannot be a delete that never runs at all.
+        let base = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn StorageManagerTrait> =
+            Arc::new(StorageManager::in_memory(base.path()).unwrap());
+
+        let rec = Recording::new(RecordingConfig::default());
+        storage.save_recording(&rec).await.unwrap();
+        let inside = base.path().join(format!("{}.mp4", rec.id));
+        std::fs::write(&inside, b"partial capture").unwrap();
+
+        finalize_recording(
+            storage.clone(),
+            rec.id,
+            inside.clone(),
+            Ok(Err(RecordingError::Cancelled)),
+        )
+        .await;
+
+        assert!(!inside.exists(), "the in-tree partial file is removed");
+    }
 
     fn service() -> CaptureService {
         let storage: Arc<dyn StorageManagerTrait> =

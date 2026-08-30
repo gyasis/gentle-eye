@@ -63,6 +63,11 @@ pub enum DayflowError {
     /// Invalid dayflow configuration or request.
     #[error("Invalid dayflow request: {0}")]
     Invalid(String),
+    /// Perception-ladder failure: a tier was unreachable, or Dayflow's own
+    /// perception budget was exhausted. Distinct from [`DayflowError::Summarization`]
+    /// so "the ladder refused" is never mistaken for "the model answered badly".
+    #[error("Perception error: {0}")]
+    Perception(String),
     /// Internal/unexpected error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -259,6 +264,10 @@ impl DayflowError {
             DayflowError::Capture(e) => e.mcp_error_code(),
             DayflowError::Summarization(e) => e.mcp_error_code(),
             DayflowError::Timeline(e) => e.mcp_error_code(),
+            // A ladder refusal is retryable — an exhausted budget or an
+            // unreachable tier is not a bug in the request. The wildcard below
+            // would file it as InternalError and tell the caller nothing.
+            DayflowError::Perception(_) => McpErrorCode::ServiceUnavailable,
             _ => McpErrorCode::InternalError,
         }
     }

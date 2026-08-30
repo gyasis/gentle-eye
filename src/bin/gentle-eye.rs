@@ -10,6 +10,7 @@
 //! `GentleEyeServer`'s wiring — no duplicated logic).
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use gentle_eye::capture::display::{DisplayConfig, DisplayManager};
 use gentle_eye::config::AppConfig;
 use gentle_eye::contracts::traits::{RecordingConfig, RecordingStatus, TimeRange};
@@ -46,10 +47,21 @@ USAGE:
   gentle-eye redpen-list [--limit N]                  List redpen annotation captures (newest first) for the agent to ingest
   gentle-eye redpen-analyze [--image PATH] [--prompt TEXT] [--provider gemini|ollama]   Send a redpen capture (default: latest) + its boxes to vision AI
   gentle-eye provider-info [--provider gemini|ollama]
+  gentle-eye regions [--depth window|pane|element|text] [--display IDX]   Structure the screen into boxes, in reading order
+
+  gentle-eye dayflow serve [--port N] [--displays 0,1 | --window LABEL | --target NAME | --input URL]   Run the all-day recorder as a daemon (owns the session)
+  gentle-eye dayflow start [--displays 0,1 | --window LABEL | --target NAME | --input URL]   Start a session (attaches to a running daemon if there is one)
+  gentle-eye dayflow status | stop                    Whether it is running and PRODUCING; stop it
+  gentle-eye dayflow timeline [--from T] [--to T]     Entries AND recorded gaps over a range (default: today)
+  gentle-eye dayflow standup [--from T] [--to T]      The categorised digest of that range
+  gentle-eye dayflow ask <QUESTION> [--from T] [--to T]   Answer from the day's own records (needs GE_DAYFLOW_ENDPOINT)
+
+  gentle-eye serve [--port N]                         Preview/gallery HTTP server
   gentle-eye help
 
 Env: GENTLE_EYE_PROVIDER, GEMINI_API_KEY/GOOGLE_API_KEY, OLLAMA_HOST, OLLAMA_PORT,
-     GENTLE_EYE_DATA, GENTLE_EYE_FPS. CLI subcommands print JSON to stdout.";
+     GENTLE_EYE_DATA, GENTLE_EYE_FPS, GE_DAYFLOW_ENDPOINT (dayflow ask).
+     CLI subcommands print JSON to stdout. Guide: docs/GENTLE_EYE_GUIDE.md";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -77,6 +89,7 @@ async fn main() -> ExitCode {
         "screenshot" => run_screenshot(rest).await,
         "segment" => run_segment(rest).await,
         "regions" => run_regions(rest).await,
+        "dayflow" => run_dayflow(rest).await,
         "redpen-list" => run_redpen_list(rest).await,
         "redpen-analyze" => run_redpen_analyze(rest).await,
         "help" | "-h" | "--help" => {
@@ -584,7 +597,7 @@ fn detect_panels_bgra(buf: &[u8], w: usize, h: usize, stride: usize) -> Vec<(usi
         return vec![(0, w)];
     }
     let mut act = vec![0f64; w];
-    for x in 0..w {
+    for (x, a) in act.iter_mut().enumerate() {
         let (mut sum, mut sq) = (0f64, 0f64);
         for y in 0..h {
             let o = y * stride + x * 4;
@@ -597,14 +610,14 @@ fn detect_panels_bgra(buf: &[u8], w: usize, h: usize, stride: usize) -> Vec<(usi
         }
         let n = h as f64;
         let mean = sum / n;
-        act[x] = (sq / n - mean * mean).max(0.0).sqrt();
+        *a = (sq / n - mean * mean).max(0.0).sqrt();
     }
     let half = 10usize; // smoothing window ~21
     let mut sm = vec![0f64; w];
-    for x in 0..w {
+    for (x, s) in sm.iter_mut().enumerate() {
         let a = x.saturating_sub(half);
         let b = (x + half + 1).min(w);
-        sm[x] = act[a..b].iter().sum::<f64>() / (b - a) as f64;
+        *s = act[a..b].iter().sum::<f64>() / (b - a) as f64;
     }
     let mut sorted = sm.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1093,4 +1106,640 @@ async fn run_serve() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `gentle-eye dayflow <start|stop|status|timeline|ask>`.
+///
+/// A thin adapter over the ONE service, exactly like the MCP tools: it parses
+/// argv, calls the service, prints JSON. No decision is made here, because a
+/// decision made in one surface is a decision the other two do not make.
+async fn run_dayflow(args: &[String]) -> Result<()> {
+    // `serve` is the daemon itself, not a command against one.
+    if args.first().map(String::as_str) == Some("serve") {
+        return run_dayflow_serve(&args[1..]).await;
+    }
+
+    // ATTACH to a running daemon if there is one (D014-15). A surface that
+    // builds its own service gets a PRIVATE session: it reports "not running"
+    // while the daemon captures, and its `start` creates a second session
+    // nothing else can see.
+    let store = gentle_eye::dayflow::daemon::DaemonStateStore::new(daemon_state_path()?);
+    match gentle_eye::dayflow::client::DaemonClient::probe(&store) {
+        gentle_eye::dayflow::client::Discovery::Live(client) => {
+            let body = dayflow_remote(&client, args)?;
+            println!("{body}");
+            return Ok(());
+        }
+        gentle_eye::dayflow::client::Discovery::Stale { port } => {
+            // A record exists but its port did not answer: a crashed daemon's
+            // leftovers, or a live one too wedged to reply. Falling back to a
+            // local view is the only usable behaviour, but doing it SILENTLY
+            // would report "not running" about a session that may be running —
+            // say what was found.
+            eprintln!(
+                "warning: a dayflow daemon record names port {port} but nothing answered \
+                 there; answering from a local view instead. If a daemon is running, it is \
+                 wedged; if it crashed, the record is stale and the next `dayflow serve` \
+                 will resume the session."
+            );
+        }
+        gentle_eye::dayflow::client::Discovery::NoDaemon => {}
+    }
+
+    let server = GentleEyeServer::new().await?;
+    let value = dayflow_command(server.dayflow(), args, Utc::now())?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    // EXIT 0 EVEN WHEN DEGRADED. A degraded session is running, just not
+    // producing; a non-zero exit makes every script treat a recoverable state
+    // as a crash, and the state is already in the payload.
+    Ok(())
+}
+
+/// The CLI's dayflow logic, with the service supplied.
+///
+/// Split out because `run_dayflow` builds a `GentleEyeServer`, which loads
+/// config from disk — so nothing could execute this code, and it showed:
+/// swapping `--from` and `--to` here survived the entire suite. The argument
+/// parsing and the service calls are the part that can be wrong; loading a
+/// config file is not.
+/// Returns the JSON the caller prints, rather than printing it: a function that
+/// writes to stdout can only be tested by capturing stdout, so in practice it
+/// is not tested at all.
+fn dayflow_command(
+    df: &std::sync::Arc<gentle_eye::dayflow::service::DayflowService>,
+    args: &[String],
+    now: chrono::DateTime<Utc>,
+) -> Result<serde_json::Value> {
+    let sub = args.first().map(String::as_str).unwrap_or("status");
+    let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
+
+    let range = |r: &[String]| {
+        gentle_eye::dayflow::service::resolve_range(
+            flag(r, "--from"),
+            flag(r, "--to"),
+            now,
+        )
+        .map_err(|e| anyhow!(e))
+    };
+
+    let value = match sub {
+        "start" => {
+            let mode = match flag(rest, "--mode") {
+                None | Some("session") => gentle_eye::dayflow::models::DayflowMode::Session,
+                Some("daemon") => gentle_eye::dayflow::models::DayflowMode::Daemon,
+                Some(other) => return Err(anyhow!("unknown mode '{other}': use session or daemon")),
+            };
+            let displays = match flag(rest, "--displays") {
+                Some(list) => Some(
+                    list.split(',')
+                        .map(|s| s.trim().parse::<u32>())
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| anyhow!("bad --displays: {e}"))?,
+                ),
+                None => None,
+            };
+            let spec = gentle_eye::dayflow::source::SourceSpec::parse(
+                displays,
+                flag(rest, "--window").map(str::to_string),
+                flag(rest, "--target").map(str::to_string),
+                flag(rest, "--input").map(str::to_string),
+            )
+            .map_err(|e| anyhow!(e))?;
+            serde_json::json!({ "session_id": df.start_session(mode, spec, now)?.to_string() })
+        }
+        "stop" => serde_json::json!({ "windows_closed": df.stop(now)?.len() }),
+        "status" => serde_json::to_value(df.status(now)?)?,
+        // Both spellings, ONE body. Two copies of four lines is two copies
+        // that can drift, and the range wiring in one of them survived a
+        // swapped-argument mutation in the wave before this.
+        "standup" | "timeline" if sub == "standup" || rest.iter().any(|a| a == "--standup") => {
+            let (from, to) = range(rest)?;
+            let s = df.standup(from, to)?;
+            serde_json::json!({
+                "digest": s,
+                "text": gentle_eye::dayflow::standup::render(&s),
+            })
+        }
+        "timeline" => {
+            let (from, to) = range(rest)?;
+            let slice = df.timeline(from, to)?;
+            serde_json::json!({
+                "from": from.to_rfc3339(),
+                "to": to.to_rfc3339(),
+                "entries": slice.entries,
+                "gaps": slice.gaps,
+            })
+        }
+        "ask" => {
+            // Skip the VALUE of every two-token flag, not just the flags
+            // themselves: `ask --from <ts> "what did I do"` otherwise picks the
+            // timestamp as the question and answers it, successfully and
+            // silently, with the wrong question.
+            let mut question: Option<&String> = None;
+            let mut skip_next = false;
+            for a in rest {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if a.starts_with("--") {
+                    skip_next = true;
+                    continue;
+                }
+                question = Some(a);
+                break;
+            }
+            let question = question.ok_or_else(|| {
+                anyhow!("usage: gentle-eye dayflow ask \"<question>\" [--from T] [--to T]")
+            })?;
+            let (from, to) = range(rest)?;
+            serde_json::to_value(df.ask(question, from, to, |prompt| {
+                gentle_eye::dayflow::answerer::answer_or_explain(df.config(), prompt)
+            })?)?
+        }
+        other => return Err(anyhow!("unknown dayflow subcommand '{other}'")),
+    };
+    Ok(value)
+}
+
+
+/// Where the daemon publishes its state. ONE path, so every surface finds the
+/// same daemon — a second location is how two views of one session diverge.
+fn daemon_state_path() -> Result<std::path::PathBuf> {
+    let root = AppConfig::load()
+        .map(|c| c.storage.base_dir)
+        .map_err(|e| anyhow!("config error: {e}"))?;
+    Ok(gentle_eye::dayflow::daemon::state_path_under(&root))
+}
+
+/// Run the daemon: own the session, serve the surfaces.
+async fn run_dayflow_serve(args: &[String]) -> Result<()> {
+    let port: u16 = flag(args, "--port")
+        .map(str::parse)
+        .transpose()
+        .map_err(|e| anyhow!("bad --port: {e}"))?
+        .unwrap_or(7431);
+
+    let server = GentleEyeServer::new().await?;
+    let cfg = AppConfig::load().map_err(|e| anyhow!("config error: {e}"))?;
+
+    let displays = match flag(args, "--displays") {
+        Some(list) => Some(
+            list.split(',')
+                .map(|s| s.trim().parse::<u32>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| anyhow!("bad --displays: {e}"))?,
+        ),
+        None => None,
+    };
+    let spec = gentle_eye::dayflow::source::SourceSpec::parse(
+        displays,
+        flag(args, "--window").map(str::to_string),
+        flag(args, "--target").map(str::to_string),
+        flag(args, "--input").map(str::to_string),
+    )
+    .map_err(|e| anyhow!(e))?;
+
+    // The PRODUCTION summariser (T022): the two configured perception tiers,
+    // resolving samples in the SAME directory the loop writes them (the
+    // invariant `the_production_summarizer_finds_the_loops_sidecars_and_crops`
+    // pins), with the configured residency applied AT CONSTRUCTION — without
+    // `.with_residency`, `ResidencyPolicy::Resident` is a policy the running
+    // system cannot express (T020's W8 note).
+    let p = cfg.dayflow.perception.clone();
+    let tier = |model: &str| -> Result<std::sync::Arc<dyn gentle_eye::contracts::traits::VisionProvider>> {
+        let vc = gentle_eye::contracts::traits::VisionConfig {
+            provider: "ollama".to_string(),
+            api_key: None,
+            model: model.to_string(),
+            timeout_seconds: cfg.vision.timeout_seconds,
+            max_video_size_bytes: 0, // 0 => provider default
+        };
+        Ok(std::sync::Arc::new(
+            gentle_eye::analysis::OllamaProvider::with_url(&vc, p.endpoint.clone())
+                .map_err(|e| anyhow!("perception provider: {e}"))?,
+        ))
+    };
+    let interval = cfg
+        .dayflow
+        .sampling
+        .interval_for(gentle_eye::dayflow::models::DayflowMode::Daemon);
+    // A COUNT for the budget, not an identity — the run's actual ordinals are
+    // resolved once, inside the daemon (the W7 single-enumeration invariant).
+    let display_count = {
+        let ords = spec.ordinals();
+        if ords.is_empty() {
+            gentle_eye::capture::display::DisplayManager::list_available()
+                .map(|d| d.len().max(1))
+                .unwrap_or(1) as u32
+        } else {
+            ords.len() as u32
+        }
+    };
+    let budget = gentle_eye::dayflow::perception::dayflow_budget(
+        interval.as_secs(),
+        display_count,
+        p.max_regions_per_segment,
+    );
+    let router = std::sync::Arc::new(gentle_eye::dayflow::perception::PerceptionRouter::new(
+        tier(&p.text_model)?,
+        tier(&p.reason_model)?,
+        budget,
+    ));
+    let sample_dir = cfg.storage.base_dir.join("dayflow-samples");
+    std::fs::create_dir_all(&sample_dir)
+        .map_err(|e| anyhow!("cannot create {}: {e}", sample_dir.display()))?;
+    let summarizer = gentle_eye::dayflow::summarizer::RoutedChunkSummarizer::new(
+        std::sync::Arc::clone(&router),
+        &sample_dir,
+    )
+    .with_max_regions(p.max_regions_per_segment as usize)
+    .with_residency(p.residency, cfg.dayflow.segment_duration());
+
+    let daemon = std::sync::Arc::new(
+        gentle_eye::dayflow::daemon::Daemon::new(
+            daemon_state_path()?,
+            std::sync::Arc::clone(server.dayflow()),
+        )
+        .with_capture(std::sync::Arc::new(summarizer), sample_dir),
+    );
+
+    // Refuse to become a SECOND daemon over the same state file. Two daemons
+    // interleave their sequences into one timeline and each overwrites the
+    // other's record, with nothing reporting the collision. The probe names
+    // the live peer for a friendly error; the OS lock is what actually closes
+    // the race — two daemons starting simultaneously both pass the probe,
+    // because neither has published a port yet.
+    if let Some(live) = daemon.live_peer_port() {
+        return Err(anyhow!(
+            "a dayflow daemon is already serving on port {live}. \
+             Attach to it (`gentle-eye dayflow status`) or stop it first — \
+             a second daemon would interleave its windows into the same timeline."
+        ));
+    }
+    daemon.lock_exclusive()?;
+
+    let now = Utc::now();
+    let (id, decision) = daemon.start_or_resume(
+        gentle_eye::dayflow::models::DayflowMode::Daemon,
+        spec,
+        now,
+    )?;
+    // The restart gap is recorded INSIDE start_or_resume, from the prior
+    // record's own updated_at — reading the state back here, after the save,
+    // dated the gap `now`→`now`: a zero-width interval no timeline shows.
+
+    let listener = gentle_eye::dayflow::http::bind(port)
+        .map_err(|e| anyhow!("cannot bind port {port}: {e}"))?;
+    daemon.publish_port(port)?;
+    // Keep the persisted sequence marks fresh while the session runs: a
+    // restart can only continue from what was WRITTEN.
+    let _keeper = daemon.spawn_state_keeper(std::time::Duration::from_secs(30));
+    println!(
+        "{}",
+        serde_json::json!({
+            "session_id": id.to_string(),
+            "resume": format!("{decision:?}"),
+            "port": port,
+        })
+    );
+    gentle_eye::dayflow::http::serve_daemon(listener, daemon);
+    Ok(())
+}
+
+/// Run a dayflow subcommand against a RUNNING daemon.
+fn dayflow_remote(
+    client: &gentle_eye::dayflow::client::DaemonClient,
+    args: &[String],
+) -> Result<String> {
+    let sub = args.first().map(String::as_str).unwrap_or("status");
+    let rest = &args[args.len().min(1)..];
+    let query = |name: &str| flag(rest, name).map(str::to_string);
+    match sub {
+        "status" => Ok(client.get("/dayflow/status")?),
+        "stop" => Ok(client.post("/dayflow/stop")?),
+        "start" => {
+            let mut q: Vec<String> = Vec::new();
+            for name in ["--displays", "--window", "--target", "--input", "--mode"] {
+                if let Some(v) = query(name) {
+                    q.push(format!("{}={}", name.trim_start_matches("--"), urlencode(&v)));
+                }
+            }
+            Ok(client.post(&format!("/dayflow/start?{}", q.join("&")))?)
+        }
+        "timeline" | "standup" | "ask" => {
+            let (from, to) = gentle_eye::dayflow::service::resolve_range(
+                flag(rest, "--from"),
+                flag(rest, "--to"),
+                Utc::now(),
+            )
+            .map_err(|e| anyhow!(e))?;
+            let mut path = format!(
+                "/dayflow/{sub}?from={}&to={}",
+                urlencode(&from.to_rfc3339()),
+                urlencode(&to.to_rfc3339())
+            );
+            if sub == "ask" {
+                let q = flag(rest, "--question")
+                    .ok_or_else(|| anyhow!("ask needs --question"))?;
+                path.push_str(&format!("&question={}", urlencode(q)));
+            }
+            Ok(client.get(&path)?)
+        }
+        other => Err(anyhow!("unknown dayflow subcommand '{other}'")),
+    }
+}
+
+/// Percent-encode a query value — the ONE encoder, shared with the MCP
+/// surface so the two attached paths cannot send different bytes for the same
+/// question (R37/R40).
+fn urlencode(s: &str) -> String {
+    gentle_eye::dayflow::client::urlencode(s)
+}
+
+
+#[cfg(test)]
+mod dayflow_cli_tests {
+    use super::*;
+    use gentle_eye::dayflow::models::{ActivityCategory, TimelineEntry};
+    use gentle_eye::dayflow::service::DayflowService;
+    use gentle_eye::dayflow::timeline::SqliteTimelineStore;
+    use std::sync::{Arc, Mutex};
+
+    fn svc() -> Arc<DayflowService> {
+        let store = Arc::new(SqliteTimelineStore::new(Arc::new(Mutex::new(
+            gentle_eye::storage::database::init_in_memory().unwrap(),
+        ))));
+        Arc::new(DayflowService::new(
+            store,
+            gentle_eye::config::DayflowConfig::default(),
+        ))
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn now() -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-26T15:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// The attached CLI path, end to end against a REALLY-served daemon: every
+    /// route `dayflow_remote` names must exist on the server (a 404 makes the
+    /// attached path silently worse than the local one), the default range's
+    /// `+00:00` offset must survive the client's own percent-encoding (a raw
+    /// `+` decodes to a space server-side and fails to parse), and the
+    /// mutating verbs must go through the daemon so the state file tracks them.
+    #[test]
+    fn dayflow_remote_speaks_routes_the_daemon_actually_serves() {
+        use gentle_eye::dayflow::client::DaemonClient;
+        use gentle_eye::dayflow::daemon::Daemon;
+        use gentle_eye::dayflow::http;
+        use gentle_eye::dayflow::source::SourceSpec;
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc();
+        let daemon = Arc::new(Daemon::new(dir.path().join("daemon.json"), Arc::clone(&s)));
+        daemon
+            .start_or_resume(
+                gentle_eye::dayflow::models::DayflowMode::Daemon,
+                SourceSpec::Window { label: "w".into() },
+                Utc::now(),
+            )
+            .unwrap();
+        let listener = http::bind(0).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = Arc::clone(&daemon);
+        std::thread::spawn(move || http::serve_daemon(listener, served));
+        let client = DaemonClient::new(port);
+
+        // No args defaults to status: `&args[args.len().min(1)..]` must be
+        // empty-safe.
+        let body = dayflow_remote(&client, &[]).expect("status with no args");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["running"], true);
+
+        for sub in ["status", "timeline", "standup"] {
+            let body = dayflow_remote(&client, &argv(&[sub]))
+                .unwrap_or_else(|e| panic!("route for '{sub}' failed: {e}"));
+            serde_json::from_str::<serde_json::Value>(&body)
+                .unwrap_or_else(|e| panic!("'{sub}' returned non-JSON: {e}"));
+        }
+        let body = dayflow_remote(&client, &argv(&["ask", "--question", "what happened?"]))
+            .expect("ask with a question reaches /dayflow/ask");
+        serde_json::from_str::<serde_json::Value>(&body).expect("ask returns JSON");
+        assert!(
+            dayflow_remote(&client, &argv(&["ask"])).is_err(),
+            "ask without --question must be refused before the wire"
+        );
+        assert!(
+            dayflow_remote(&client, &argv(&["frobnicate"])).is_err(),
+            "unknown subcommands are refused, not silently mapped"
+        );
+
+        // stop goes through the DAEMON: the state file must clear, or the next
+        // serve resumes a session the user deliberately stopped.
+        dayflow_remote(&client, &argv(&["stop"])).expect("stop over the wire");
+        assert!(daemon.store().load().unwrap().is_none(), "stop must clear the state file");
+
+        // start goes through the daemon too, and a label with a SPACE must
+        // survive the client's encoding (unencoded, the request line truncates
+        // at the space and the daemon records the wrong subject).
+        let body =
+            dayflow_remote(&client, &argv(&["start", "--window", "my term"])).expect("start");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["session_id"].is_string(), "start reports the session: {v}");
+        let persisted = daemon.store().load().unwrap().expect("an HTTP start persists state");
+        assert_eq!(
+            persisted.spec,
+            Some(SourceSpec::Window { label: "my term".into() }),
+            "the space must survive percent-encoding end to end"
+        );
+    }
+
+    #[test]
+    fn the_cli_passes_from_and_to_in_the_right_order() {
+        // Nothing executed this code, and it showed: swapping --from and --to
+        // in the range call survived the entire suite. The shared resolver was
+        // tested; the CLI's USE of it was not, and an adapter is code.
+        let s = svc();
+        let out = dayflow_command(
+            &s,
+            &argv(&[
+                "timeline",
+                "--from",
+                "2026-08-26T09:00:00Z",
+                "--to",
+                "2026-08-26T17:00:00Z",
+            ]),
+            now(),
+        )
+        .unwrap();
+        assert!(out["from"].as_str().unwrap().starts_with("2026-08-26T09:00"), "{out}");
+        assert!(out["to"].as_str().unwrap().starts_with("2026-08-26T17:00"), "{out}");
+    }
+
+    #[test]
+    fn the_cli_defaults_a_missing_range_to_today_so_far() {
+        let s = svc();
+        let out = dayflow_command(&s, &argv(&["timeline"]), now()).unwrap();
+        assert!(out["from"].as_str().unwrap().starts_with("2026-08-26T00:00:00"), "{out}");
+        assert!(out["to"].as_str().unwrap().starts_with("2026-08-26T15:30:00"), "{out}");
+    }
+
+    #[test]
+    fn the_cli_reads_the_same_timeline_the_other_surfaces_do() {
+        // The verb that genuinely works cross-surface: the timeline lives in
+        // SQLite, so the CLI sees what anything else wrote.
+        let s = svc();
+        let base = now();
+        s.insert_entry(&TimelineEntry {
+            id: uuid::Uuid::new_v4(),
+            recording_id: uuid::Uuid::new_v4(),
+            start_time: base - chrono::Duration::hours(2),
+            end_time: base - chrono::Duration::hours(1),
+            category: ActivityCategory::Coding,
+            app: "editor".into(),
+            activity: "refactor".into(),
+            summary: "the surfaces".into(),
+            provenance: None,
+        })
+        .unwrap();
+
+        let out = dayflow_command(&s, &argv(&["timeline"]), base).unwrap();
+        let entries = out["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{out}");
+        assert_eq!(entries[0]["summary"], "the surfaces");
+        // And the gaps ride alongside (T023) — asserted with a REAL recorded
+        // pause, not just key-presence, so dropping the join fails here.
+        s.start(gentle_eye::dayflow::models::DayflowMode::Session, vec![0], base).unwrap();
+        s.with_run(|r| r.turn_off(base + chrono::Duration::minutes(1))).unwrap();
+        let out = dayflow_command(
+            &s,
+            &argv(&["timeline", "--to", "2026-08-26T17:00:00Z"]),
+            base,
+        )
+        .unwrap();
+        let gaps = out["gaps"].as_array().expect("the CLI returns gaps");
+        assert_eq!(gaps.len(), 1, "{out}");
+        assert_eq!(gaps[0]["cause"], "user_off");
+    }
+
+    #[test]
+    fn the_cli_question_is_not_a_flags_value() {
+        // `ask --from <ts> "what did I do"` used to pick the TIMESTAMP as the
+        // question and answer it, successfully and silently.
+        let s = svc();
+        let out = dayflow_command(
+            &s,
+            &argv(&["ask", "--from", "2026-08-26T09:00:00Z", "what did I do"]),
+            now(),
+        )
+        .unwrap();
+        // No records, so the refusal — the point is that it did not error out
+        // treating the timestamp as the question, and the range still applied.
+        assert_eq!(out["answer"], gentle_eye::dayflow::timeline::NO_RECORD);
+        // And the CLI's JSON carries the grounding field: an answer whose
+        // evidence was dropped in serialization would make confident prose
+        // with empty grounding undetectable on this surface (T025).
+        assert_eq!(
+            out["grounding"].as_array().expect("the CLI JSON carries grounding").len(),
+            0,
+            "{out}"
+        );
+
+        // and a question that IS missing is refused rather than invented
+        let err = dayflow_command(&s, &argv(&["ask", "--from", "2026-08-26T09:00:00Z"]), now());
+        assert!(err.is_err(), "a flag value must never become the question");
+    }
+
+    #[test]
+    fn the_cli_drives_the_same_engine_within_one_process() {
+        // Honest scope: a real CLI invocation is a fresh process, so start/stop
+        // cannot span invocations (tasks.md records this). What IS true is that
+        // these verbs drive the shared service rather than a private copy — the
+        // property that will make them work once the daemon owns the session.
+        let s = svc();
+        let started = dayflow_command(&s, &argv(&["start"]), now()).unwrap();
+        assert!(started["session_id"].is_string());
+        assert!(s.status(now()).unwrap().running, "the service sees the CLI's start");
+
+        let status = dayflow_command(&s, &argv(&["status"]), now()).unwrap();
+        assert_eq!(status["running"], true, "and the CLI reports it back");
+
+        dayflow_command(&s, &argv(&["stop"]), now()).unwrap();
+        assert!(!s.status(now()).unwrap().running);
+    }
+
+    #[test]
+    fn an_unknown_subcommand_is_refused_rather_than_defaulting_to_status() {
+        let s = svc();
+        assert!(dayflow_command(&s, &argv(&["frobnicate"]), now()).is_err());
+        // …but no subcommand at all defaults to status, which is the harmless one
+        assert!(dayflow_command(&s, &[], now()).is_ok());
+    }
+
+    #[test]
+    fn the_cli_standup_passes_from_and_to_in_the_right_order() {
+        // Swapping them here survived the whole suite: `dayflow_command` was
+        // made testable in the previous wave precisely so new arms would be
+        // covered, and this arm was added without a test anyway.
+        let s = svc();
+        for argv_form in [
+            vec!["standup", "--from", "2026-08-26T09:00:00Z", "--to", "2026-08-26T17:00:00Z"],
+            vec!["timeline", "--standup", "--from", "2026-08-26T09:00:00Z", "--to", "2026-08-26T17:00:00Z"],
+        ] {
+            let out = dayflow_command(&s, &argv(&argv_form), now()).unwrap();
+            let d = &out["digest"];
+            assert!(d["from"].as_str().unwrap().starts_with("2026-08-26T09:00"), "{out}");
+            assert!(d["to"].as_str().unwrap().starts_with("2026-08-26T17:00"), "{out}");
+            assert!(out["text"].is_string(), "and the prose is rendered: {out}");
+        }
+    }
+
+    #[test]
+    fn both_cli_spellings_of_standup_give_the_same_digest() {
+        // `standup` and `timeline --standup` must not drift apart.
+        let s = svc();
+        let a = dayflow_command(&s, &argv(&["standup"]), now()).unwrap();
+        let b = dayflow_command(&s, &argv(&["timeline", "--standup"]), now()).unwrap();
+        assert_eq!(a, b);
+        // …and a bare `timeline` is still the entry list, not the digest.
+        let plain = dayflow_command(&s, &argv(&["timeline"]), now()).unwrap();
+        assert!(plain["entries"].is_array(), "{plain}");
+        assert!(plain.get("digest").is_none());
+    }
+
+    /// The CLI surface itself must deliver its source flags to the parse —
+    /// `all_three_surfaces_start_every_source_kind_and_agree` proves the
+    /// SERVICE call, but a CLI that dropped `--window` on the floor would pass
+    /// it while starting a whole-display session. This drives `dayflow_command`
+    /// with the real argv.
+    #[test]
+    fn the_cli_start_flags_reach_the_source_spec() {
+        let s = svc();
+        dayflow_command(&s, &argv(&["start", "--window", "my-term"]), now()).unwrap();
+        let st = s.status(now()).unwrap();
+        assert_eq!(st.sources.len(), 1);
+        assert_eq!(st.sources[0].kind, "window", "the CLI dropped --window");
+        assert_eq!(st.sources[0].name, "my-term");
+        dayflow_command(&s, &argv(&["stop"]), now()).unwrap();
+
+        dayflow_command(&s, &argv(&["start", "--input", "rtsp://cam.local/live"]), now()).unwrap();
+        let st = s.status(now()).unwrap();
+        assert_eq!(st.sources[0].kind, "input", "the CLI dropped --input");
+        assert_eq!(st.sources[0].name, "rtsp://cam.local/live");
+        dayflow_command(&s, &argv(&["stop"]), now()).unwrap();
+
+        // Two kinds at once is the parse's refusal, surfaced as the CLI error.
+        let err = dayflow_command(
+            &s,
+            &argv(&["start", "--window", "a", "--input", "rtsp://b"]),
+            now(),
+        )
+        .expect_err("two kinds must be refused on the CLI too");
+        assert!(format!("{err}").contains("ONE source"), "got: {err}");
+    }
 }

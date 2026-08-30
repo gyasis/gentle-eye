@@ -11,31 +11,69 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// A coarse activity classification for a timeline entry.
+/// Declare the activity taxonomy ONCE.
 ///
-/// Context-aware (what the user was *doing*), not app-name logging —
-/// "researching on YouTube" is `Browsing`, not "Chrome".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivityCategory {
-    /// Writing or editing code.
-    Coding,
-    /// Reading or writing documentation / prose.
-    Docs,
-    /// Email, chat, calls.
-    Comms,
-    /// Web browsing / research.
-    Browsing,
-    /// In a meeting / call.
-    Meeting,
-    /// No meaningful activity.
-    Idle,
-    /// Anything that doesn't fit the above.
-    #[default]
-    Other,
+/// The enum, [`ActivityCategory::ALL`] and `wire_name` are all generated from
+/// this single list, so adding a category is one edit and cannot half-land.
+///
+/// This exists because two weaker attempts did not hold. The prompt first
+/// repeated the categories as a string literal — add a variant and the model is
+/// never told, so every entry that should carry it comes back `Other` with
+/// nothing reporting a problem. Deriving the prompt from a hand-written `ALL`
+/// const only MOVED that literal: `ALL` was still a hand-list, the tests
+/// iterated `ALL` itself (validating the stale list against the stale list),
+/// and a variant added to the enum but omitted from `ALL` passed the entire
+/// suite. Even an exhaustive-match index guard did not catch it, because a
+/// check written in terms of `ALL` cannot see what `ALL` is missing.
+///
+/// A macro removes the second source of truth instead of relocating it.
+macro_rules! activity_taxonomy {
+    ($( $(#[$meta:meta])* $variant:ident => $wire:literal ),+ $(,)?) => {
+        /// A coarse activity classification for a timeline entry.
+        ///
+        /// Context-aware (what the user was *doing*), not app-name logging —
+        /// "researching on YouTube" is `Browsing`, not "Chrome".
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+        #[serde(rename_all = "snake_case")]
+        pub enum ActivityCategory {
+            $( $(#[$meta])* $variant, )+
+        }
+
+        impl ActivityCategory {
+            /// Every category, in taxonomy order.
+            ///
+            /// Generated alongside the enum, so it cannot omit a variant.
+            pub const ALL: &'static [Self] = &[ $( Self::$variant ),+ ];
+
+            /// The token used on the wire, in prompts, and in the database.
+            pub fn wire_name(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $wire, )+
+                }
+            }
+        }
+    };
 }
 
-/// One recording mode for a dayflow session.
+activity_taxonomy! {
+    /// Writing or editing code.
+    Coding => "coding",
+    /// Reading or writing documentation / prose.
+    Docs => "docs",
+    /// Email, chat, calls.
+    Comms => "comms",
+    /// Web browsing / research.
+    Browsing => "browsing",
+    /// In a meeting / call.
+    Meeting => "meeting",
+    /// No meaningful activity.
+    Idle => "idle",
+    /// Anything that doesn't fit the above.
+    #[default]
+    Other => "other",
+}
+
+/// How a dayflow run is driven.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DayflowMode {
@@ -45,6 +83,34 @@ pub enum DayflowMode {
     /// Long-lived continuous daemon, auto-rolling segments across the day.
     Daemon,
 }
+
+#[cfg(test)]
+mod taxonomy_tests {
+    use super::ActivityCategory;
+
+    #[test]
+    fn every_wire_name_is_distinct() {
+        // Two variants sharing a token would silently merge in the database, in
+        // the prompt, and in every digest.
+        let mut names: Vec<&str> = ActivityCategory::ALL.iter().map(|c| c.wire_name()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "duplicate wire names: {names:?}");
+    }
+
+    #[test]
+    fn the_wire_name_matches_what_serde_writes() {
+        // `wire_name` and the serde token are used interchangeably — the
+        // database writes one, the prompt offers the other — so a divergence
+        // would store a category the parser could never read back.
+        for c in ActivityCategory::ALL {
+            let json = serde_json::to_string(c).unwrap();
+            assert_eq!(json.trim_matches('"'), c.wire_name(), "{c:?}");
+        }
+    }
+}
+
 
 /// Lifecycle status of a dayflow session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -80,6 +146,197 @@ pub struct DayflowSession {
     pub status: DayflowStatus,
 }
 
+/// Why a recorder is not producing, when it is not.
+///
+/// The distinction this enum exists to preserve: **paused**, **off** and
+/// **degraded** are three different things that look identical from the outside
+/// (no new windows). Collapsing them is what makes a liveness signal useless —
+/// an operator who cannot tell a deliberate pause from a fault learns to ignore
+/// both, and then a whole day is lost before anyone notices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DayflowHealth {
+    /// Running and producing.
+    Healthy,
+    /// Deliberately paused — idle, locked, or the display asleep. NOT a fault
+    /// (FR-032).
+    Paused,
+    /// The user turned capture off.
+    Off,
+    /// Producing NOTHING with no benign explanation: running unpaused in
+    /// silence, or paused by a source that ENDED and can never come back on
+    /// its own. This is the fault case.
+    Degraded,
+    /// The session ended.
+    Stopped,
+}
+
+impl DayflowHealth {
+    /// Whether this state means something is WRONG, as opposed to merely quiet.
+    ///
+    /// Only [`Degraded`](Self::Degraded) is a fault. A pause and an off switch
+    /// are quiet on purpose.
+    pub fn is_fault(self) -> bool {
+        matches!(self, Self::Degraded)
+    }
+
+    /// Whether capture is expected to be producing windows right now.
+    pub fn expects_output(self) -> bool {
+        matches!(self, Self::Healthy | Self::Degraded)
+    }
+}
+
+/// Everything [`DayflowLiveness::assess`] needs.
+///
+/// A struct rather than a long argument list: eight positional parameters of
+/// which three are `Option<DateTime>` is a swap waiting to happen, and the
+/// compiler cannot catch it.
+#[derive(Debug, Clone, Copy)]
+pub struct LivenessInput {
+    /// Now.
+    pub now: DateTime<Utc>,
+    /// Windows closed and recorded so far.
+    pub chunks_written: u64,
+    /// End of the most recent recorded window.
+    pub last_chunk_at: Option<DateTime<Utc>>,
+    /// Timestamp of the most recent timeline entry.
+    pub last_summary_at: Option<DateTime<Utc>>,
+    /// The interval in force.
+    pub segment_seconds: u32,
+    /// Display pipelines currently capturing.
+    pub displays_active: u32,
+    /// Intervals whose frame could not be obtained.
+    pub frames_dropped: u64,
+    /// Why capture is paused, if it is.
+    pub paused_cause: Option<crate::dayflow::window::PauseCause>,
+    /// Whether the run has stopped.
+    pub stopped: bool,
+    /// When this run last STARTED producing — run start, or the most recent
+    /// resume. The staleness clock runs from here when nothing has been
+    /// produced yet, so "just started" is not mistaken for "broken".
+    pub producing_since: DateTime<Utc>,
+}
+
+/// Evidence that a recorder is alive, derived from what it PRODUCED.
+///
+/// Every field here comes from an artifact another process wrote — the segment
+/// ledger and the timeline table — never from a boolean the daemon keeps about
+/// itself. A daemon asked "are you healthy?" will always say yes; the ledger
+/// cannot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DayflowLiveness {
+    /// Windows closed and recorded so far.
+    pub chunks_written: u64,
+    /// End of the most recent recorded window.
+    pub last_chunk_at: Option<DateTime<Utc>>,
+    /// Timestamp of the most recent timeline entry.
+    pub last_summary_at: Option<DateTime<Utc>>,
+    /// The interval in force — the unit the staleness window is measured in.
+    pub segment_seconds: u32,
+    /// How many display pipelines are currently capturing.
+    pub displays_active: u32,
+    /// Intervals whose frame was WANTED and could not be obtained.
+    ///
+    /// Distinct from a skip: a skip is the gate working, a drop is missing data.
+    /// Surfaced here because a caller has to be able to SEE the holes — a
+    /// dropped minute cannot be recaptured, so it must be investigable rather
+    /// than inferred from a gap in the timeline.
+    pub frames_dropped: u64,
+    /// The derived state.
+    pub health: DayflowHealth,
+}
+
+impl DayflowLiveness {
+    /// How many segment intervals of silence before a running recorder counts as
+    /// degraded (SC-006). Two, so one slow window does not raise a false alarm.
+    pub const STALE_INTERVALS: u32 = 2;
+
+    /// Derive health from produced artifacts plus the declared lifecycle.
+    ///
+    /// `paused_cause` and `stopped` describe INTENT; everything else is
+    /// evidence. Intent wins only for explaining silence that was asked for —
+    /// it can never make a silent recorder look healthy.
+    pub fn assess(input: LivenessInput) -> Self {
+        use crate::dayflow::window::PauseCause;
+        let LivenessInput {
+            now,
+            chunks_written,
+            last_chunk_at,
+            last_summary_at,
+            segment_seconds,
+            displays_active,
+            frames_dropped,
+            paused_cause,
+            stopped,
+            producing_since,
+        } = input;
+
+        let health = if stopped {
+            DayflowHealth::Stopped
+        } else {
+            match paused_cause {
+                Some(PauseCause::UserOff) => DayflowHealth::Off,
+                // Exhaustive on purpose — no `Some(_)` arm. A wildcard here is
+                // the "variant added but omitted" trap this file's taxonomy
+                // macro exists to prevent: when `SourceOccluded`/`SourceEnded`
+                // were added to `PauseCause`, a catch-all silently read both as
+                // a benign pause. A new cause must fail to compile until its
+                // health is DECIDED.
+                //
+                // `SourceEnded` is the fault case, not a pause. It is not
+                // automatic (`PauseCause::is_automatic`) and carries no user
+                // intent, so the session will never produce again by itself —
+                // reporting Paused would read a dead source as quiet on
+                // purpose, which FR-113 forbids conflating, and a whole day
+                // could pass before anyone noticed.
+                Some(PauseCause::SourceEnded) => DayflowHealth::Degraded,
+                // A restart gap is recorded already CLOSED — the daemon is
+                // running again by the time it is written — so a run reporting
+                // it as its LIVE pause means something is wrong, not quiet.
+                Some(PauseCause::DaemonRestart) => DayflowHealth::Degraded,
+                Some(
+                    PauseCause::Idle
+                    | PauseCause::Locked
+                    | PauseCause::DisplaySleep
+                    | PauseCause::SourceOccluded,
+                ) => DayflowHealth::Paused,
+                None => {
+                    // Staleness is measured from the later of "last produced" and
+                    // "started producing". Without the second term a freshly
+                    // started run reads Degraded until its first window closes —
+                    // up to a full hour at the interval ceiling — and a run that
+                    // just resumed from a long pause reads Degraded for an
+                    // interval, contradicting FR-032.
+                    let reference = match last_chunk_at {
+                        Some(t) if t > producing_since => t,
+                        _ => producing_since,
+                    };
+                    let stale_after = i64::from(segment_seconds) * i64::from(Self::STALE_INTERVALS);
+                    if (now - reference).num_seconds() < stale_after {
+                        DayflowHealth::Healthy
+                    } else {
+                        DayflowHealth::Degraded
+                    }
+                }
+            }
+        };
+        Self {
+            chunks_written,
+            last_chunk_at,
+            last_summary_at,
+            segment_seconds,
+            displays_active,
+            frames_dropped,
+            health,
+        }
+    }
+
+    /// How long since the last window closed, if ever.
+    pub fn silence(&self, now: DateTime<Utc>) -> Option<chrono::Duration> {
+        self.last_chunk_at.map(|t| now - t)
+    }
+}
+
 /// A reference to one on-the-fly recording segment (15-min chunk by default).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkRef {
@@ -91,6 +348,26 @@ pub struct ChunkRef {
     pub start_wall: DateTime<Utc>,
     /// Wall-clock end of this chunk.
     pub end_wall: DateTime<Utc>,
+    /// Which display produced it (FR-029), carried forward onto every entry
+    /// derived from this window so a merged timeline stays attributable.
+    #[serde(default)]
+    pub display_id: u32,
+    /// Monotonic WITHIN the session, across sampler restarts.
+    ///
+    /// [`ChunkRef::index`] is a per-run counter that resets to 0 on every pause,
+    /// resume, interval change and display change, so it is not a stable
+    /// identity. The durable identity of a window is
+    /// `(session_id, display_id, sequence)` — matching the `dayflow_segments`
+    /// primary key, never the filename and never `index`.
+    #[serde(default)]
+    pub sequence: u64,
+    /// Whether this window has been summarised.
+    ///
+    /// The eviction guard (FR-025) reads this: a window that failed
+    /// summarisation because a backend was unreachable must be RETRIED, never
+    /// reclaimed, or a backend outage becomes silent data loss.
+    #[serde(default)]
+    pub summarized: bool,
 }
 
 /// The structured summary of a single chunk produced by the Map step.
@@ -127,6 +404,64 @@ impl RollingContext {
     }
 }
 
+/// Where on screen an entry's text came from (US4/FR-020).
+///
+/// Every field is optional at the storage layer because entries written before
+/// this existed have none, and never will — the pixels are gone. A default
+/// would be an invented layout indistinguishable from a measured one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryProvenance {
+    /// Stable identity of the region this text came from.
+    pub region_id: u64,
+    /// The region's box, in its display's coordinates.
+    pub bbox_x: u32,
+    /// See [`EntryProvenance::bbox_x`].
+    pub bbox_y: u32,
+    /// See [`EntryProvenance::bbox_x`].
+    pub bbox_w: u32,
+    /// See [`EntryProvenance::bbox_x`].
+    pub bbox_h: u32,
+    /// Identity of the region that CONTAINS this one, when there is one.
+    ///
+    /// Carries the cascade edge, so a stored entry can be walked back up to the
+    /// window it sat in — the containment relation is what reconstructs an
+    /// arrangement rather than a flat list of boxes.
+    pub parent_region_id: Option<u64>,
+    /// Which display it was on.
+    pub display_id: u32,
+    /// Rank in the deterministic reading order of that capture.
+    pub reading_order: u32,
+}
+
+/// Join extracted regions to their provenance, in reading order (T035).
+///
+/// Takes the regions a capture produced and returns one provenance per region,
+/// ordered as a person reads them. `parent_region_id` is resolved from the
+/// within-capture `parent` INDEX to the parent's stable identity, because an
+/// index does not survive being written down.
+pub fn provenance_in_reading_order(regions: &[crate::regions::Region]) -> Vec<EntryProvenance> {
+    crate::regions::reading_order(regions)
+        .into_iter()
+        .enumerate()
+        .map(|(rank, i)| {
+            let r = &regions[i];
+            EntryProvenance {
+                region_id: r.identity(),
+                bbox_x: r.bbox.x,
+                bbox_y: r.bbox.y,
+                bbox_w: r.bbox.w,
+                bbox_h: r.bbox.h,
+                parent_region_id: r
+                    .parent
+                    .and_then(|p| regions.get(p as usize))
+                    .map(|p| p.identity()),
+                display_id: r.display_id,
+                reading_order: rank as u32,
+            }
+        })
+        .collect()
+}
+
 /// A single entry in the queryable activity timeline (persisted in SQLite,
 /// Wave 4). Column-aligned with the `timeline_entries` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,4 +482,273 @@ pub struct TimelineEntry {
     pub activity: String,
     /// Human-readable summary of the activity in this range.
     pub summary: String,
+    /// Where on screen this text came from (US4). `None` for entries written
+    /// before provenance existed — the pixels are gone, so it can never be
+    /// filled in, and NULL is the honest value.
+    #[serde(default)]
+    pub provenance: Option<EntryProvenance>,
+}
+
+#[cfg(test)]
+mod chunk_identity_tests {
+    use super::*;
+
+    #[test]
+    fn chunkref_still_loads_data_written_before_these_fields_existed() {
+        // Real: deleting any `serde(default)` fails this.
+        let old = r#"{"index":2,"path":"/tmp/c.mp4",
+            "start_wall":"2026-08-24T09:00:00Z","end_wall":"2026-08-24T09:15:00Z"}"#;
+        let c: ChunkRef = serde_json::from_str(old).expect("old manifest must still parse");
+        assert_eq!(c.index, 2);
+        assert_eq!(c.display_id, 0);
+        assert_eq!(c.sequence, 0);
+        assert!(!c.summarized);
+    }
+
+    // NOTE: `sequence` being the durable identity across a sampler restart is a
+    // property of the SAMPLER (T010), which does not exist yet. Tests asserting
+    // it on hand-built structs would only compare literals the test itself
+    // supplied — they would pass against any implementation, including a broken
+    // one — so they are deliberately not written here. The behaviour is covered
+    // by T010's `> DONE:` criterion, and `plan_chunks` below is tested where it
+    // actually assigns the field.
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+    use crate::dayflow::window::PauseCause;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_787_500_000 + secs, 0).unwrap()
+    }
+
+    const SEG: u32 = 600; // 10-minute windows -> stale after 1200s
+
+    fn assess(
+        now_s: i64,
+        last_chunk: Option<i64>,
+        pause: Option<PauseCause>,
+        stopped: bool,
+    ) -> DayflowLiveness {
+        assess_from(now_s, last_chunk, pause, stopped, 0)
+    }
+
+    fn assess_from(
+        now_s: i64,
+        last_chunk: Option<i64>,
+        pause: Option<PauseCause>,
+        stopped: bool,
+        producing_since_s: i64,
+    ) -> DayflowLiveness {
+        DayflowLiveness::assess(LivenessInput {
+            now: at(now_s),
+            chunks_written: if last_chunk.is_some() { 5 } else { 0 },
+            last_chunk_at: last_chunk.map(at),
+            last_summary_at: None,
+            segment_seconds: SEG,
+            displays_active: 2,
+            frames_dropped: 0,
+            paused_cause: pause,
+            stopped,
+            producing_since: at(producing_since_s),
+        })
+    }
+
+    #[test]
+    fn a_freshly_started_run_is_not_a_fault_before_its_first_window() {
+        // The false-fault this clock exists to prevent: with no start reference a
+        // run reads Degraded every morning until its first window closes — up to
+        // a full hour at the interval ceiling.
+        let l = assess_from(0, None, None, false, 0);
+        assert_eq!(l.health, DayflowHealth::Healthy, "t=0 with nothing produced yet");
+        assert!(!l.health.is_fault());
+
+        // ...but it does NOT excuse silence forever.
+        let later = assess_from(5_000, None, None, false, 0);
+        assert_eq!(
+            later.health,
+            DayflowHealth::Degraded,
+            "past two intervals with nothing produced IS a fault"
+        );
+    }
+
+    #[test]
+    fn a_just_resumed_run_is_not_a_fault_for_its_stale_history() {
+        // Resuming from a long pause leaves last_chunk_at far in the past.
+        // Measuring from it alone reports Degraded immediately after resume,
+        // contradicting FR-032.
+        let l = assess_from(100_000, Some(300), None, false, 99_900);
+        assert_eq!(l.health, DayflowHealth::Healthy, "just resumed, given time to produce");
+        // and it still degrades if it then produces nothing
+        let stale = assess_from(101_500, Some(300), None, false, 99_900);
+        assert_eq!(stale.health, DayflowHealth::Degraded);
+    }
+
+    #[test]
+    fn the_start_clock_cannot_excuse_a_recorder_that_stopped_producing() {
+        // producing_since must never OVERRIDE a more recent real window; the
+        // later of the two is the reference.
+        let l = assess_from(5_000, Some(4_900), None, false, 0);
+        assert_eq!(l.health, DayflowHealth::Healthy, "a recent window wins over an old start");
+        let l2 = assess_from(5_000, Some(100), None, false, 0);
+        assert_eq!(l2.health, DayflowHealth::Degraded, "old window AND old start ⇒ fault");
+    }
+
+    #[test]
+    fn a_recorder_producing_recently_is_healthy() {
+        let l = assess(1_000, Some(700), None, false);
+        assert_eq!(l.health, DayflowHealth::Healthy);
+        assert!(!l.health.is_fault());
+    }
+
+    #[test]
+    fn a_running_recorder_producing_nothing_is_degraded() {
+        // THE failure this feature exists to catch: reports alive, writes
+        // nothing, and nobody notices until tomorrow.
+        let l = assess(5_000, Some(700), None, false);
+        assert_eq!(l.health, DayflowHealth::Degraded);
+        assert!(l.health.is_fault());
+        assert!(l.silence(at(5_000)).unwrap().num_seconds() > 1200);
+    }
+
+    #[test]
+    fn a_recorder_that_never_produced_anything_is_degraded_not_healthy() {
+        // The nastiest variant: it started, claimed success, and has written
+        // nothing ever. An implementation defaulting to Healthy would hide it.
+        let l = assess(5_000, None, None, false);
+        assert_eq!(l.health, DayflowHealth::Degraded);
+        assert_eq!(l.chunks_written, 0);
+    }
+
+    #[test]
+    fn paused_off_and_degraded_are_three_distinguishable_states() {
+        // All three look identical from outside — no new windows. If they
+        // collapse, an operator learns to ignore the signal entirely.
+        let paused = assess(5_000, Some(700), Some(PauseCause::Idle), false);
+        let off = assess(5_000, Some(700), Some(PauseCause::UserOff), false);
+        let degraded = assess(5_000, Some(700), None, false);
+
+        assert_eq!(paused.health, DayflowHealth::Paused);
+        assert_eq!(off.health, DayflowHealth::Off);
+        assert_eq!(degraded.health, DayflowHealth::Degraded);
+
+        let all = [paused.health, off.health, degraded.health];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "{a:?} and {b:?} must not be the same state");
+            }
+        }
+    }
+
+    #[test]
+    fn a_deliberate_pause_is_never_reported_as_a_fault() {
+        // FR-032. Identical silence to the degraded case — only the cause differs.
+        for cause in [
+            PauseCause::Idle,
+            PauseCause::Locked,
+            PauseCause::DisplaySleep,
+            PauseCause::SourceOccluded,
+        ] {
+            let l = assess(99_999, Some(700), Some(cause), false);
+            assert!(
+                !l.health.is_fault(),
+                "{cause:?} paused for a long time is still not a fault"
+            );
+            assert!(!l.health.expects_output(), "a paused recorder is not expected to produce");
+        }
+    }
+
+    #[test]
+    fn a_dead_source_is_a_fault_a_covered_one_is_not() {
+        // FR-113: unavailable, occluded and ended must not be conflated. An
+        // occluded source lifts on its own (`is_automatic`), so it is a pause.
+        // An ended source never lifts and nobody asked for it, so Paused would
+        // read a dead session as quiet on purpose — the operator would learn
+        // the truth a whole lost day later. The `Some(_)` catch-all this test
+        // replaced did exactly that.
+        let covered = assess(5_000, Some(700), Some(PauseCause::SourceOccluded), false);
+        assert_eq!(covered.health, DayflowHealth::Paused);
+        assert!(!covered.health.is_fault(), "occluded is quiet, not broken (FR-032)");
+
+        let dead = assess(5_000, Some(700), Some(PauseCause::SourceEnded), false);
+        assert_eq!(dead.health, DayflowHealth::Degraded);
+        assert!(
+            dead.health.is_fault(),
+            "an ended source cannot resume; silence about it is how a day is lost"
+        );
+        assert_ne!(
+            covered.health, dead.health,
+            "the two source states must be distinguishable from health alone"
+        );
+    }
+
+    #[test]
+    fn staleness_is_measured_in_segment_intervals_not_fixed_minutes() {
+        // SC-006. The same 25-minute silence is a fault at a 10-minute interval
+        // and perfectly normal at a 30-minute one.
+        let silence_secs = 1_500;
+        let mk = |seg: u32| {
+            DayflowLiveness::assess(LivenessInput {
+                now: at(silence_secs),
+                chunks_written: 3,
+                last_chunk_at: Some(at(0)),
+                last_summary_at: None,
+                segment_seconds: seg,
+                displays_active: 1,
+                frames_dropped: 0,
+                paused_cause: None,
+                stopped: false,
+                producing_since: at(0),
+            })
+        };
+        let short = mk(600);
+        let long = mk(1800);
+        assert_eq!(short.health, DayflowHealth::Degraded, "1500s > 2x600s");
+        assert_eq!(long.health, DayflowHealth::Healthy, "1500s < 2x1800s");
+    }
+
+    #[test]
+    fn stopping_is_not_a_fault_however_long_the_silence() {
+        let l = assess(999_999, Some(700), None, true);
+        assert_eq!(l.health, DayflowHealth::Stopped);
+        assert!(!l.health.is_fault());
+        assert!(!l.health.expects_output());
+    }
+
+    #[test]
+    fn intent_can_explain_silence_but_can_never_manufacture_health() {
+        // The property that keeps this honest: no combination of declared
+        // lifecycle turns a silent recorder into a Healthy one.
+        for pause in [
+            None,
+            Some(PauseCause::Idle),
+            Some(PauseCause::Locked),
+            Some(PauseCause::DisplaySleep),
+            Some(PauseCause::UserOff),
+            Some(PauseCause::SourceOccluded),
+            Some(PauseCause::SourceEnded),
+        ] {
+            for stopped in [true, false] {
+                let l = assess(999_999, Some(0), pause, stopped);
+                assert_ne!(
+                    l.health,
+                    DayflowHealth::Healthy,
+                    "silence of 999999s must never read Healthy (pause={pause:?}, stopped={stopped})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn liveness_round_trips_so_a_caller_gets_every_field() {
+        let l = assess(1_000, Some(700), None, false);
+        let back: DayflowLiveness =
+            serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back, l);
+        // a caller must be able to tell the states apart from the payload alone
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(json.contains("\"health\""), "health must be in the payload: {json}");
+    }
+
 }

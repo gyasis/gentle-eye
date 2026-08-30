@@ -67,18 +67,33 @@ fn apply_env_overrides(config: &mut AppConfig) {
     // URL ("http://host:port[/]") and normalizes it so the downstream `http://{host}:{port}`
     // formatter never doubles the scheme/port. (fix 2026-06-27: env held a full URL -> doubled.)
     if let Ok(raw) = std::env::var("OLLAMA_HOST") {
-        let s = raw.trim();
-        let s = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")).unwrap_or(s);
-        let s = s.split('/').next().unwrap_or(s); // drop any path / trailing slash
-        match s.rsplit_once(':') {
-            Some((h, p)) if !h.is_empty() => {
-                config.vision.ollama_host = h.to_string();
-                if let Ok(port) = p.parse::<u16>() {
-                    config.vision.ollama_port = port;
+        let s = raw.trim().trim_end_matches('/');
+        let has_scheme = s.starts_with("http://") || s.starts_with("https://");
+        let body = s
+            .strip_prefix("http://")
+            .or_else(|| s.strip_prefix("https://"))
+            .unwrap_or(s);
+        if body.contains('/') {
+            // PATH-PREFIXED endpoint (e.g. the Atelier governor's memory-governed
+            // lane, http://<mac>:8799/llm/ollama). Keep it VERBATIM — splitting it
+            // into host+port drops the prefix and every call 404s. Downstream
+            // (mcp/server.rs) passes a full URL through untouched.
+            config.vision.ollama_host = if has_scheme {
+                s.to_string()
+            } else {
+                format!("http://{s}")
+            };
+        } else {
+            match body.rsplit_once(':') {
+                Some((h, p)) if !h.is_empty() => {
+                    config.vision.ollama_host = h.to_string();
+                    if let Ok(port) = p.parse::<u16>() {
+                        config.vision.ollama_port = port;
+                    }
                 }
+                _ if !body.is_empty() => config.vision.ollama_host = body.to_string(),
+                _ => {}
             }
-            _ if !s.is_empty() => config.vision.ollama_host = s.to_string(),
-            _ => {}
         }
     }
 

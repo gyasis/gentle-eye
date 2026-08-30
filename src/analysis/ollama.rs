@@ -44,9 +44,20 @@ pub struct OllamaProvider {
     model: String,
     max_video_size: u64,
     timeout_seconds: u64,
+    /// The `keep_alive` to send, already resolved by the caller from its
+    /// `ResidencyPolicy` and segment cadence. Interior mutability because
+    /// `set_keep_alive` takes `&self` — a provider is shared behind an `Arc`,
+    /// and requiring `&mut` would force a lock at every call site to express a
+    /// hint.
+    keep_alive: std::sync::Mutex<Option<String>>,
 }
 
 impl OllamaProvider {
+    /// The `keep_alive` currently asked for, if any.
+    pub fn keep_alive(&self) -> Option<String> {
+        self.keep_alive.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
     /// Build from a [`VisionConfig`]. The base URL is read from `OLLAMA_HOST`
     /// (or `OLLAMA_URL`), defaulting to `http://localhost:11434`.
     pub fn new(config: &VisionConfig) -> Result<Self, VisionError> {
@@ -77,6 +88,10 @@ impl OllamaProvider {
                 DEFAULT_OLLAMA_MAX_VIDEO_SIZE
             },
             timeout_seconds,
+            // Unmanaged until a caller asks. Sending an unsolicited
+            // `keep_alive` would change ollama's eviction behaviour for every
+            // existing caller of this provider, none of which asked.
+            keep_alive: std::sync::Mutex::new(None),
         })
     }
 
@@ -98,7 +113,7 @@ impl OllamaProvider {
         prompt: &str,
         images: &[String],
     ) -> Result<(String, Option<u32>), VisionError> {
-        let body = build_ollama_request(&self.model, prompt, images);
+        let body = build_ollama_request(&self.model, prompt, images, self.keep_alive());
         let resp = self
             .client
             .post(format!("{}/api/generate", self.base_url))
@@ -230,21 +245,70 @@ impl VisionProvider for OllamaProvider {
     fn model(&self) -> &str {
         &self.model
     }
+
+    fn set_keep_alive(&self, keep_alive: Option<String>) {
+        *self.keep_alive.lock().unwrap_or_else(|p| p.into_inner()) = keep_alive;
+    }
 }
 
 // ---- pure helpers (unit-tested) -------------------------------------------
 
 /// Build an `/api/generate` request body (non-streaming, with inline images).
-fn build_ollama_request(model: &str, prompt: &str, images: &[String]) -> Value {
-    serde_json::json!({
+fn build_ollama_request(
+    model: &str,
+    prompt: &str,
+    images: &[String],
+    keep_alive: Option<String>,
+) -> Value {
+    let mut body = serde_json::json!({
         "model": model,
         "prompt": prompt,
         "images": images,
         "stream": false
-    })
+    });
+    // Sent ONLY when the caller asked. An unsolicited `keep_alive` overrides
+    // the server's own default for every caller, including those that never
+    // asked about residency. The VALUE is resolved by
+    // `ResidencyPolicy::keep_alive(segment_cadence)` — this function does not
+    // re-derive it, because a second mapping is a second thing to get wrong.
+    if let Some(v) = keep_alive {
+        body["keep_alive"] = serde_json::json!(v);
+    }
+    body
 }
 
 /// Extract the response text + `eval_count` token estimate from an Ollama reply.
+/// Strip a reasoning ("thinking") preamble from a model response.
+///
+/// Thinking-capable vision models (`ornith-1.5-*`, `qwen3-vl:*`, `gemma4:*`) emit their
+/// chain-of-thought before the answer, terminated by `</think>`. Ollama's `/api/generate`
+/// returns that inline in `response`, so without this the caller receives the model's
+/// deliberation prepended to — and often far longer than — the actual answer.
+/// Measured 2026-08-23 against `ornith-1.5-9b` through the Atelier governor: roughly 60%
+/// of `analysis_text` was reasoning noise ("Let me carefully transcribe… Actually, let me
+/// re-read…") ahead of the real transcription.
+///
+/// Deliberately conservative:
+/// - only acts when a close tag is actually present (non-thinking models are untouched),
+/// - splits on the LAST `</think>` so nested/repeated blocks collapse correctly,
+/// - never returns empty — a response that is *entirely* reasoning is passed through
+///   as-is rather than silently becoming "", since a wrong-but-present answer is far
+///   easier to debug than a blank one.
+pub fn strip_reasoning(text: &str) -> String {
+    const CLOSE: &str = "</think>";
+    match text.rfind(CLOSE) {
+        Some(i) => {
+            let tail = text[i + CLOSE.len()..].trim();
+            if tail.is_empty() {
+                text.trim().to_string()
+            } else {
+                tail.to_string()
+            }
+        }
+        None => text.trim().to_string(),
+    }
+}
+
 fn parse_ollama_response(body: &str) -> Result<(String, Option<u32>), VisionError> {
     let v: Value = serde_json::from_str(body).map_err(|e| VisionError::ApiError {
         message: format!("invalid JSON from Ollama: {e}"),
@@ -256,14 +320,12 @@ fn parse_ollama_response(body: &str) -> Result<(String, Option<u32>), VisionErro
             status_code: None,
         });
     }
-    let text = v
-        .get("response")
-        .and_then(Value::as_str)
-        .ok_or_else(|| VisionError::ApiError {
+    let text = strip_reasoning(v.get("response").and_then(Value::as_str).ok_or_else(|| {
+        VisionError::ApiError {
             message: "Ollama response contained no 'response' field".to_string(),
             status_code: None,
-        })?
-        .to_string();
+        }
+    })?);
     let token_count = v.get("eval_count").and_then(Value::as_u64).map(|t| t as u32);
     Ok((text, token_count))
 }
@@ -412,6 +474,22 @@ mod tests {
         }
     }
 
+    /// The ONE production provider that implements the channel must actually
+    /// STORE the hint — the trait's default is a no-op, so deleting this
+    /// override would compile, pass every request-body unit test (they take
+    /// the value as a parameter), and silently turn `Resident` back into a
+    /// policy the running system cannot express (W8 gate; mutation
+    /// "remove the override" survived the suite before this test).
+    #[test]
+    fn set_keep_alive_stores_the_value_the_request_path_reads() {
+        let p = OllamaProvider::with_url(&cfg(), "http://host:11434").unwrap();
+        assert_eq!(p.keep_alive(), None, "unmanaged until a caller asks");
+        p.set_keep_alive(Some("1860s".to_string()));
+        assert_eq!(p.keep_alive().as_deref(), Some("1860s"));
+        p.set_keep_alive(None);
+        assert_eq!(p.keep_alive(), None, "a later None must clear it, not linger");
+    }
+
     #[test]
     fn new_applies_defaults_and_trims_url() {
         let p = OllamaProvider::with_url(&cfg(), "http://host:11434/").unwrap();
@@ -424,7 +502,17 @@ mod tests {
 
     #[test]
     fn request_body_is_non_streaming_with_images() {
-        let body = build_ollama_request("llava", "describe", &["QUJD".to_string()]);
+        let body = build_ollama_request(
+            "llava",
+            "describe",
+            &["QUJD".to_string()],
+            None,
+        );
+        assert!(
+            body.get("keep_alive").is_none(),
+            "an unmanaged policy must send NO keep_alive — an unsolicited one overrides \
+             the server default for every caller that never asked about residency"
+        );
         assert_eq!(body["model"], "llava");
         assert_eq!(body["prompt"], "describe");
         assert_eq!(body["stream"], false);
@@ -446,5 +534,110 @@ mod tests {
     fn validates_inputs() {
         assert!(validate_prompt("  ").is_err());
         assert!(validate_timeframe(&TimeRange { start_seconds: 2.0, end_seconds: 1.0 }).is_err());
+    }
+
+    #[test]
+    fn strip_reasoning_removes_think_preamble() {
+        let raw = "Let me look carefully.\nActually, re-reading.\n</think>\n\nTwo things I did not do";
+        assert_eq!(strip_reasoning(raw), "Two things I did not do");
+    }
+
+    #[test]
+    fn strip_reasoning_leaves_plain_text_untouched() {
+        assert_eq!(strip_reasoning("  a plain answer  "), "a plain answer");
+    }
+
+    #[test]
+    fn strip_reasoning_never_returns_empty() {
+        // entirely reasoning, no answer after the close tag -> pass through, never ""
+        let raw = "thinking hard</think>   ";
+        assert_eq!(strip_reasoning(raw), "thinking hard</think>");
+    }
+
+    #[test]
+    fn strip_reasoning_splits_on_last_close_tag() {
+        let raw = "a</think>b</think>final";
+        assert_eq!(strip_reasoning(raw), "final");
+    }
+}
+
+#[cfg(test)]
+mod residency_tests {
+    use super::*;
+    use crate::config::ResidencyPolicy;
+
+    /// The resolved value must reach the WIRE. A residency that never leaves
+    /// the process is a policy the running system cannot express — which is
+    /// what `ResidencyPolicy::Resident` was before T020.
+    #[test]
+    fn the_resolved_keep_alive_reaches_the_request_body() {
+        // The resolution is 013's, taking the SEGMENT cadence — not a second
+        // mapping invented here. Sizing it from the sample interval expired the
+        // window before the next burst, so Resident held memory AND paid every
+        // cold load.
+        let cadence = std::time::Duration::from_secs(900);
+        let resident = ResidencyPolicy::Resident.keep_alive(cadence);
+        assert_eq!(resident.as_deref(), Some("1860s"), "2x cadence + 60s margin");
+
+        let body = build_ollama_request("m", "p", &[], resident);
+        assert_eq!(body["keep_alive"], "1860s");
+
+        // OnDemand says NOTHING — it accepts the reload rather than pinning.
+        let on_demand = build_ollama_request("m", "p", &[], ResidencyPolicy::OnDemand.keep_alive(cadence));
+        assert!(
+            on_demand.get("keep_alive").is_none(),
+            "OnDemand must leave the server default alone"
+        );
+
+        // Off actively releases.
+        let off = build_ollama_request("m", "p", &[], ResidencyPolicy::Off.keep_alive(cadence));
+        assert_eq!(off["keep_alive"], "0");
+
+        assert_ne!(body["keep_alive"], off["keep_alive"]);
+    }
+
+    /// A provider that IGNORES the hint still behaves correctly — residency is
+    /// an optimisation, never a correctness requirement. The default trait
+    /// method is what guarantees it.
+    #[test]
+    fn a_provider_that_ignores_keep_alive_is_still_correct() {
+        struct Ignorer;
+        #[async_trait::async_trait]
+        impl crate::contracts::traits::VisionProvider for Ignorer {
+            async fn analyze_video(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: Option<crate::contracts::traits::TimeRange>,
+            ) -> Result<crate::contracts::traits::AnalysisResult, VisionError> {
+                unreachable!()
+            }
+            async fn analyze_image(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+            ) -> Result<crate::contracts::traits::AnalysisResult, VisionError> {
+                unreachable!()
+            }
+            async fn health_check(&self) -> Result<(), VisionError> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "ignorer"
+            }
+            fn max_video_size(&self) -> u64 {
+                0
+            }
+            fn supports_native_video(&self) -> bool {
+                false
+            }
+            fn model(&self) -> &str {
+                "ignorer"
+            }
+        }
+        let p = Ignorer;
+        // Does not panic, does not change behaviour.
+        p.set_keep_alive(Some("1860s".into()));
+        assert_eq!(p.name(), "ignorer");
     }
 }

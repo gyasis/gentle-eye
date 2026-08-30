@@ -18,7 +18,8 @@ use crate::contracts::traits::{
     RecordingConfig, RecordingService, RecordingStatus, TimeRange, VisionConfig, VisionProvider,
 };
 use crate::mcp::tools::{
-    AnalyzeVideoInput, AnalyzeVideoOutput, CancelRecordingInput, CancelRecordingOutput,
+    AnalyzeVideoInput, AnalyzeVideoOutput, AskDayInput, CancelRecordingInput, CancelRecordingOutput,
+    DayflowStatusInput, GetTimelineInput, StartDayflowInput, StopDayflowInput,
     CaptureStreamFrameInput, CaptureStreamFrameOutput, DefineTargetInput, DefineTargetOutput,
     FocusTargetInput, FocusTargetOutput, MeasureTargetInput, MeasureTargetOutput,
     GetRecordingStatusInput, GetRecordingStatusOutput, GetVisionProviderInfoOutput,
@@ -48,6 +49,11 @@ pub struct GentleEyeServer {
     config: AppConfig,
     recording: Arc<dyn RecordingService>,
     vision: Arc<dyn VisionProvider>,
+    /// The ONE dayflow engine. MCP is an adapter over it, exactly as the CLI
+    /// and HTTP surfaces are — so "started on one surface, visible from the
+    /// others" is a property of there being one state, not an agreement three
+    /// implementations have to keep.
+    dayflow: Arc<crate::dayflow::service::DayflowService>,
 }
 
 impl GentleEyeServer {
@@ -66,11 +72,29 @@ impl GentleEyeServer {
         let recording: Arc<dyn RecordingService> =
             Arc::new(CaptureService::new(storage, display_index));
         let vision = build_vision_provider(&config.vision)?;
+        let timeline = Arc::new(crate::dayflow::timeline::SqliteTimelineStore::new(
+            Arc::new(std::sync::Mutex::new(crate::storage::database::init_database(
+                &config.storage.base_dir.join("gentle-eye.db"),
+            )?)),
+        ));
+        let dayflow = Arc::new(crate::dayflow::service::DayflowService::new(
+            timeline,
+            config.dayflow.clone(),
+        ));
         Ok(Self {
             config,
             recording,
             vision,
+            dayflow,
         })
+    }
+
+    /// The dayflow engine (shared with the CLI and HTTP front-ends).
+    ///
+    /// Handed out rather than duplicated: every surface must drive THIS
+    /// instance, or "started on one, visible from the others" stops being true.
+    pub fn dayflow(&self) -> &Arc<crate::dayflow::service::DayflowService> {
+        &self.dayflow
     }
 
     /// Borrow the loaded configuration.
@@ -117,6 +141,11 @@ impl GentleEyeServer {
             "define_target" => self.tool_define_target(parse_args(args)?).await,
             "focus_target" => self.tool_focus_target(parse_args(args)?).await,
             "measure_target" => self.tool_measure_target(parse_args(args)?).await,
+            "start_dayflow" => self.tool_start_dayflow(parse_args(args)?),
+            "stop_dayflow" => self.tool_stop_dayflow(parse_args(args)?),
+            "dayflow_status" => self.tool_dayflow_status(parse_args(args)?),
+            "get_timeline" => self.tool_get_timeline(parse_args(args)?),
+            "ask_day" => self.tool_ask_day(parse_args(args)?),
             other => {
                 return Err(ErrorData::invalid_params(
                     format!("unknown tool: {other}"),
@@ -125,6 +154,183 @@ impl GentleEyeServer {
             }
         };
         Ok(result)
+    }
+
+    // ---- Dayflow (US6) -----------------------------------------------------
+    //
+    // Every one of these is a THIN adapter: parse the wire shape, call the one
+    // service, serialise the answer. No decision lives here, because a decision
+    // that lives in a surface is a decision the other two surfaces do not make.
+
+    /// The running dayflow daemon's client, when one is serving (T023/D014-15).
+    ///
+    /// Without attaching, an MCP invocation is a PRIVATE in-process engine:
+    /// `dayflow_status` reports "not running" while the daemon captures, and
+    /// `start_dayflow` opens a second session nothing else can see — exactly
+    /// the divergence one state store exists to prevent. Only the
+    /// session-state tools need this; `get_timeline` and `ask_day` read the
+    /// shared sqlite store, which IS the store the daemon writes.
+    fn attached_daemon(&self) -> Option<crate::dayflow::client::DaemonClient> {
+        let store = crate::dayflow::daemon::DaemonStateStore::new(
+            crate::dayflow::daemon::state_path_under(&self.config.storage.base_dir),
+        );
+        crate::dayflow::client::DaemonClient::discover(&store)
+    }
+
+    /// Wrap a daemon's JSON reply as this tool's result.
+    fn forward(body: Result<String, crate::contracts::errors::DayflowError>) -> CallToolResult {
+        match body {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(v) => ok_json(v),
+                // The daemon answered non-JSON; pass it through rather than
+                // replace a specific reply with a generic error.
+                Err(_) => ok_json(serde_json::json!({ "raw": text })),
+            },
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    fn tool_start_dayflow(&self, input: StartDayflowInput) -> CallToolResult {
+        if let Some(client) = self.attached_daemon() {
+            use crate::dayflow::client::urlencode;
+            let mut q: Vec<String> = Vec::new();
+            if let Some(d) = &input.displays {
+                let list =
+                    d.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+                q.push(format!("displays={}", urlencode(&list)));
+            }
+            for (name, v) in [
+                ("window", &input.window),
+                ("target", &input.target),
+                ("input", &input.input),
+                ("mode", &input.mode),
+            ] {
+                if let Some(v) = v {
+                    q.push(format!("{name}={}", urlencode(v)));
+                }
+            }
+            return Self::forward(client.post(&format!("/dayflow/start?{}", q.join("&"))));
+        }
+        let mode = match input.mode.as_deref() {
+            None | Some("session") => crate::dayflow::models::DayflowMode::Session,
+            Some("daemon") => crate::dayflow::models::DayflowMode::Daemon,
+            Some(other) => return err_text(format!("unknown mode '{other}': use session or daemon")),
+        };
+        // The SAME parse the CLI and HTTP use: three surfaces cannot drift
+        // when there is one type to drift from (FR-115).
+        let spec = match crate::dayflow::source::SourceSpec::parse(
+            input.displays,
+            input.window,
+            input.target,
+            input.input,
+        ) {
+            Ok(s) => s,
+            Err(e) => return err_text(e),
+        };
+        match self.dayflow.start_session(mode, spec, Utc::now()) {
+            Ok(id) => ok_json(serde_json::json!({
+                "session_id": id.to_string(),
+                "message": "Dayflow started",
+            })),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    fn tool_stop_dayflow(&self, _input: StopDayflowInput) -> CallToolResult {
+        if let Some(client) = self.attached_daemon() {
+            return Self::forward(client.post("/dayflow/stop"));
+        }
+        match self.dayflow.stop(Utc::now()) {
+            Ok(closed) => ok_json(serde_json::json!({
+                "windows_closed": closed.len(),
+                "message": "Dayflow stopped",
+            })),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    fn tool_dayflow_status(&self, input: DayflowStatusInput) -> CallToolResult {
+        if let Some(client) = self.attached_daemon() {
+            return Self::forward(client.get("/dayflow/status"));
+        }
+        self.tool_dayflow_status_at(input, Utc::now())
+    }
+
+    /// [`Self::tool_dayflow_status`], with the clock supplied.
+    fn tool_dayflow_status_at(
+        &self,
+        _input: DayflowStatusInput,
+        now: chrono::DateTime<Utc>,
+    ) -> CallToolResult {
+        // A DEGRADED session is reported as a successful call with the
+        // degradation in the payload. Returning an MCP error for "recording but
+        // not producing" would make every caller treat a recoverable state as a
+        // failed request.
+        match self.dayflow.status(now) {
+            Ok(status) => ok_json(status),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    fn tool_get_timeline(&self, input: GetTimelineInput) -> CallToolResult {
+        self.tool_get_timeline_at(input, Utc::now())
+    }
+
+    /// [`Self::tool_get_timeline`], with the clock supplied.
+    ///
+    /// The seam exists for the same reason `http::route_at` has one: a rule
+    /// that reads the clock itself cannot be driven into the state where it
+    /// matters, so it is undefended by construction. R36 learned that and then
+    /// applied it to one surface out of three.
+    fn tool_get_timeline_at(&self, input: GetTimelineInput, now: chrono::DateTime<Utc>) -> CallToolResult {
+        let (from, to) = match crate::dayflow::service::resolve_range(input.from.as_deref(), input.to.as_deref(), now) {
+            Ok(r) => r,
+            Err(e) => return err_text(e),
+        };
+        // `standup: true` returns the categorized digest (FR-028) — through
+        // the same DayflowService::standup the CLI and HTTP surfaces call, so
+        // the digest cannot differ by surface. Wave 11's parity work shipped
+        // it on two surfaces out of three; the MCP tool was the missing one.
+        if input.standup.unwrap_or(false) {
+            return match self.dayflow.standup(from, to) {
+                Ok(s) => ok_json(serde_json::json!({
+                    "digest": s,
+                    "text": crate::dayflow::standup::render(&s),
+                })),
+                Err(e) => err_text(e.to_string()),
+            };
+        }
+        match self.dayflow.timeline(from, to) {
+            Ok(slice) => ok_json(serde_json::json!({
+                "from": from.to_rfc3339(),
+                "to": to.to_rfc3339(),
+                "entries": slice.entries,
+                "gaps": slice.gaps,
+            })),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
+    fn tool_ask_day(&self, input: AskDayInput) -> CallToolResult {
+        self.tool_ask_day_at(input, Utc::now())
+    }
+
+    /// [`Self::tool_ask_day`], with the clock supplied.
+    fn tool_ask_day_at(&self, input: AskDayInput, now: chrono::DateTime<Utc>) -> CallToolResult {
+        let (from, to) = match crate::dayflow::service::resolve_range(input.from.as_deref(), input.to.as_deref(), now) {
+            Ok(r) => r,
+            Err(e) => return err_text(e),
+        };
+        // The answerer is the configured vision provider's text path in
+        // production; here the grounding rules are what matter, and they refuse
+        // to consult anything at all when the range is empty.
+        let result = self.dayflow.ask(&input.question, from, to, |prompt| {
+            crate::dayflow::answerer::answer_or_explain(self.dayflow.config(), prompt)
+        });
+        match result {
+            Ok(answer) => ok_json(answer),
+            Err(e) => err_text(e.to_string()),
+        }
     }
 
     async fn tool_start_recording(&self, input: StartRecordingInput) -> CallToolResult {
@@ -530,7 +736,16 @@ fn build_vision_provider(
         max_video_size_bytes: 0, // 0 => provider default
     };
     let provider: Arc<dyn VisionProvider> = if cfg.provider == "ollama" {
-        let url = format!("http://{}:{}", cfg.ollama_host, cfg.ollama_port);
+        // A full URL in `ollama_host` (scheme, and possibly a path such as the
+        // Atelier governor's /llm/ollama lane) is used verbatim; a bare host still
+        // gets the host:port treatment.
+        let url = if cfg.ollama_host.starts_with("http://")
+            || cfg.ollama_host.starts_with("https://")
+        {
+            cfg.ollama_host.clone()
+        } else {
+            format!("http://{}:{}", cfg.ollama_host, cfg.ollama_port)
+        };
         Arc::new(OllamaProvider::with_url(&vision_config, url)?)
     } else {
         Arc::new(GeminiProvider::new(&vision_config)?)
@@ -544,6 +759,40 @@ fn tool_catalog() -> Vec<Tool> {
             "start_recording",
             "Start a new screen recording session.",
             schema_for::<StartRecordingInput>(),
+        ),
+        Tool::new(
+            "start_dayflow",
+            "Start continuous activity tracking. Dayflow SAMPLES the screen at an \
+             interval rather than recording it, so an all-day session costs a few \
+             frames per minute instead of a video stream.",
+            schema_for::<StartDayflowInput>(),
+        ),
+        Tool::new(
+            "stop_dayflow",
+            "Stop the running dayflow session and close its open windows.",
+            schema_for::<StopDayflowInput>(),
+        ),
+        Tool::new(
+            "dayflow_status",
+            "Whether dayflow is running, and whether it is actually PRODUCING. A \
+             degraded session returns successfully with the degradation in the \
+             payload — it is running, just not producing.",
+            schema_for::<DayflowStatusInput>(),
+        ),
+        Tool::new(
+            "get_timeline",
+            "Activity timeline entries overlapping a time range. Defaults to today \
+             so far.",
+            schema_for::<GetTimelineInput>(),
+        ),
+        Tool::new(
+            "ask_day",
+            "Answer a question about a time range, grounded STRICTLY on recorded \
+             entries. Says so plainly when the range holds no record rather than \
+             inventing one. NOTE: no model is wired yet — a range WITH records \
+             returns the grounding prompt rather than an answer, so only the \
+             refusal path is fully functional today.",
+            schema_for::<AskDayInput>(),
         ),
         Tool::new(
             "stop_recording",
@@ -667,19 +916,196 @@ fn path_to_string(p: PathBuf) -> String {
 mod tests {
     use super::*;
 
+    /// A server whose dayflow engine is in-memory, so the MCP ADAPTERS can be
+    /// driven directly. Without this, nothing tested them: replacing
+    /// `tool_dayflow_status`'s body with a constant survived the entire suite,
+    /// producing exactly the "the CLI says running and the dashboard says
+    /// stopped" contradiction the design claims to prevent.
+    fn test_server() -> GentleEyeServer {
+        let store = Arc::new(crate::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+            std::sync::Mutex::new(crate::storage::database::init_in_memory().unwrap()),
+        )));
+        let config = AppConfig::default();
+        let dayflow = Arc::new(crate::dayflow::service::DayflowService::new(
+            store,
+            config.dayflow.clone(),
+        ));
+        GentleEyeServer {
+            config,
+            recording: Arc::new(crate::capture::service::CaptureService::new(
+                Arc::new(StorageManager::new(std::env::temp_dir()).unwrap()),
+                0,
+            )),
+            vision: Arc::new(crate::analysis::ollama::OllamaProvider::with_url(
+                &VisionConfig {
+                    provider: "ollama".into(),
+                    api_key: None,
+                    model: "stub".into(),
+                    timeout_seconds: 1,
+                    max_video_size_bytes: 0,
+                },
+                "http://127.0.0.1:1".to_string(),
+            )
+            .unwrap()),
+            dayflow,
+        }
+    }
+
+    fn body_of(result: &CallToolResult) -> String {
+        format!("{:?}", result.content)
+    }
+
+    #[test]
+    fn the_mcp_status_tool_reports_the_shared_engine_not_a_constant() {
+        let s = test_server();
+        let before = s.tool_dayflow_status(DayflowStatusInput {});
+        assert!(body_of(&before).contains("false"), "nothing running yet");
+
+        // Start through the SERVICE — the same instance HTTP and the CLI use.
+        s.dayflow
+            .start(crate::dayflow::models::DayflowMode::Session, vec![0], Utc::now())
+            .unwrap();
+
+        let after = s.tool_dayflow_status(DayflowStatusInput {});
+        let text = body_of(&after);
+        assert!(
+            text.contains("\"running\": true") || text.contains("running: true") || text.contains("true"),
+            "the MCP tool must report the shared engine's state: {text}"
+        );
+        assert!(text.contains("session_id"), "including which session: {text}");
+    }
+
+    #[test]
+    fn the_mcp_start_and_stop_tools_drive_the_shared_engine() {
+        let s = test_server();
+        let started = s.tool_start_dayflow(StartDayflowInput::default());
+        assert!(body_of(&started).contains("session_id"), "{:?}", started.content);
+        assert!(
+            s.dayflow.status(Utc::now()).unwrap().running,
+            "the service sees what the MCP tool started"
+        );
+
+        // A second start is refused here too, not silently replacing the first.
+        let again = s.tool_start_dayflow(StartDayflowInput::default());
+        assert_eq!(again.is_error, Some(true), "{:?}", again.content);
+
+        s.tool_stop_dayflow(StopDayflowInput {});
+        assert!(!s.dayflow.status(Utc::now()).unwrap().running, "and stop reaches it too");
+    }
+
+    #[test]
+    fn the_mcp_timeline_tool_defaults_to_today_so_far() {
+        // The default lived in three copies; two of them (MCP, CLI) had no test
+        // at all, and mutating either to produce an EMPTY range survived the
+        // whole suite — every question would have been answered about nothing.
+        let s = test_server();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-26T15:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let out = s.tool_get_timeline_at(GetTimelineInput { from: None, to: None, standup: None }, now);
+        let text = body_of(&out);
+        assert!(text.contains("2026-08-26T00:00:00"), "starts at midnight: {text}");
+        assert!(text.contains("2026-08-26T15:30:00"), "ends at now: {text}");
+    }
+
+    #[test]
+    fn the_mcp_timeline_tool_returns_gaps_alongside_entries() {
+        // T023 on the MCP surface, with a REAL recorded pause: key-presence
+        // alone would survive a surface that serialises an always-empty array.
+        let s = test_server();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-26T15:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        s.dayflow
+            .start(crate::dayflow::models::DayflowMode::Session, vec![0], now)
+            .unwrap();
+        s.dayflow
+            .with_run(|r| r.turn_off(now + chrono::Duration::minutes(1)))
+            .unwrap();
+        let out = s.tool_get_timeline_at(
+            GetTimelineInput { from: None, to: Some("2026-08-26T17:00:00Z".into()), standup: None },
+            now,
+        );
+        // `body_of` is a Debug render of the content, not raw JSON — assert on
+        // the serialized fact itself: the cause token can only appear if the
+        // recorded gap actually reached the tool's output.
+        let text = body_of(&out);
+        assert!(text.contains("gaps"), "the MCP surface returns gaps: {text}");
+        assert!(text.contains("user_off"), "with the recorded cause: {text}");
+    }
+
+    #[test]
+    fn the_mcp_standup_flag_returns_the_same_digest_the_other_surfaces_compute() {
+        // FR-028 through the MCP surface. Seeded with a real entry so the
+        // digest has content — a key-presence check on an empty day would pass
+        // against a surface that computes nothing.
+        let s = test_server();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-26T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        s.dayflow
+            .insert_entry(&crate::dayflow::models::TimelineEntry {
+                id: uuid::Uuid::new_v4(),
+                recording_id: uuid::Uuid::new_v4(),
+                start_time: base,
+                end_time: base + chrono::Duration::minutes(30),
+                category: crate::dayflow::models::ActivityCategory::Meeting,
+                app: "zoom".into(),
+                activity: "planning".into(),
+                summary: "sprint planning".into(),
+                provenance: None,
+            })
+            .unwrap();
+        let out = s.tool_get_timeline_at(
+            GetTimelineInput {
+                from: Some("2026-08-26T00:00:00Z".into()),
+                to: Some("2026-08-26T17:00:00Z".into()),
+                standup: Some(true),
+            },
+            base + chrono::Duration::hours(8),
+        );
+        let text = body_of(&out);
+        assert!(text.contains("digest"), "returns the digest shape: {text}");
+        assert!(text.contains("meeting"), "with the seeded category: {text}");
+        assert!(text.contains("planning"), "and its activity: {text}");
+    }
+
     #[test]
     fn catalog_exposes_all_tools() {
         let tools = tool_catalog();
-        assert_eq!(tools.len(), 12);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-        assert!(names.contains(&"start_recording"));
-        assert!(names.contains(&"analyze_video"));
-        assert!(names.contains(&"get_vision_provider_info"));
-        assert!(names.contains(&"read_screen_text"));
-        assert!(names.contains(&"capture_stream_frame"));
-        assert!(names.contains(&"define_target"));
-        assert!(names.contains(&"focus_target"));
-        assert!(names.contains(&"measure_target"));
+        for expected in [
+            "start_recording",
+            "analyze_video",
+            "get_vision_provider_info",
+            "read_screen_text",
+            "capture_stream_frame",
+            "define_target",
+            "focus_target",
+            "measure_target",
+            // US6: every dayflow tool must be LISTED, not merely dispatchable.
+            // A tool the server answers but never advertises is one no client
+            // can discover.
+            "start_dayflow",
+            "stop_dayflow",
+            "dayflow_status",
+            "get_timeline",
+            "ask_day",
+        ] {
+            assert!(names.contains(&expected), "{expected} is missing from tools/list");
+        }
+        assert_eq!(tools.len(), 17, "and nothing was added without being named here");
+
+        // Every advertised tool must also DISPATCH — a catalog entry with no
+        // arm returns "unknown tool" to a client that did exactly what the
+        // catalog told it to.
+        let dispatchable = include_str!("server.rs");
+        for name in &names {
+            assert!(
+                dispatchable.contains(&format!("\"{name}\" =>")),
+                "{name} is advertised but has no dispatch arm"
+            );
+        }
     }
 
     #[test]
@@ -704,5 +1130,118 @@ mod tests {
         assert_eq!(parse_status_filter("completed"), Some(RecordingStatus::Completed));
         assert_eq!(parse_status_filter("error"), Some(RecordingStatus::Failed));
         assert_eq!(parse_status_filter("all"), None);
+    }
+
+    /// The MCP surface itself must deliver its source fields to the parse —
+    /// the service-level parity test cannot see an adapter that drops
+    /// `window`/`input` on the floor and starts a whole-display session while
+    /// reporting success.
+
+    #[test]
+    fn ask_day_with_no_record_refuses_in_the_payload_with_empty_grounding() {
+        // The refusal must arrive IN the serialized MCP payload — answer AND
+        // an (empty) grounding array. A payload that carried only the prose
+        // would make "confident prose with empty grounding" undetectable on
+        // this surface, which is the exact failure `DayAnswer` exists to expose.
+        let s = test_server();
+        let result = s.tool_ask_day_at(
+            AskDayInput { question: "what was I doing?".into(), from: None, to: None },
+            Utc::now(),
+        );
+        assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+        let body = body_of(&result);
+        assert!(
+            body.contains("No activity was recorded"),
+            "an empty range refuses without a model: {body}"
+        );
+        assert!(
+            body.contains("grounding"),
+            "the MCP payload dropped the grounding field: {body}"
+        );
+    }
+
+    #[test]
+    fn ask_day_with_records_carries_the_grounding_entries_in_the_payload() {
+        // T025's DONE line: "an answer carries its grounding, so confident
+        // prose with empty grounding stays detectable". That must hold in the
+        // SERIALIZED payload a client receives, not merely in the Rust struct.
+        let _env = crate::dayflow::answerer::test_env_lock();
+        let prior = std::env::var("GE_DAYFLOW_ENDPOINT").ok();
+        // Unset, so the answerer path resolves to NO_MODEL without a network
+        // call — the serialization contract is what is under test here.
+        std::env::remove_var("GE_DAYFLOW_ENDPOINT");
+
+        let s = test_server();
+        let now = Utc::now();
+        s.dayflow
+            .insert_entry(&crate::dayflow::models::TimelineEntry {
+                id: uuid::Uuid::new_v4(),
+                recording_id: uuid::Uuid::new_v4(),
+                start_time: now - chrono::Duration::minutes(30),
+                end_time: now - chrono::Duration::minutes(20),
+                category: crate::dayflow::models::ActivityCategory::Coding,
+                app: "editor".into(),
+                activity: "auditing wave ten".into(),
+                summary: "WAVE-TEN-GROUNDING-MARKER".into(),
+                provenance: None,
+            })
+            .unwrap();
+
+        let result = s.tool_ask_day_at(
+            AskDayInput {
+                question: "what was I doing?".into(),
+                from: Some((now - chrono::Duration::hours(1)).to_rfc3339()),
+                to: Some(now.to_rfc3339()),
+            },
+            now,
+        );
+        if let Some(v) = prior {
+            std::env::set_var("GE_DAYFLOW_ENDPOINT", v);
+        }
+
+        assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+        let body = body_of(&result);
+        assert!(
+            body.contains("WAVE-TEN-GROUNDING-MARKER"),
+            "the MCP payload must carry the entries the answer was grounded on: {body}"
+        );
+        assert!(
+            body.contains("no model configured"),
+            "an unconfigured install states so rather than inventing prose: {body}"
+        );
+    }
+
+    #[test]
+    fn the_mcp_start_tool_delivers_its_source_fields() {
+        let s = test_server();
+        let started = s.tool_start_dayflow(StartDayflowInput {
+            window: Some("my-term".into()),
+            ..Default::default()
+        });
+        assert!(body_of(&started).contains("session_id"), "{:?}", started.content);
+        let st = s.dayflow.status(Utc::now()).unwrap();
+        assert_eq!(st.sources.len(), 1);
+        assert_eq!(st.sources[0].kind, "window", "the MCP adapter dropped `window`");
+        assert_eq!(st.sources[0].name, "my-term");
+        s.tool_stop_dayflow(StopDayflowInput {});
+
+        let started = s.tool_start_dayflow(StartDayflowInput {
+            input: Some("rtsp://cam.local/live".into()),
+            ..Default::default()
+        });
+        assert!(body_of(&started).contains("session_id"), "{:?}", started.content);
+        let st = s.dayflow.status(Utc::now()).unwrap();
+        assert_eq!(st.sources[0].kind, "input", "the MCP adapter dropped `input`");
+        assert_eq!(st.sources[0].name, "rtsp://cam.local/live");
+        s.tool_stop_dayflow(StopDayflowInput {});
+
+        // Two kinds at once is the shared parse's refusal, surfaced as a tool
+        // error rather than a silently-picked winner.
+        let both = s.tool_start_dayflow(StartDayflowInput {
+            window: Some("a".into()),
+            input: Some("rtsp://b".into()),
+            ..Default::default()
+        });
+        assert_eq!(both.is_error, Some(true), "{:?}", both.content);
     }
 }

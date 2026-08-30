@@ -578,3 +578,62 @@ mod tests {
         assert!(json.contains("gemini-2.0-flash"));
     }
 }
+// ---- Dayflow (US6) ---------------------------------------------------------
+
+/// Input for the `start_dayflow` tool.
+///
+/// Starts continuous activity tracking. Dayflow SAMPLES the screen at an
+/// interval — it is not a recording — so an all-day session costs a few frames
+/// per minute rather than a video stream.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct StartDayflowInput {
+    /// Displays to capture. Empty means every display.
+    pub displays: Option<Vec<u32>>,
+    /// Capture ONE named window instead of whole displays, matched on its
+    /// title or class.
+    pub window: Option<String>,
+    /// Capture one persisted named target (a saved region of interest).
+    pub target: Option<String>,
+    /// Capture an INPUT — a stream or capture-device URL. Content that may
+    /// never have been rendered on this machine's screen.
+    pub input: Option<String>,
+    /// `session` (explicit start/stop, the default) or `daemon` (rolls all day).
+    pub mode: Option<String>,
+}
+
+/// Input for the `stop_dayflow` tool.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct StopDayflowInput {}
+
+/// Input for the `dayflow_status` tool.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct DayflowStatusInput {}
+
+/// Input for the `get_timeline` tool.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct GetTimelineInput {
+    /// Start of the range, RFC 3339. Defaults to the start of today.
+    pub from: Option<String>,
+    /// End of the range, RFC 3339. Defaults to now.
+    pub to: Option<String>,
+    /// Return the categorized standup digest for the range instead of the raw
+    /// entries (FR-028) — the same digest the CLI's `--standup` and HTTP's
+    /// `/dayflow/standup` produce, computed by the one shared engine.
+    #[serde(default)]
+    pub standup: Option<bool>,
+}
+
+/// Input for the `ask_day` tool.
+///
+/// Answers strictly from recorded entries. When the range holds no record it
+/// says so rather than inventing one — for a record of someone's day, an
+/// invented answer is worse than no answer.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct AskDayInput {
+    /// The question, e.g. "what was I doing at 2pm?".
+    pub question: String,
+    /// Start of the range to ground on, RFC 3339. Defaults to the start of today.
+    pub from: Option<String>,
+    /// End of the range, RFC 3339. Defaults to now.
+    pub to: Option<String>,
+}

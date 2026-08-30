@@ -294,6 +294,103 @@ pub trait ConfigProvider: Send + Sync {
 // Dayflow configuration
 // ----------------------------------------------------------------------------
 
+fn default_delta_enabled() -> bool {
+    true
+}
+
+/// Lookout `GATE_WIDTH` — gate frames downscale to 240 px wide.
+fn default_gate_width() -> u32 {
+    240
+}
+
+/// Lookout `GATE_CHANGE` — 6.0 for screen grabs (magnitude strategy).
+fn default_magnitude_threshold() -> f64 {
+    6.0
+}
+
+/// Absorbs downscale resampling jitter before counting a pixel as changed.
+fn default_pixel_tolerance() -> u8 {
+    2
+}
+
+/// videolocr `change_threshold` — 0.4 in practice (proportion strategy).
+fn default_proportion_threshold() -> f64 {
+    0.4
+}
+
+/// Lookout `CONTENT_STD` — below this the frame is blank/uniform.
+fn default_content_std() -> f64 {
+    8.0
+}
+
+fn default_dedup_text() -> bool {
+    true
+}
+
+fn default_day_interval_seconds() -> u32 {
+    180 // one frame every 3 minutes — all-day tracking is the coarse one
+}
+
+fn default_focused_interval_seconds() -> u32 {
+    60 // one frame a minute — a bounded, focused ask
+}
+
+fn default_skip_unchanged() -> bool {
+    true
+}
+
+fn default_video_enabled() -> bool {
+    false // gentle-eye already records video; dayflow's artifact is the timeline
+}
+
+fn default_segment_seconds() -> u32 {
+    900 // 15 minutes
+}
+
+fn default_idle_enabled() -> bool {
+    true
+}
+
+fn default_idle_threshold_seconds() -> u32 {
+    300 // 5 minutes
+}
+
+fn default_idle_hysteresis_seconds() -> u32 {
+    30
+}
+
+/// Neutral placeholder. The real governed-lane host is machine-local and is
+/// supplied by config file or environment — never committed here.
+fn default_perception_endpoint() -> String {
+    "http://127.0.0.1:11434".to_string()
+}
+
+/// `/api/generate`, NOT `/api/chat` — see [`PerceptionConfig`].
+fn default_perception_api_path() -> String {
+    "/api/generate".to_string()
+}
+
+fn default_text_model() -> String {
+    "deepseek-ocr:latest".to_string()
+}
+
+/// Pinned. Verbose variants collapse the model — see [`PerceptionConfig`].
+fn default_text_prompt() -> String {
+    "Free OCR.".to_string()
+}
+
+fn default_grounding_prompt() -> String {
+    "<image>\n<|grounding|>Convert the document to markdown.".to_string()
+}
+
+fn default_reason_model() -> String {
+    "ornith-1.5-9b:latest".to_string()
+}
+
+fn default_max_regions_per_segment() -> u32 {
+    12
+}
+
 fn default_chunk_minutes() -> u32 {
     15
 }
@@ -341,18 +438,565 @@ impl Default for RetentionConfig {
     }
 }
 
+/// What a dayflow run is FOR. Either/or, chosen when the run starts.
+///
+/// Both are first-class, both ship, and neither is a degraded version of the
+/// other — they answer different questions and keep different things.
+///
+/// | | [`Activity`](DayflowIntent::Activity) | [`Content`](DayflowIntent::Content) |
+/// |---|---|---|
+/// | question | "what was I doing?" | "what was on screen?" |
+/// | perception | enough to characterize the activity | full OCR, aggregated and merged |
+/// | text kept | the summary | **verbatim**, merged across samples |
+/// | stills | discarded once summarized | kept until the material is extracted |
+/// | cost | cheap enough to run all day | bounded, because the output is the point |
+/// | pairs with | [`DayflowMode::Daemon`] | [`DayflowMode::Session`] |
+///
+/// # Why this is not one mode with a flag
+///
+/// The distinction is not "more detail" — it is a different artifact. Activity
+/// answers a question about the PAST and the frames are scaffolding, so keeping
+/// a verbatim transcript of every pane is paying for something nobody asked for.
+/// Content is capturing MATERIAL — a lesson, an exam, a reference session — where
+/// a one-line summary is worthless and the merged text IS the deliverable.
+///
+/// Running Content all day would be expensive for no benefit; running Activity
+/// over a lesson would throw away the thing you were trying to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DayflowIntent {
+    /// Track what the user was doing. The default, and the all-day mode.
+    #[default]
+    Activity,
+    /// Capture what was on screen, verbatim and merged — a lesson, an exam, a
+    /// reference session. The material is the artifact.
+    Content,
+}
+
+impl DayflowIntent {
+    /// Whether extracted text is preserved verbatim rather than only summarised.
+    pub fn keeps_verbatim_text(self) -> bool {
+        matches!(self, Self::Content)
+    }
+
+    /// Whether the rolling OCR aggregation and text diff-merge run.
+    ///
+    /// These exist to reconstruct MATERIAL across samples (a scrolling pane, an
+    /// edited file). Activity does not need them and should not pay for them.
+    pub fn aggregates_text(self) -> bool {
+        matches!(self, Self::Content)
+    }
+
+    /// Whether a still may be discarded as soon as its window is summarised.
+    /// Content holds them until the material has been extracted.
+    pub fn discards_stills_after_summary(self) -> bool {
+        matches!(self, Self::Activity)
+    }
+}
+
+/// How often dayflow SAMPLES a frame, per tracking granularity.
+///
+/// # Dayflow samples; it does not record video
+///
+/// This is the distinction that governs the feature's cost. gentle-eye already
+/// has real-time video recording; dayflow exists to **track what a user was
+/// doing**, and it does that by taking periodic snapshots — not by streaming an
+/// encoder for eight hours. Sampling once a minute instead of at 0.5 fps is
+/// thirty times less work, and on an idle screen the delta check
+/// ([`SamplingConfig::skip_unchanged`]) drives it toward zero.
+///
+/// # Two granularities
+///
+/// | mode | intent | default |
+/// |---|---|---|
+/// | [`DayflowMode::Daemon`] | all-day background tracking — generalized, fast, cheap | one frame every **3 minutes** |
+/// | [`DayflowMode::Session`] | a bounded, focused ask — "track my dev work for this hour" | one frame every **minute** |
+///
+/// All-day is deliberately the coarser of the two: it runs unattended for hours,
+/// so its interval is what decides whether the feature is cheap or wasteful.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SamplingConfig {
+    /// Seconds between samples during all-day (daemon) tracking.
+    #[serde(default = "default_day_interval_seconds")]
+    pub day_interval_seconds: u32,
+    /// Seconds between samples during a bounded, focused session.
+    #[serde(default = "default_focused_interval_seconds")]
+    pub focused_interval_seconds: u32,
+    /// Skip perception for a sample whose regions are unchanged from the previous
+    /// one. On a static screen this collapses steady-state cost toward zero — the
+    /// single largest saving available, because reading is most of a working day.
+    #[serde(default = "default_skip_unchanged")]
+    pub skip_unchanged: bool,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            day_interval_seconds: default_day_interval_seconds(),
+            focused_interval_seconds: default_focused_interval_seconds(),
+            skip_unchanged: default_skip_unchanged(),
+        }
+    }
+}
+
+impl SamplingConfig {
+    /// Never sample faster than once every 10 s, even in focused mode. Below this
+    /// dayflow stops being an activity tracker and becomes the video recorder it
+    /// is explicitly not.
+    pub const MIN_INTERVAL_SECONDS: u32 = 10;
+    /// Never coarser than once an hour, or a segment can contain no samples.
+    pub const MAX_INTERVAL_SECONDS: u32 = 3600;
+
+    /// The sampling interval for a given mode.
+    pub fn interval_for(&self, mode: crate::dayflow::models::DayflowMode) -> std::time::Duration {
+        use crate::dayflow::models::DayflowMode;
+        let secs = match mode {
+            DayflowMode::Daemon => self.day_interval_seconds,
+            DayflowMode::Session => self.focused_interval_seconds,
+        };
+        std::time::Duration::from_secs(u64::from(secs))
+    }
+}
+
+/// Optional video output.
+///
+/// **Off by default, and that is the point.** gentle-eye already provides video
+/// recording as its own feature; dayflow's artifact is the timeline. When
+/// enabled, sampled frames are assembled into a timelapse at window close as a
+/// convenience for human review — never as an input to perception, which reads
+/// frames directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DayflowVideoConfig {
+    /// Assemble sampled frames into a timelapse artifact per window.
+    #[serde(default = "default_video_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for DayflowVideoConfig {
+    fn default() -> Self {
+        Self { enabled: default_video_enabled() }
+    }
+}
+
+/// Which displays dayflow captures.
+///
+/// Default is [`DisplaySelection::All`]: every attached display, merged into ONE
+/// timeline, each entry identifying its source display (FR-029).
+///
+/// But a focused session should be able to narrow to one or two screens — "just
+/// the main monitor", "just the portrait one" — because on a three-display desk
+/// that is a 2–3x saving in samples, stills and perception passes for a session
+/// that only cares about one screen. Selection is therefore by IDENTITY, not
+/// only by index: an index changes when a monitor is unplugged, while "primary"
+/// and "portrait" keep meaning the same thing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplaySelection {
+    /// Every attached display. The default for all-day tracking.
+    All,
+    /// Only the primary display.
+    Primary,
+    /// Only these display indices. Positional — brittle across replug.
+    Only(Vec<u32>),
+    /// By identity: `primary`, `portrait`, `landscape`, `ultrawide`, or a label
+    /// the user has assigned to a display. Matching is case-insensitive, and a
+    /// name that resolves to nothing is an error rather than a silent empty set.
+    Named(Vec<String>),
+}
+
+impl Default for DisplaySelection {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+impl DisplaySelection {
+    /// Resolve this selection against the attached displays, returning indices.
+    ///
+    /// An empty result is returned as `None` so the caller must handle it: a
+    /// selection that matches nothing has to fail loudly, not quietly record
+    /// nothing all day (the same false-green this feature is built to avoid).
+    pub fn resolve(&self, displays: &[crate::capture::display::DisplayInfo]) -> Option<Vec<u32>> {
+        let idx = |i: usize| u32::try_from(i).unwrap_or(u32::MAX);
+        let picked: Vec<u32> = match self {
+            Self::All => (0..displays.len()).map(idx).collect(),
+            Self::Primary => displays
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.is_primary)
+                .map(|(i, _)| idx(i))
+                .collect(),
+            Self::Only(v) => v
+                .iter()
+                .copied()
+                .filter(|i| (*i as usize) < displays.len())
+                .collect(),
+            Self::Named(names) => {
+                let mut out: Vec<u32> = Vec::new();
+                for name in names {
+                    let want = name.trim().to_lowercase();
+                    for (i, d) in displays.iter().enumerate() {
+                        let matches = match want.as_str() {
+                            "primary" | "main" => d.is_primary,
+                            "portrait" => d.height > d.width,
+                            "landscape" => d.width > d.height && d.aspect_ratio() < 2.0,
+                            "ultrawide" => d.aspect_ratio() >= 2.0,
+                            other => d.display_name().to_lowercase() == other,
+                        };
+                        if matches && !out.contains(&idx(i)) {
+                            out.push(idx(i));
+                        }
+                    }
+                }
+                out
+            }
+        };
+        if picked.is_empty() {
+            None
+        } else {
+            Some(picked)
+        }
+    }
+}
+
+/// What to do when an interval's frame cannot be obtained.
+///
+/// The tradeoff is between finding bugs and surviving them, and the right answer
+/// differs by phase:
+///
+/// - [`DropPolicy::Fail`] — return an error. A dropped frame stops the run, so
+///   the cause gets investigated instead of scrolled past. **The default while
+///   the feature is under development**, because a hole quietly recorded in a
+///   ledger is far easier to ignore than a build that stops.
+/// - [`DropPolicy::Record`] — record the drop, log loudly, keep recording. Right
+///   for an unattended all-day recorder in production, where one bad frame must
+///   not cost the remaining seven hours.
+///
+/// Either way the drop is recorded and counted; the policy only decides whether
+/// the run continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DropPolicy {
+    /// Stop the run so the cause is investigated. Development default.
+    #[default]
+    Fail,
+    /// Record it and carry on. Production behaviour for an all-day recorder.
+    Record,
+}
+
+/// Content-identity gate: don't store or perceive a sample that is the same
+/// picture again.
+///
+/// # Reused, not invented
+///
+/// This is Lookout's change gate (`sparse-delta-perception`,
+/// `lookout/src-tauri/src/perception/`), whose constants are already tuned in
+/// production. The method is deliberately NOT a full-resolution pixel-exact
+/// comparison — that would be both more expensive AND more brittle, since one
+/// antialiased pixel or a blinking cursor would report "changed". Instead:
+///
+/// 1. downscale the frame to [`DeltaConfig::gate_width`] px wide, greyscale;
+/// 2. mean-absolute-difference against the previous gate buffer;
+/// 3. treat it as changed only above [`DeltaConfig::change_threshold`].
+///
+/// Buffers of differing length count as a large change, so a resolution change
+/// can never be mistaken for "no change".
+///
+/// Text is deduped the same way one level up: OCR lines are whitespace- and
+/// case-normalised and checked against a seen-set, so identical text is never
+/// re-stored even when the pixels shifted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeltaConfig {
+    /// Skip a sample whose gate buffer is unchanged from the previous one.
+    #[serde(default = "default_delta_enabled")]
+    pub enabled: bool,
+    /// Gate frames are downscaled to this width before comparison. Lookout: 240.
+    #[serde(default = "default_gate_width")]
+    pub gate_width: u32,
+    /// Which change-detection strategy to apply. Both are implemented; this
+    /// picks per situation rather than committing the product to one.
+    /// Defaults to [`crate::dayflow::gate::GateStrategy::Either`].
+    #[serde(default)]
+    pub strategy: crate::dayflow::gate::GateStrategy,
+    /// MAGNITUDE strategy: mean-abs-diff above which a screen counts as changed.
+    /// Lookout `GATE_CHANGE` = 6.0 for screen grabs (9.0 for noisy video, which
+    /// dayflow does not use).
+    #[serde(default = "default_magnitude_threshold", alias = "change_threshold")]
+    pub magnitude_threshold: f64,
+    /// PROPORTION strategy: a pixel counts as changed only if it differs by MORE
+    /// than this. videolocr needed no tolerance because it read decoded video;
+    /// dayflow compares downscaled captures, where resampling jitter alone can
+    /// move a large share of pixels by +/-1 and trip the gate on every sample.
+    #[serde(default = "default_pixel_tolerance")]
+    pub pixel_tolerance: u8,
+    /// PROPORTION strategy: fraction of pixels that must differ. videolocr's
+    /// `change_threshold` = 0.4 in practice ("lower means more frames").
+    #[serde(default = "default_proportion_threshold")]
+    pub proportion_threshold: f64,
+    /// Greyscale std below which a frame is blank/uniform and has no content
+    /// worth perceiving at all. Lookout: 8.0.
+    #[serde(default = "default_content_std")]
+    pub content_std: f64,
+    /// What to do when a frame cannot be obtained for an interval.
+    ///
+    /// Defaults to [`DropPolicy::Fail`] while the feature is being built: a
+    /// dropped frame should stop us and get fixed, not accumulate silently.
+    /// Flip to `Record` before running unattended.
+    #[serde(default)]
+    pub on_drop: DropPolicy,
+    /// Also dedupe at the TEXT level: normalised OCR lines already seen are not
+    /// re-stored, even if the pixels moved.
+    #[serde(default = "default_dedup_text")]
+    pub dedup_text: bool,
+}
+
+impl Default for DeltaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_delta_enabled(),
+            gate_width: default_gate_width(),
+            strategy: crate::dayflow::gate::GateStrategy::default(),
+            magnitude_threshold: default_magnitude_threshold(),
+            pixel_tolerance: default_pixel_tolerance(),
+            proportion_threshold: default_proportion_threshold(),
+            content_std: default_content_std(),
+            on_drop: DropPolicy::default(),
+            dedup_text: default_dedup_text(),
+        }
+    }
+}
+
+/// Idle-pause policy.
+///
+/// Capture PAUSES when the user goes idle and resumes on activity (FR-030/031);
+/// a paused interval is an explicit gap, never a degraded reading (FR-032).
+///
+/// Idle comes from the X11 MIT-SCREEN-SAVER idle counter, verified monotonic
+/// (T005). Lock detection is deliberately NOT part of this: the X saver `state`
+/// field is unusable under GNOME (reports 3, outside the documented 0/1/2
+/// range), and lock-based pausing was descoped 2026-08-23 — the idle threshold
+/// is the primary and sufficient trigger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdleConfig {
+    /// Pause capture while the user is idle.
+    #[serde(default = "default_idle_enabled")]
+    pub enabled: bool,
+    /// Idle seconds before capture pauses.
+    #[serde(default = "default_idle_threshold_seconds")]
+    pub threshold_seconds: u32,
+    /// Dwell applied to BOTH transitions so brief inactivity cannot thrash the
+    /// recorder into a burst of tiny segments.
+    #[serde(default = "default_idle_hysteresis_seconds")]
+    pub hysteresis_seconds: u32,
+}
+
+impl Default for IdleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_idle_enabled(),
+            threshold_seconds: default_idle_threshold_seconds(),
+            hysteresis_seconds: default_idle_hysteresis_seconds(),
+        }
+    }
+}
+
+/// Whether the text tier is held resident while a recording is active.
+///
+/// UNSETTLED — decided at T029, not here. Two measured facts pull opposite ways:
+/// the lane reported a model resident with an expiry hours out (suggesting the
+/// keep-alive is long and a pinger is pointless), yet a probe in the same
+/// session paid a 43.9 s cold load because a 32 GB tenant had evicted the OCR
+/// **MEASURED at T029 (research R27), superseding the T006 figures that stood
+/// here.** Against the live governor: `deepseek-ocr:latest` loads cold in
+/// **3.74 s** and answers warm in **0.18 s**, holds **7.4 GB**, and the lane's
+/// own window for it is about **50 s** — not the ~6 h seen on a different
+/// model, because the window is per-model, not per-lane.
+///
+/// Default stays [`ResidencyPolicy::OnDemand`], and the reason changed: not
+/// "the question is unsettled" but that dayflow's text calls are made in a
+/// BURST at segment close, so a segment pays the cold load **once**, not once
+/// per sample. At the default 15-minute segment that is well under 1% overhead
+/// — not worth holding 7.4 GB of a shared machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidencyPolicy {
+    /// Keep the text tier warm for the duration of an active recording.
+    Resident,
+    /// Accept the reload cost; hold nothing between segments.
+    OnDemand,
+    /// Do not manage residency at all.
+    Off,
+}
+
+impl Default for ResidencyPolicy {
+    fn default() -> Self {
+        Self::OnDemand
+    }
+}
+
+impl ResidencyPolicy {
+    /// The `keep_alive` to send with a perception request, if any.
+    ///
+    /// **Takes the SEGMENT cadence, not the sample interval** — and that
+    /// distinction was a real bug. Dayflow does not perceive per sample: the
+    /// text calls for a whole segment fire back-to-back at segment close
+    /// (`summarize_segment_via_ladder`), so the gap the model must survive to
+    /// stay warm is the gap between SEGMENTS, ~900 s by default. Sizing this
+    /// from the 180 s sample interval produced a window that expired long
+    /// before the next burst, so `Resident` held memory and still paid every
+    /// cold load — the worst of both, while reporting itself as residency.
+    ///
+    /// Doubled plus a margin because a window equal to the cadence races the
+    /// next burst against its own expiry: a segment closing a second late
+    /// finds the tier cold, having paid for residency and got none.
+    ///
+    /// The governor honours this per request (R27), so residency needs no
+    /// background pinger and no keep-warm calls — and the tier therefore
+    /// unloads by itself when recording stops, which a pinger holding 7.4 GB
+    /// after a dead session would not.
+    pub fn keep_alive(self, segment_cadence: std::time::Duration) -> Option<String> {
+        match self {
+            Self::Resident => {
+                Some(format!("{}s", segment_cadence.as_secs().saturating_mul(2) + 60))
+            }
+            Self::OnDemand => None,
+            Self::Off => Some("0".to_string()),
+        }
+    }
+}
+
+/// Two-tier perception: cheap local text extraction, escalating to a vision
+/// model only for meaning (D6/D7).
+///
+/// # The endpoint is load-bearing
+///
+/// `api_path` defaults to `/api/generate`, **not** `/api/chat`. The text tier is
+/// an OCR specialist, not a chat model: routing it through the chat endpoint
+/// wraps the prompt in a chat template and the template bleeds into the output
+/// as `>user` / `>system` / `<|im_end|>` markers. Measured 2026-08-23 — same
+/// image and prompt, `/api/generate` returns clean verbatim text.
+///
+/// # The prompt is load-bearing
+///
+/// `text_prompt` is pinned. A verbose "transcribe verbatim, do not reformat"
+/// instruction does not degrade the answer, it destroys it: 42.9 s and 7366
+/// tokens of a degenerate repetition loop, returned with a 200 and no error.
+/// `Free OCR.` returned perfect text in 0.5 s warm.
+///
+/// # No host here
+///
+/// `endpoint` deliberately defaults to a neutral loopback address. The real
+/// governed-lane host is machine-local and supplied by config file or
+/// environment — never committed to this repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerceptionConfig {
+    /// Base URL of the governed model lane. Supply the real host via config or
+    /// environment; the default is a neutral placeholder.
+    #[serde(default = "default_perception_endpoint")]
+    pub endpoint: String,
+    /// Generation path. MUST be `/api/generate` for the text tier — see the
+    /// type-level docs.
+    #[serde(default = "default_perception_api_path")]
+    pub api_path: String,
+    /// Text tier: the cheap OCR specialist that handles nearly all volume.
+    #[serde(default = "default_text_model")]
+    pub text_model: String,
+    /// Pinned text-extraction prompt. Do not make this verbose.
+    #[serde(default = "default_text_prompt")]
+    pub text_prompt: String,
+    /// Prompt that additionally returns per-block bounding boxes, at roughly 6x
+    /// the latency of `text_prompt`. Used deliberately when intra-region layout
+    /// is wanted, never as the default path.
+    #[serde(default = "default_grounding_prompt")]
+    pub grounding_prompt: String,
+    /// Reason tier: spent only on semantic or relational questions.
+    #[serde(default = "default_reason_model")]
+    pub reason_model: String,
+    /// Whether the text tier is held resident during a recording.
+    #[serde(default)]
+    pub residency: ResidencyPolicy,
+    /// Hard cap on regions perceived per segment per display. Bounds work at the
+    /// source so the rate-limit budget is a safety net rather than the shaper.
+    #[serde(default = "default_max_regions_per_segment")]
+    pub max_regions_per_segment: u32,
+}
+
+impl Default for PerceptionConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: default_perception_endpoint(),
+            api_path: default_perception_api_path(),
+            text_model: default_text_model(),
+            text_prompt: default_text_prompt(),
+            grounding_prompt: default_grounding_prompt(),
+            reason_model: default_reason_model(),
+            residency: ResidencyPolicy::default(),
+            max_regions_per_segment: default_max_regions_per_segment(),
+        }
+    }
+}
+
 /// Dayflow-mode settings (continuous recording → chunk summarization → timeline).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DayflowConfig {
-    /// On-the-fly chunk length in minutes (matches Gemini ~1fps native sampling math).
+    /// Segment length in SECONDS — the authoritative interval (FR-034).
+    ///
+    /// Intended operating range is **10–15 minutes**; the default is 900 s
+    /// (15 min). Permitted range is [`DayflowConfig::MIN_SEGMENT_SECONDS`]
+    /// (5 min) to [`DayflowConfig::MAX_SEGMENT_SECONDS`] (1 h), enforced by
+    /// `AppConfig::validate`. Changeable mid-day: a change takes effect at the
+    /// next boundary and never re-times an existing entry (FR-035).
+    ///
+    /// Stored in seconds so the value is exact and so 10 vs 15 minutes is a
+    /// plain number, NOT so that second-scale intervals are usable — those are
+    /// rejected by validation.
+    ///
+    /// A day may therefore contain segments of DIFFERENT lengths. Nothing
+    /// downstream may derive a duration by multiplying a count by this value —
+    /// always read the segment's own recorded start and end.
+    ///
+    /// `0` means UNSET, and unset is also the serde default — deliberately
+    /// different from [`DayflowConfig::default`]'s 900. Defaulting the FILE
+    /// field to 900 made the `chunk_minutes` fallback unreachable: a legacy
+    /// config setting only the old key silently got 900 while the docs claimed
+    /// its author's value was honored. Read via
+    /// [`DayflowConfig::segment_duration`], never this field directly.
+    #[serde(default)]
+    pub segment_seconds: u32,
+    /// Legacy interval in minutes, retained so existing config files keep
+    /// parsing. [`DayflowConfig::segment_duration`] is the accessor to use;
+    /// `segment_seconds` wins.
     #[serde(default = "default_chunk_minutes")]
     pub chunk_minutes: u32,
     /// Low capture fps for dayflow (timelapse tier).
     #[serde(default = "default_record_fps")]
     pub record_fps: f32,
-    /// Default summarization provider: "gemini" (cloud, default) or "ollama" (local).
+    /// Default summarization provider: "gemini" (cloud, opt-in) or "ollama" (local).
     #[serde(default = "default_dayflow_provider")]
     pub default_provider: String,
+    /// What a run is FOR — track activity, or capture the material on screen.
+    /// Either/or, defaulting to [`DayflowIntent::Activity`].
+    #[serde(default)]
+    pub intent: DayflowIntent,
+    /// How often a frame is SAMPLED, per tracking granularity. Dayflow samples;
+    /// it does not stream video.
+    #[serde(default)]
+    pub sampling: SamplingConfig,
+    /// Optional timelapse output. Off by default — the timeline is the artifact.
+    #[serde(default)]
+    pub video: DayflowVideoConfig,
+    /// Content-identity gate — never keep or perceive the same picture twice.
+    #[serde(default)]
+    pub delta: DeltaConfig,
+    /// Which displays are captured (FR-029).
+    #[serde(default)]
+    pub displays: DisplaySelection,
+    /// Idle-pause policy (FR-030/031/032).
+    #[serde(default)]
+    pub idle: IdleConfig,
+    /// Two-tier perception configuration (D6/D7/D8).
+    #[serde(default)]
+    pub perception: PerceptionConfig,
     /// Retention / shrink / evict policy.
     #[serde(default)]
     pub retention: RetentionConfig,
@@ -361,11 +1005,139 @@ pub struct DayflowConfig {
 impl Default for DayflowConfig {
     fn default() -> Self {
         Self {
+            segment_seconds: default_segment_seconds(),
             chunk_minutes: default_chunk_minutes(),
             record_fps: default_record_fps(),
             default_provider: default_dayflow_provider(),
+            intent: DayflowIntent::default(),
+            sampling: SamplingConfig::default(),
+            video: DayflowVideoConfig::default(),
+            delta: DeltaConfig::default(),
+            displays: DisplaySelection::default(),
+            idle: IdleConfig::default(),
+            perception: PerceptionConfig::default(),
             retention: RetentionConfig::default(),
         }
+    }
+}
+
+impl DayflowConfig {
+    /// Hard floor on a segment: **5 minutes**.
+    ///
+    /// Dayflow is an all-day recorder, not a frame grabber. Below this the
+    /// per-segment perception cost (one pass per region per display) cannot keep
+    /// up with the cadence, the timeline fills with fragments too short to
+    /// describe an activity, and the segment count per day becomes unmanageable.
+    /// Tests that need sub-minimum intervals drive ffmpeg directly rather than
+    /// going through a validated config.
+    pub const MIN_SEGMENT_SECONDS: u32 = 300;
+
+    /// The segment floor and the sampling interval INTERACT: a segment must be
+    /// able to hold at least two samples, so the 5-minute floor is only reachable
+    /// with a sampling interval of 150 s or finer. The default 3-minute all-day
+    /// interval implies a segment of at least 6 minutes. `validate` enforces it.
+    ///
+    /// Sanity ceiling: **1 hour**.
+    ///
+    /// A longer interval delays BOTH the first timeline entry and the first
+    /// liveness signal — degraded detection is defined in segment intervals
+    /// (SC-006), so an interval this long already means an hour of silence
+    /// before a fault is visible.
+    pub const MAX_SEGMENT_SECONDS: u32 = 3600;
+
+    /// The intended operating range: **10 to 15 minutes**.
+    ///
+    /// Not enforced — 5 minutes to 1 hour is permitted — but this is the band
+    /// the design is tuned for and the default sits at its top.
+    pub const RECOMMENDED_SEGMENT_SECONDS: std::ops::RangeInclusive<u32> = 600..=900;
+
+    /// The configured segment length.
+    ///
+    /// `segment_seconds` is authoritative; `chunk_minutes` is consulted when
+    /// `segment_seconds` is zero — which is both the explicit sentinel AND the
+    /// serde default for a file that omits the key. So a legacy config setting
+    /// only the old key genuinely gets its author's value, and a file setting
+    /// neither gets `chunk_minutes`'s default (15 min = 900 s, the same value
+    /// [`DayflowConfig::default`] carries).
+    pub fn segment_duration(&self) -> std::time::Duration {
+        let secs = if self.segment_seconds > 0 {
+            u64::from(self.segment_seconds)
+        } else {
+            u64::from(self.chunk_minutes) * 60
+        };
+        std::time::Duration::from_secs(secs)
+    }
+
+    /// Validate the segment interval. **Dayflow-scoped on purpose.**
+    ///
+    /// This is NOT called from `AppConfig::validate`, and must not be. gentle-eye
+    /// is a general screen-recording library whose core use is real-time and
+    /// short-clip capture at 1–30 fps; the 5-minute floor is a property of the
+    /// dayflow FEATURE, not of the library. Wiring it into the library-wide
+    /// validator would let a stale `dayflow.*` value fail the config load for a
+    /// user who is only recording a ten-second clip.
+    ///
+    /// Call this when a dayflow session or daemon STARTS — the one moment the
+    /// interval actually has to make sense.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let seg = self.segment_duration().as_secs();
+        if seg < u64::from(Self::MIN_SEGMENT_SECONDS) || seg > u64::from(Self::MAX_SEGMENT_SECONDS) {
+            return Err(ConfigError::ValueOutOfRange {
+                field: "dayflow.segment_seconds".to_string(),
+                value: seg.to_string(),
+                min: Self::MIN_SEGMENT_SECONDS.to_string(),
+                max: Self::MAX_SEGMENT_SECONDS.to_string(),
+            });
+        }
+
+        for (field, secs) in [
+            ("dayflow.sampling.day_interval_seconds", self.sampling.day_interval_seconds),
+            ("dayflow.sampling.focused_interval_seconds", self.sampling.focused_interval_seconds),
+        ] {
+            if !(SamplingConfig::MIN_INTERVAL_SECONDS..=SamplingConfig::MAX_INTERVAL_SECONDS)
+                .contains(&secs)
+            {
+                return Err(ConfigError::ValueOutOfRange {
+                    field: field.to_string(),
+                    value: secs.to_string(),
+                    min: SamplingConfig::MIN_INTERVAL_SECONDS.to_string(),
+                    max: SamplingConfig::MAX_INTERVAL_SECONDS.to_string(),
+                });
+            }
+        }
+
+        // All-day tracking must never sample FINER than a focused session — that
+        // inversion is how an unattended recorder quietly becomes the expensive
+        // one, which is the whole thing this design avoids.
+        if self.sampling.day_interval_seconds < self.sampling.focused_interval_seconds {
+            return Err(ConfigError::Invalid(format!(
+                "all-day sampling ({}s) must not be finer than focused sampling ({}s) — \
+                 the unattended mode has to be the cheap one",
+                self.sampling.day_interval_seconds, self.sampling.focused_interval_seconds
+            )));
+        }
+
+        // A segment must be able to contain at least two samples, or it cannot
+        // show change and the timeline entry has nothing to describe.
+        let seg = self.segment_duration().as_secs();
+        let coarsest = u64::from(self.sampling.day_interval_seconds);
+        if seg < coarsest * 2 {
+            return Err(ConfigError::Invalid(format!(
+                "a {seg}s segment cannot hold two samples at a {coarsest}s interval — \
+                 widen the segment or sample more often"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Full URL the perception tiers post to.
+    pub fn perception_url(&self) -> String {
+        format!(
+            "{}{}",
+            self.perception.endpoint.trim_end_matches('/'),
+            &self.perception.api_path
+        )
     }
 }
 
@@ -576,6 +1348,435 @@ mod tests {
     fn test_validate_valid_config() {
         let config = AppConfig::default();
         assert!(config.validate().is_ok());
+    }
+
+    /// This machine's real layout, measured in T006: a 16:9 laptop panel, a
+    /// rotated portrait panel, and a 21:9 ultrawide.
+    fn three_display_desk() -> Vec<crate::capture::display::DisplayInfo> {
+        use crate::capture::display::DisplayInfo;
+        vec![
+            DisplayInfo::new(0, 1920, 1080, true),  // eDP-1, primary
+            DisplayInfo::new(1, 1080, 2560, false), // DP-1-0, portrait
+            DisplayInfo::new(2, 3440, 1440, false), // HDMI-1-0, ultrawide
+        ]
+    }
+
+    #[test]
+    fn display_selection_defaults_to_every_screen() {
+        let d = three_display_desk();
+        assert_eq!(DisplaySelection::default(), DisplaySelection::All);
+        assert_eq!(DisplaySelection::All.resolve(&d), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn display_selection_can_narrow_by_identity_not_just_index() {
+        // The point: "the portrait one" keeps meaning the same screen after a
+        // replug, where an index does not.
+        let d = three_display_desk();
+        assert_eq!(DisplaySelection::Primary.resolve(&d), Some(vec![0]));
+        assert_eq!(
+            DisplaySelection::Named(vec!["portrait".into()]).resolve(&d),
+            Some(vec![1]),
+            "the 1080x2560 rotated panel"
+        );
+        assert_eq!(
+            DisplaySelection::Named(vec!["ultrawide".into()]).resolve(&d),
+            Some(vec![2]),
+            "the 3440x1440 21:9 panel"
+        );
+        assert_eq!(
+            DisplaySelection::Named(vec!["landscape".into()]).resolve(&d),
+            Some(vec![0]),
+            "16:9 is landscape; 21:9 is classified ultrawide, not landscape"
+        );
+        // one or two screens, as needed for a focused session
+        assert_eq!(
+            DisplaySelection::Named(vec!["main".into(), "portrait".into()]).resolve(&d),
+            Some(vec![0, 1])
+        );
+    }
+
+    #[test]
+    fn a_selection_matching_nothing_fails_loudly() {
+        // A selection that silently matches nothing would record an empty day and
+        // look healthy doing it — the exact false-green this feature exists to
+        // prevent. It must return None so the caller has to handle it.
+        let d = three_display_desk();
+        assert_eq!(DisplaySelection::Named(vec!["tv".into()]).resolve(&d), None);
+        assert_eq!(DisplaySelection::Only(vec![7]).resolve(&d), None);
+        // ...and a single-display machine has no ultrawide
+        let solo = vec![crate::capture::display::DisplayInfo::new(0, 1920, 1080, true)];
+        assert_eq!(DisplaySelection::Named(vec!["ultrawide".into()]).resolve(&solo), None);
+    }
+
+    #[test]
+    fn display_names_match_case_insensitively() {
+        let d = three_display_desk();
+        assert_eq!(DisplaySelection::Named(vec!["PORTRAIT".into()]).resolve(&d), Some(vec![1]));
+        assert_eq!(DisplaySelection::Named(vec![" Primary ".into()]).resolve(&d), Some(vec![0]));
+    }
+
+    #[test]
+    fn gate_strategy_is_a_parameter_not_a_hardcoded_choice() {
+        use crate::dayflow::gate::GateStrategy;
+        // Both methods ship; the situation picks. Default is Either, which
+        // inherits neither strategy's blind spot — for an all-day recorder a
+        // false "changed" costs one wasted pass, a false "unchanged" loses the
+        // moment permanently.
+        assert_eq!(DeltaConfig::default().strategy, GateStrategy::Either);
+        for s in [
+            GateStrategy::Magnitude,
+            GateStrategy::Proportion,
+            GateStrategy::Either,
+            GateStrategy::Both,
+        ] {
+            let mut d = DayflowConfig::default();
+            d.delta.strategy = s;
+            let back: DayflowConfig =
+                toml::from_str(&toml::to_string(&d).expect("ser")).expect("de");
+            assert_eq!(back.delta.strategy, s, "{s:?} must round-trip through config");
+        }
+    }
+
+    #[test]
+    fn a_config_written_before_the_split_still_parses() {
+        // `change_threshold` was the single knob before the two strategies were
+        // separated; it aliases onto the magnitude threshold it always meant.
+        let d: DeltaConfig = toml::from_str("change_threshold = 9.0\n").expect("legacy parse");
+        assert_eq!(d.magnitude_threshold, 9.0);
+        assert_eq!(d.proportion_threshold, 0.4, "the new knob takes its default");
+    }
+
+    #[test]
+    fn delta_gate_carries_lookouts_tuned_constants() {
+        // Reused from sparse-delta-perception rather than re-derived. If these
+        // drift, the gate has been retuned by accident.
+        let g = DeltaConfig::default();
+        assert!(g.enabled, "the content gate is the largest saving; default on");
+        assert_eq!(g.gate_width, 240, "Lookout GATE_WIDTH");
+        assert_eq!(g.magnitude_threshold, 6.0, "Lookout GATE_CHANGE for screen grabs");
+        assert_eq!(g.proportion_threshold, 0.4, "videolocr change_threshold");
+        assert_eq!(g.content_std, 8.0, "Lookout CONTENT_STD");
+        assert!(g.dedup_text, "identical text must not be re-stored");
+    }
+
+    #[test]
+    fn delta_gate_is_downscaled_not_pixel_exact() {
+        // A full-res pixel-exact compare is both costlier and MORE brittle: a
+        // blinking cursor or one antialiased pixel would report "changed" and
+        // defeat the whole saving. The gate is deliberately lossy.
+        let g = DeltaConfig::default();
+        assert!(g.gate_width <= 320, "gate must be a cheap downscale, not full res");
+        assert!(g.magnitude_threshold > 0.0, "a zero threshold IS pixel-exact matching");
+        assert!(g.proportion_threshold > 0.0, "likewise for the proportion strategy");
+    }
+
+    #[test]
+    fn activity_is_the_default_intent() {
+        assert_eq!(DayflowConfig::default().intent, DayflowIntent::Activity);
+        assert_eq!(DayflowIntent::default(), DayflowIntent::Activity);
+    }
+
+    #[test]
+    fn both_intents_are_fully_specified_neither_is_a_stub() {
+        // Both use cases ship. Each must have a DEFINITE answer for every
+        // behaviour, and the two must actually differ — a mode that behaves
+        // identically to the default is not a mode, it is dead config.
+        let a = DayflowIntent::Activity;
+        let c = DayflowIntent::Content;
+
+        assert!(!a.keeps_verbatim_text(), "activity keeps the summary, not the transcript");
+        assert!(c.keeps_verbatim_text(), "content keeps the material verbatim");
+
+        assert!(!a.aggregates_text(), "activity must not pay for aggregation it does not use");
+        assert!(c.aggregates_text(), "content reconstructs material across samples");
+
+        assert!(a.discards_stills_after_summary(), "activity frames are scaffolding");
+        assert!(
+            !c.discards_stills_after_summary(),
+            "content holds stills until the material is extracted"
+        );
+    }
+
+    #[test]
+    fn intent_is_either_or_and_round_trips() {
+        // Selected once when a run starts — not a pair of flags that can both be
+        // on, and not a spectrum.
+        for intent in [DayflowIntent::Activity, DayflowIntent::Content] {
+            let mut cfg = DayflowConfig::default();
+            cfg.intent = intent;
+            let back: DayflowConfig =
+                toml::from_str(&toml::to_string(&cfg).expect("ser")).expect("de");
+            assert_eq!(back.intent, intent);
+            assert!(back.validate().is_ok(), "{intent:?} must be a valid configuration");
+        }
+    }
+
+    #[test]
+    fn content_intent_serialises_readably() {
+        let mut cfg = DayflowConfig::default();
+        cfg.intent = DayflowIntent::Content;
+        let text = toml::to_string(&cfg).expect("ser");
+        assert!(
+            text.contains("intent = \"content\""),
+            "intent must be human-readable in a config file, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn dayflow_samples_it_does_not_stream_video() {
+        let d = DayflowConfig::default();
+        // video is OFF: gentle-eye already records video; dayflow's artifact is
+        // the timeline. Flipping this default silently reintroduces the cost.
+        assert!(!d.video.enabled, "dayflow video must default to OFF");
+        // all-day is the COARSE one; focused is the fine one
+        assert_eq!(d.sampling.day_interval_seconds, 180);
+        assert_eq!(d.sampling.focused_interval_seconds, 60);
+        assert!(d.sampling.skip_unchanged, "delta-skip is the largest saving; default on");
+    }
+
+    #[test]
+    fn sampling_interval_follows_the_record_mode() {
+        use crate::dayflow::models::DayflowMode;
+        let d = DayflowConfig::default();
+        assert_eq!(d.sampling.interval_for(DayflowMode::Daemon).as_secs(), 180);
+        assert_eq!(d.sampling.interval_for(DayflowMode::Session).as_secs(), 60);
+        assert!(
+            d.sampling.interval_for(DayflowMode::Daemon)
+                > d.sampling.interval_for(DayflowMode::Session),
+            "unattended all-day tracking must be the cheaper of the two"
+        );
+    }
+
+    #[test]
+    fn all_day_sampling_may_not_be_finer_than_focused() {
+        // The inversion that would make the unattended mode the expensive one.
+        let mut d = DayflowConfig::default();
+        d.sampling.day_interval_seconds = 30;
+        d.sampling.focused_interval_seconds = 60;
+        assert!(d.validate().is_err(), "all-day finer than focused must be rejected");
+    }
+
+    #[test]
+    fn sampling_may_not_become_a_video_recorder() {
+        let mut d = DayflowConfig::default();
+        for too_fast in [1, 2, 5, 9] {
+            d.sampling.focused_interval_seconds = too_fast;
+            assert!(
+                d.validate().is_err(),
+                "a {too_fast}s sampling interval is video recording, not activity tracking"
+            );
+        }
+        d.sampling.focused_interval_seconds = SamplingConfig::MIN_INTERVAL_SECONDS;
+        assert!(d.validate().is_ok(), "exactly the floor is allowed");
+    }
+
+    #[test]
+    fn a_segment_must_be_able_to_hold_two_samples() {
+        // One sample per segment cannot show change, so the entry has nothing to
+        // describe; zero samples is a silently empty timeline.
+        let mut d = DayflowConfig::default();
+        d.segment_seconds = 300; // 5 min, the floor
+        d.sampling.day_interval_seconds = 180; // 3 min -> only 1 fits
+        assert!(d.validate().is_err(), "5min segment cannot hold two 3min samples");
+        d.sampling.day_interval_seconds = 150; // 2.5 min -> exactly 2 fit
+        assert!(d.validate().is_ok());
+    }
+
+    #[test]
+    fn default_sampling_is_far_cheaper_than_continuous_capture() {
+        // The measured cost driver. One frame across this machine's three
+        // displays is ~37.4 MiB of raw BGRA (T006), so the sample COUNT is what
+        // decides whether an 8-hour day is affordable.
+        let d = DayflowConfig::default();
+        let workday_secs = 8 * 60 * 60;
+        let samples = workday_secs / d.sampling.day_interval_seconds; // per display
+        let continuous_at_half_fps = workday_secs / 2; // 0.5 fps for comparison
+        assert_eq!(samples, 160, "8h at a 3min interval is 160 samples per display");
+        assert!(
+            continuous_at_half_fps / samples >= 80,
+            "default sampling must be at least 80x cheaper than 0.5fps continuous              capture; got {}x",
+            continuous_at_half_fps / samples
+        );
+    }
+
+    #[test]
+    fn dayflow_interval_must_not_gate_the_whole_library() {
+        // gentle-eye's core use is real-time / short-clip recording at 1-30 fps.
+        // The dayflow 5-minute floor is a FEATURE constraint and must never be
+        // able to fail the library-wide config load: a user recording a ten
+        // second clip should not be blocked by a stale dayflow value.
+        let mut cfg = AppConfig::default();
+        cfg.recording.fps = 30; // real-time capture
+        cfg.recording.max_duration_seconds = 10; // a short clip
+        cfg.dayflow.segment_seconds = 1; // nonsense FOR DAYFLOW
+        cfg.dayflow.chunk_minutes = 0;
+        assert!(
+            cfg.validate().is_ok(),
+            "a nonsense dayflow interval must NOT block a real-time recording config"
+        );
+        // ...while the dayflow-scoped validator still rejects it.
+        assert!(
+            cfg.dayflow.validate().is_err(),
+            "the dayflow-scoped validator must still enforce its own floor"
+        );
+    }
+
+    #[test]
+    fn segment_interval_floor_is_five_minutes() {
+        // Dayflow is an all-day recorder. A second-scale "segment" is not a
+        // small config choice, it is a different product.
+        let mut cfg = DayflowConfig::default();
+        // Sample finely enough that the two-samples-per-segment rule is not what
+        // is under test here — this test is about the segment floor alone. The
+        // interaction between the two knobs has its own test.
+        cfg.sampling.day_interval_seconds = 60;
+        cfg.sampling.focused_interval_seconds = 60;
+        for bad in [1, 30, 60, 299] {
+            cfg.segment_seconds = bad;
+            assert!(
+                cfg.validate().is_err(),
+                "{bad}s segment must be rejected (floor is {}s)",
+                DayflowConfig::MIN_SEGMENT_SECONDS
+            );
+        }
+        cfg.segment_seconds = DayflowConfig::MIN_SEGMENT_SECONDS;
+        assert!(
+            cfg.validate().is_ok(),
+            "exactly 5 minutes must be accepted when sampling fits inside it"
+        );
+    }
+
+    #[test]
+    fn segment_interval_accepts_the_intended_ten_to_fifteen_minutes() {
+        let mut cfg = DayflowConfig::default();
+        for good in [600, 720, 900] {
+            cfg.segment_seconds = good;
+            assert!(cfg.validate().is_ok(), "{good}s is in the intended range");
+        }
+        assert!(DayflowConfig::RECOMMENDED_SEGMENT_SECONDS.contains(&600));
+        assert!(DayflowConfig::RECOMMENDED_SEGMENT_SECONDS.contains(&900));
+        // the default sits at the top of the intended band
+        assert_eq!(AppConfig::default().dayflow.segment_seconds, 900);
+    }
+
+    #[test]
+    fn segment_interval_rejects_an_absurdly_long_one() {
+        let mut cfg = DayflowConfig::default();
+        cfg.segment_seconds = DayflowConfig::MAX_SEGMENT_SECONDS + 1;
+        assert!(cfg.validate().is_err(), "beyond 1h must be rejected");
+    }
+
+    #[test]
+    fn legacy_chunk_minutes_cannot_bypass_the_floor() {
+        // Validation reads the EFFECTIVE duration, so an old config file that
+        // only sets chunk_minutes is held to the same floor as a new one.
+        let mut cfg = DayflowConfig::default();
+        cfg.segment_seconds = 0; // defer to the legacy field
+        cfg.chunk_minutes = 1; // 60s — below the floor
+        assert!(
+            cfg.validate().is_err(),
+            "a 1-minute legacy interval must be rejected, not silently honoured"
+        );
+        cfg.chunk_minutes = 10;
+        assert!(cfg.validate().is_ok(), "a 10-minute legacy interval is fine");
+    }
+
+    #[test]
+    fn dayflow_default_round_trips_through_toml() {
+        let cfg = DayflowConfig::default();
+        let text = toml::to_string(&cfg).expect("serialize");
+        let back: DayflowConfig = toml::from_str(&text).expect("deserialize");
+        assert_eq!(back.segment_seconds, cfg.segment_seconds);
+        assert_eq!(back.perception.api_path, cfg.perception.api_path);
+        assert_eq!(back.perception.text_model, cfg.perception.text_model);
+        assert_eq!(back.idle.threshold_seconds, cfg.idle.threshold_seconds);
+        assert_eq!(back.displays, cfg.displays);
+    }
+
+    #[test]
+    fn legacy_config_with_only_chunk_minutes_still_parses() {
+        // A config file written before `segment_seconds` existed must keep working
+        // and must keep meaning what its author intended (FR-035 back-compat).
+        //
+        // The fixture OMITS `segment_seconds` — that is what a legacy file
+        // actually looks like. An earlier version wrote `segment_seconds = 0`
+        // explicitly, which is not the condition the name claims: with the
+        // serde default at 900, a genuinely legacy file silently got 900 and
+        // this test could not see it.
+        let cfg: DayflowConfig =
+            toml::from_str("chunk_minutes = 30\n").expect("legacy parse");
+        assert_eq!(cfg.chunk_minutes, 30);
+        assert_eq!(cfg.segment_duration().as_secs(), 30 * 60);
+    }
+
+    #[test]
+    fn an_explicit_zero_segment_seconds_also_falls_back_to_chunk_minutes() {
+        // 0 is the documented "unset" sentinel, spelled out or omitted alike.
+        let cfg: DayflowConfig =
+            toml::from_str("chunk_minutes = 30\nsegment_seconds = 0\n").expect("parse");
+        assert_eq!(cfg.segment_duration().as_secs(), 30 * 60);
+    }
+
+    #[test]
+    fn a_config_setting_neither_interval_key_gets_the_default_segment_length() {
+        // Omitting both keys must land on the same 900 s the programmatic
+        // Default carries — the serde-default change must not shift it.
+        let cfg: DayflowConfig = toml::from_str("").expect("empty parse");
+        assert_eq!(cfg.segment_duration().as_secs(), 900);
+    }
+
+    #[test]
+    fn segment_seconds_wins_over_legacy_chunk_minutes() {
+        let cfg: DayflowConfig =
+            toml::from_str("chunk_minutes = 15\nsegment_seconds = 1800\n").expect("parse");
+        assert_eq!(cfg.segment_duration().as_secs(), 1800);
+    }
+
+    #[test]
+    fn perception_uses_generate_not_chat() {
+        // Measured 2026-08-23: the text tier is an OCR specialist, not a chat
+        // model. /api/chat wraps the prompt in a chat template and the template
+        // bleeds into the output as >user / >system / <|im_end|> markers.
+        let cfg = DayflowConfig::default();
+        assert_eq!(cfg.perception.api_path, "/api/generate");
+        assert!(!cfg.perception.api_path.contains("chat"));
+        assert!(cfg.perception_url().ends_with("/api/generate"));
+    }
+
+    #[test]
+    fn text_prompt_stays_terse() {
+        // A verbose instruction does not degrade this model, it destroys it:
+        // 42.9s and 7366 tokens of a degenerate repetition loop, returned with a
+        // 200 and no error. Guard the pinned prompt against well-meaning edits.
+        let cfg = DayflowConfig::default();
+        assert!(
+            cfg.perception.text_prompt.len() < 40,
+            "text prompt must stay terse, got {} chars: {:?}",
+            cfg.perception.text_prompt.len(),
+            cfg.perception.text_prompt
+        );
+        assert!(!cfg.perception.text_prompt.to_lowercase().contains("do not"));
+    }
+
+    #[test]
+    fn perception_endpoint_leaks_no_private_host() {
+        // This repository is public. The governed-lane host is machine-local and
+        // must never be committed (see the crate's dependency/infra hygiene).
+        let cfg = DayflowConfig::default();
+        let ep = &cfg.perception.endpoint;
+        assert!(
+            ep.contains("127.0.0.1") || ep.contains("localhost"),
+            "default perception endpoint must be neutral loopback, got {ep:?}"
+        );
+        for leak in ["192.168.", "10.", "172.16.", ".local"] {
+            assert!(!ep.contains(leak), "endpoint leaks a private host: {ep:?}");
+        }
+    }
+
+    #[test]
+    fn dayflow_captures_all_displays_by_default() {
+        assert_eq!(DayflowConfig::default().displays, DisplaySelection::All);
     }
 
     #[test]

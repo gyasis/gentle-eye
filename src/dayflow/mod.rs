@@ -16,11 +16,24 @@
 //! - [`daemon`]     — continuous all-day daemon (Wave 5).
 //! - [`retention`]  — save → shrink → archive + disk-evict guard (Wave 6).
 
+pub mod answerer;
+pub mod capture_loop;
 pub mod chunking;
+pub mod client;
 pub mod daemon;
 pub mod engine;
 pub mod errors;
+pub mod gate;
+pub mod http;
+pub mod idle;
 pub mod models;
+pub mod sampler;
+pub mod scheduler;
+pub mod service;
+pub mod source;
+pub mod standup;
+pub mod window;
+pub mod perception;
 pub mod retention;
 pub mod summarizer;
 pub mod timeline;

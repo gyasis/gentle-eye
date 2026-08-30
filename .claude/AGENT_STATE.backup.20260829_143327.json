@@ -1,0 +1,20 @@
+{
+  "session_id": "7266fdd3-1712-4248-a872-2242cdc1aec7",
+  "user_id": "gyasis",
+  "project_path": "/home/gyasis/Documents/code/gentle-eye",
+  "status": "active",
+  "agents": {
+    "main": {
+      "status": "idle"
+    },
+    "memory-keeper": {
+      "status": "idle"
+    },
+    "git-manager": {
+      "status": "idle"
+    }
+  },
+  "initialized_at": "2026-05-26T05:33:39-04:00",
+  "last_session_end": "2026-08-23T11:50:10.354467",
+  "last_session_start": "2026-08-26T18:55:43.503797"
+}
