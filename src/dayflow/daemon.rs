@@ -134,6 +134,16 @@ impl StateAnomaly {
     }
 }
 
+/// The ONE place a daemon's state lives under a storage root.
+///
+/// Every surface — the serving daemon, the attaching CLI, the attaching MCP —
+/// must derive the path from HERE. A second derivation is a second state store
+/// in waiting: two surfaces that compute the path differently are two views of
+/// one session that silently diverge (013/R29, T023).
+pub fn state_path_under(base_dir: &Path) -> PathBuf {
+    base_dir.join("dayflow-daemon.json")
+}
+
 /// Where the daemon keeps its state, and how it reads and writes it.
 #[derive(Debug, Clone)]
 pub struct DaemonStateStore {
@@ -273,6 +283,30 @@ pub fn decide_resume(prior: Option<&DaemonState>, now: DateTime<Utc>) -> ResumeD
 pub struct Daemon {
     store: DaemonStateStore,
     service: std::sync::Arc<crate::dayflow::service::DayflowService>,
+    /// The summariser + sample directory that make a session actually RECORD.
+    ///
+    /// `None` means the daemon owns session STATE only — starting a session
+    /// that names its source but captures nothing (the state tests use this).
+    /// A serving daemon must be built `with_capture`: T022's whole purpose is
+    /// a daemon that owns a RUNNING session, and `start_session` alone starts
+    /// no capture — the process would serve HTTP all day and record nothing.
+    capture: Option<CaptureWiring>,
+    /// Serialises every load-mutate-save of the state file WITHIN this
+    /// process. `publish_port` and the state keeper both read-modify-write;
+    /// unserialised, one overwrites the other's fields and the loss is silent.
+    write: std::sync::Mutex<()>,
+    /// The OS-level singleton lock, held for the daemon's lifetime once
+    /// [`Daemon::lock_exclusive`] succeeds. Advisory `flock`: released
+    /// automatically when the process dies, so a crash never wedges the next
+    /// start.
+    flock: std::sync::Mutex<Option<std::fs::File>>,
+}
+
+/// What a capturing daemon supplies beyond state: the pieces
+/// `DayflowService::start_with_source` needs to drive the loop.
+struct CaptureWiring {
+    summarizer: std::sync::Arc<dyn crate::dayflow::summarizer::ChunkSummarizer + Send + Sync>,
+    sample_dir: PathBuf,
 }
 
 impl Daemon {
@@ -281,7 +315,68 @@ impl Daemon {
         state_path: impl Into<PathBuf>,
         service: std::sync::Arc<crate::dayflow::service::DayflowService>,
     ) -> Self {
-        Self { store: DaemonStateStore::new(state_path), service }
+        Self {
+            store: DaemonStateStore::new(state_path),
+            service,
+            capture: None,
+            write: std::sync::Mutex::new(()),
+            flock: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Wire the summariser and sample directory, so `start_or_resume` starts a
+    /// session that actually CAPTURES.
+    ///
+    /// The summariser must already carry its residency policy
+    /// (`RoutedChunkSummarizer::with_residency`) — applied at construction so a
+    /// configured `Resident` is expressible by the running system (T020's W8
+    /// note), and must resolve samples under this same `sample_dir`, or every
+    /// segment reads whole frames while capture works perfectly.
+    pub fn with_capture(
+        mut self,
+        summarizer: std::sync::Arc<dyn crate::dayflow::summarizer::ChunkSummarizer + Send + Sync>,
+        sample_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.capture = Some(CaptureWiring { summarizer, sample_dir: sample_dir.into() });
+        self
+    }
+
+    /// Become THE daemon for this state file, or refuse.
+    ///
+    /// [`Daemon::live_peer_port`] answers "is a daemon ALREADY serving?", but
+    /// it is a probe, not a lock: two daemons started simultaneously both see
+    /// no published port (neither has published yet), both pass, and one
+    /// silently overwrites the other's record while both keep capturing —
+    /// interleaved sequences in one timeline with nothing saying so. This is
+    /// the OS closing that window: an advisory exclusive lock on a sibling
+    /// `.lock` file, held until the process dies. A crashed daemon's lock is
+    /// released by the kernel, so a crash never requires deleting anything by
+    /// hand — which is exactly why the lock is a separate file and never the
+    /// state file itself.
+    pub fn lock_exclusive(&self) -> Result<(), DayflowError> {
+        let path = self.store.path().with_extension("json.lock");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| DayflowError::Internal(format!("create {}: {e}", parent.display())))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            // Never truncate: the file's CONTENT is irrelevant (the lock is
+            // the kernel's), and truncating a file another process holds
+            // locked would be a pointless write to contested state.
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| DayflowError::Internal(format!("open {}: {e}", path.display())))?;
+        file.try_lock().map_err(|e| {
+            DayflowError::Invalid(format!(
+                "another dayflow daemon holds {} ({e}) — refusing to become a second: \
+                 two daemons would interleave their windows into one timeline",
+                path.display()
+            ))
+        })?;
+        *self.flock.lock().unwrap_or_else(|p| p.into_inner()) = Some(file);
+        Ok(())
     }
 
     /// The state store. There is exactly one, and it is this.
@@ -305,6 +400,7 @@ impl Daemon {
         spec: crate::dayflow::source::SourceSpec,
         now: DateTime<Utc>,
     ) -> Result<(Uuid, ResumeDecision), DayflowError> {
+        let _w = self.write.lock().unwrap_or_else(|p| p.into_inner());
         let (prior, anomaly) = self.store.load_reporting()?;
         if let Some(a) = anomaly {
             // Not swallowed: it says the last run did not stop cleanly, so its
@@ -317,12 +413,74 @@ impl Daemon {
         // session is a record of what it has been capturing all along; adopting
         // a new subject mid-session would make one timeline describe two
         // different things with nothing marking the seam.
+        //
+        // A FRESH spec is resolved here, ONCE — the persisted record must never
+        // hold an unresolved "every display": re-resolving on restart can name
+        // different displays than the session's own ordinals (the W7 gate's
+        // single-enumeration invariant, D014-15's persistence consequence).
         let effective = match (&decision, prior.as_ref().and_then(|p| p.spec.clone())) {
             (ResumeDecision::Resumed, Some(persisted)) => persisted,
-            _ => spec,
+            _ => crate::dayflow::service::resolve_source_spec(&spec)?,
         };
 
-        let id = self.service.start_session(mode, effective.clone(), now)?;
+        // Read the interruption's start from the PRIOR record, BEFORE the new
+        // state overwrites it. Reading it back after the save would date the
+        // gap from `now` to `now` — a zero-width interval no timeline shows,
+        // which makes the interruption exactly the invisible hole FR-032
+        // exists to prevent.
+        let interrupted_from = match (&decision, prior.as_ref()) {
+            (ResumeDecision::Resumed, Some(p)) => Some(p.updated_at),
+            _ => None,
+        };
+        // The sequence each display should CONTINUE from (T022: sequences keep
+        // climbing across a restart instead of colliding with what is already
+        // on disk).
+        let resume_sequences: std::collections::BTreeMap<u32, u64> = match (&decision, prior.as_ref())
+        {
+            (ResumeDecision::Resumed, Some(p)) => {
+                p.last_sequence.keys().map(|&d| (d, p.next_sequence(d))).collect()
+            }
+            _ => std::collections::BTreeMap::new(),
+        };
+
+        // Everything a resume carries into the run, applied BEFORE the capture
+        // thread can produce anything under the wrong identity or sequence.
+        let carry = crate::dayflow::service::ResumeCarry {
+            next_sequences: resume_sequences,
+            adopt_orphaned_samples: decision == ResumeDecision::Resumed,
+            identity: match (&decision, prior.as_ref()) {
+                (ResumeDecision::Resumed, Some(p)) => Some((p.session_id, p.started_at)),
+                _ => None,
+            },
+        };
+        let id = match &self.capture {
+            // The daemon's real path: a session that CAPTURES. Adoption of the
+            // dead process's samples is gated on this being a resume — adopted
+            // summaries are filed under the running session, and only a resume
+            // is the same session.
+            Some(w) => self.service.start_with_source(
+                mode,
+                effective.clone(),
+                std::sync::Arc::clone(&w.summarizer),
+                w.sample_dir.clone(),
+                &carry,
+                now,
+            )?,
+            // State-only: names the source, records nothing. For tests of the
+            // daemon's persistence; a SERVING daemon is built `with_capture`.
+            None => {
+                let mut id = self.service.start_session(mode, effective.clone(), now)?;
+                if let Some((session_id, started_at)) = carry.identity {
+                    self.service.with_run(|r| r.adopt_identity(session_id, started_at))?;
+                    id = session_id;
+                }
+                if !carry.next_sequences.is_empty() {
+                    self.service
+                        .with_run(|r| r.seed_next_sequences(carry.next_sequences.clone()))?;
+                }
+                id
+            }
+        };
 
         let mut state = match (&decision, prior) {
             // Continue the SAME session id, and keep the sequence high-water
@@ -343,7 +501,71 @@ impl Daemon {
         };
         state.updated_at = now;
         self.store.save(&state)?;
+
+        // The interruption between the dead process and this one is a RECORDED
+        // fact — a gap with a cause, not an absence (FR-032). Best-effort: a
+        // resume whose gap could not be written is still a resume.
+        if let Some(from) = interrupted_from {
+            if from < now {
+                if let Err(e) = self.record_interruption(state.session_id, from, now) {
+                    tracing::warn!(error = %e, "could not record the restart gap");
+                }
+            }
+        }
         Ok((state.session_id, decision))
+    }
+
+    /// Persist the run's CURRENT sequence high-water marks.
+    ///
+    /// This is what feeds `DaemonState::last_sequence` — without a writer, the
+    /// field is persisted machinery no restart can use, and every resume
+    /// restarts sequences at 0 (the disk-scan seed in `start_with_source` is
+    /// the backstop; this is the primary record). Returns `false` when there is
+    /// no session to read, so a keeper loop knows to stop.
+    pub fn persist_sequences(&self, now: DateTime<Utc>) -> bool {
+        let seqs = match self.service.with_run(|r| {
+            r.displays()
+                .iter()
+                .map(|&d| (d, r.current_sequence(d)))
+                .collect::<Vec<_>>()
+        }) {
+            Ok(s) => s,
+            // No active session (stopped, or not yet started): nothing to keep.
+            Err(_) => return false,
+        };
+        let _w = self.write.lock().unwrap_or_else(|p| p.into_inner());
+        match self.store.load() {
+            Ok(Some(mut state)) => {
+                for (d, s) in seqs {
+                    state.note_sequence(d, s, now);
+                }
+                if let Err(e) = self.store.save(&state) {
+                    tracing::warn!(error = %e, "could not persist sequence high-water marks");
+                }
+                true
+            }
+            // The state file is gone (a stop raced us) or unreadable: stop
+            // keeping rather than resurrect a record the stop just cleared.
+            _ => false,
+        }
+    }
+
+    /// Keep the persisted sequence marks fresh while the session runs.
+    ///
+    /// A restart can only continue from what was WRITTEN: state saved once at
+    /// start records sequence 0 forever, and the whole day's windows would
+    /// collide on resume. The keeper exits on its own when the session ends.
+    pub fn spawn_state_keeper(
+        self: &std::sync::Arc<Self>,
+        period: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let daemon = std::sync::Arc::clone(self);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(period);
+            if !daemon.persist_sequences(Utc::now()) {
+                break;
+            }
+        })
     }
 
     /// Whether another daemon is already serving this state file.
@@ -364,6 +586,7 @@ impl Daemon {
 
     /// Publish the port this daemon serves on, so surfaces can attach.
     pub fn publish_port(&self, port: u16) -> Result<(), DayflowError> {
+        let _w = self.write.lock().unwrap_or_else(|p| p.into_inner());
         let Some(mut state) = self.store.load()? else {
             return Err(DayflowError::NoActiveSession);
         };
@@ -400,6 +623,7 @@ impl Daemon {
     pub fn stop(&self, now: DateTime<Utc>) -> Result<usize, DayflowError> {
         self.service.stop_capture()?;
         let closed = self.service.stop(now)?;
+        let _w = self.write.lock().unwrap_or_else(|p| p.into_inner());
         self.store.clear()?;
         Ok(closed.len())
     }

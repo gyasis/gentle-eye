@@ -162,7 +162,55 @@ impl GentleEyeServer {
     // service, serialise the answer. No decision lives here, because a decision
     // that lives in a surface is a decision the other two surfaces do not make.
 
+    /// The running dayflow daemon's client, when one is serving (T023/D014-15).
+    ///
+    /// Without attaching, an MCP invocation is a PRIVATE in-process engine:
+    /// `dayflow_status` reports "not running" while the daemon captures, and
+    /// `start_dayflow` opens a second session nothing else can see — exactly
+    /// the divergence one state store exists to prevent. Only the
+    /// session-state tools need this; `get_timeline` and `ask_day` read the
+    /// shared sqlite store, which IS the store the daemon writes.
+    fn attached_daemon(&self) -> Option<crate::dayflow::client::DaemonClient> {
+        let store = crate::dayflow::daemon::DaemonStateStore::new(
+            crate::dayflow::daemon::state_path_under(&self.config.storage.base_dir),
+        );
+        crate::dayflow::client::DaemonClient::discover(&store)
+    }
+
+    /// Wrap a daemon's JSON reply as this tool's result.
+    fn forward(body: Result<String, crate::contracts::errors::DayflowError>) -> CallToolResult {
+        match body {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(v) => ok_json(v),
+                // The daemon answered non-JSON; pass it through rather than
+                // replace a specific reply with a generic error.
+                Err(_) => ok_json(serde_json::json!({ "raw": text })),
+            },
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
     fn tool_start_dayflow(&self, input: StartDayflowInput) -> CallToolResult {
+        if let Some(client) = self.attached_daemon() {
+            use crate::dayflow::client::urlencode;
+            let mut q: Vec<String> = Vec::new();
+            if let Some(d) = &input.displays {
+                let list =
+                    d.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+                q.push(format!("displays={}", urlencode(&list)));
+            }
+            for (name, v) in [
+                ("window", &input.window),
+                ("target", &input.target),
+                ("input", &input.input),
+                ("mode", &input.mode),
+            ] {
+                if let Some(v) = v {
+                    q.push(format!("{name}={}", urlencode(v)));
+                }
+            }
+            return Self::forward(client.post(&format!("/dayflow/start?{}", q.join("&"))));
+        }
         let mode = match input.mode.as_deref() {
             None | Some("session") => crate::dayflow::models::DayflowMode::Session,
             Some("daemon") => crate::dayflow::models::DayflowMode::Daemon,
@@ -189,6 +237,9 @@ impl GentleEyeServer {
     }
 
     fn tool_stop_dayflow(&self, _input: StopDayflowInput) -> CallToolResult {
+        if let Some(client) = self.attached_daemon() {
+            return Self::forward(client.post("/dayflow/stop"));
+        }
         match self.dayflow.stop(Utc::now()) {
             Ok(closed) => ok_json(serde_json::json!({
                 "windows_closed": closed.len(),
@@ -199,6 +250,9 @@ impl GentleEyeServer {
     }
 
     fn tool_dayflow_status(&self, input: DayflowStatusInput) -> CallToolResult {
+        if let Some(client) = self.attached_daemon() {
+            return Self::forward(client.get("/dayflow/status"));
+        }
         self.tool_dayflow_status_at(input, Utc::now())
     }
 

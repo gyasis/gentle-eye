@@ -2141,6 +2141,7 @@ fn start_with_source_records_a_real_input_end_to_end() {
             SourceSpec::Input { url: src_png.to_string_lossy().into_owned() },
             ok_summarizer(),
             sample_dir.clone(),
+            &gentle_eye::dayflow::service::ResumeCarry::default(),
             Utc::now(),
         )
         .expect("start_with_source starts");
@@ -2806,4 +2807,363 @@ fn a_separate_client_reads_and_stops_the_daemons_session() {
     let after: serde_json::Value =
         serde_json::from_str(&client.get("/dayflow/status").unwrap()).unwrap();
     assert_eq!(after["running"], false, "stop from a separate client did not stop it");
+}
+
+// ── W9 gate: the defects the wave left in the daemon ─────────────────────────
+
+/// A daemon built `with_capture` actually CAPTURES: `start_or_resume` drives
+/// the loop, not merely a session that names its source. Before this,
+/// `dayflow serve` started a session, served HTTP all day, and recorded
+/// NOTHING — `start_session` starts no capture (the W7 gate's ruling), and the
+/// wave never called `start_with_source`.
+#[test]
+fn a_daemon_with_capture_wiring_actually_captures() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let svc = svc_for(&db);
+    let d = Daemon::new(dir.path().join("daemon.json"), Arc::clone(&svc))
+        .with_capture(ok_summarizer(), dir.path().join("samples"));
+
+    let (_id, dec) = d
+        .start_or_resume(DayflowMode::Daemon, SourceSpec::Window { label: "w".into() }, Utc::now())
+        .expect("starts");
+    assert_eq!(dec, ResumeDecision::Fresh);
+    assert!(
+        svc.capture_running(),
+        "the daemon started a session but no capture thread — a recorder that \
+         serves HTTP and records nothing (the 013/R29 wired-but-inert shape)"
+    );
+
+    d.stop(Utc::now()).expect("stops");
+    assert!(!svc.capture_running(), "stop must end the capture thread");
+    assert!(d.store().load().unwrap().is_none(), "stop must clear the state");
+}
+
+/// A resume records the interruption as a NON-ZERO gap dated from the dead
+/// process's last write. The wave read the state back AFTER saving the new
+/// record, so the gap ran from `now` to `now` — zero width, invisible on every
+/// timeline, which is exactly the quiet-afternoon conflation FR-032 forbids.
+#[test]
+fn a_resume_records_the_restart_gap_from_the_dead_process_last_write() {
+    use gentle_eye::dayflow::window::PauseCause;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon.json");
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let spec = SourceSpec::Window { label: "w".into() };
+
+    let d1 = Daemon::new(&state_path, svc_for(&db));
+    let (id1, _) = d1.start_or_resume(DayflowMode::Daemon, spec.clone(), at(0)).unwrap();
+    drop(d1);
+
+    // The process was dead from at(0) until at(600).
+    let d2 = Daemon::new(&state_path, svc_for(&db));
+    let (id2, dec) = d2.start_or_resume(DayflowMode::Daemon, spec, at(600)).unwrap();
+    assert_eq!(dec, ResumeDecision::Resumed);
+    assert_eq!(id2, id1);
+
+    // The RUN carries the resumed identity too — not just the state file. A
+    // run that minted a fresh UUID would file every entry under a different
+    // session than the record claims to continue, and the restart gap below
+    // would key to an id the entries never use.
+    let status = d2.service().status(at(600)).unwrap();
+    assert_eq!(
+        status.session_id,
+        Some(id1),
+        "status must report the RESUMED session id, not a freshly minted one"
+    );
+    assert_eq!(
+        status.started_at,
+        Some(at(0)),
+        "a resumed session started when it STARTED, not when it was resumed"
+    );
+
+    let slice = d2.service().timeline(at(0), at(1200)).expect("reads back");
+    let gap = slice
+        .gaps
+        .iter()
+        .find(|g| g.cause == PauseCause::DaemonRestart)
+        .expect("the resume recorded NO restart gap");
+    assert_eq!(
+        gap.from,
+        at(0),
+        "the gap must start at the dead process's LAST WRITE — dating it from \
+         the new state (written before the gap is computed) makes it zero-width"
+    );
+    assert_eq!(gap.to, Some(at(600)));
+    assert_ne!(gap.from, gap.to.unwrap(), "a zero-width gap shows on no timeline");
+}
+
+/// Sequences keep CLIMBING across a restart — the stated purpose of
+/// `DaemonState::last_sequence`, which the wave persisted but neither fed nor
+/// consumed: nothing called `note_sequence`, nothing called `next_sequence`,
+/// and a resumed run restarted every display at 0 — colliding with the
+/// `(display, sequence)` keys the dead process already wrote to disk.
+#[test]
+fn a_resumed_daemon_continues_sequences_instead_of_restarting_at_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon.json");
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let spec = SourceSpec::Window { label: "w".into() };
+
+    let d1 = Daemon::new(&state_path, svc_for(&db));
+    d1.start_or_resume(DayflowMode::Daemon, spec.clone(), at(0)).unwrap();
+    // Windows close as samples cross 1-second boundaries; sequence advances.
+    d1.service()
+        .with_run(|r| {
+            r.set_interval(std::time::Duration::from_secs(1), at(0));
+            for k in 0..5 {
+                r.on_sample(0, at(k * 2));
+            }
+            r.current_sequence(0)
+        })
+        .expect("run is live");
+    // What the state keeper does on its period: persist the high-water marks.
+    assert!(d1.persist_sequences(at(20)), "a live session must be persistable");
+    let recorded = d1.store().load().unwrap().unwrap();
+    let last = *recorded.last_sequence.get(&0).expect(
+        "persist_sequences wrote no mark — last_sequence is fed by nothing \
+         and every restart resumes from 0",
+    );
+    assert!(last > 0, "samples advanced the sequence; the record must show it");
+    drop(d1);
+
+    let d2 = Daemon::new(&state_path, svc_for(&db));
+    let (_, dec) = d2.start_or_resume(DayflowMode::Daemon, spec, at(600)).unwrap();
+    assert_eq!(dec, ResumeDecision::Resumed);
+    let resumed_next = d2.service().with_run(|r| r.current_sequence(0)).unwrap();
+    assert_eq!(
+        resumed_next,
+        last + 1,
+        "a resumed session must CONTINUE from the persisted mark: restarting at 0 \
+         reuses identities already on disk, and samples_for merges the dead \
+         process's screen into the new window's summary"
+    );
+}
+
+/// The sample-filename parser is the exact inverse of the writer's rule.
+#[test]
+fn sample_filenames_parse_back_to_their_identity() {
+    use gentle_eye::dayflow::sampler::{parse_sample_filename, sample_prefix};
+    let ts = Utc.with_ymd_and_hms(2026, 8, 30, 10, 11, 12).unwrap()
+        + Duration::milliseconds(123);
+    let name = format!("{}20260830T101112123.png", sample_prefix(3, 7));
+    let (display, sequence, taken_at) =
+        parse_sample_filename(&name).expect("a real sample name must parse");
+    assert_eq!((display, sequence), (3, 7));
+    assert_eq!(taken_at, ts);
+
+    // Sidecars and foreign files are refused, not misread.
+    assert_eq!(parse_sample_filename("d3_w000007_20260830T101112123.regions.json"), None);
+    assert_eq!(parse_sample_filename("notes.txt"), None);
+    assert_eq!(parse_sample_filename("d3_w000007_.png"), None);
+}
+
+/// Samples a DEAD process left behind are ADOPTED on resume: summarised under
+/// the same session, then reclaimed through the normal retention gate. Before
+/// this, the loop's in-memory `samples`/`closed`/`summarized` died with the
+/// process, so every pre-restart window was invisible to `segments()` —
+/// unreclaimable forever, and disk grew without bound across restarts.
+#[tokio::test]
+async fn orphaned_samples_are_adopted_summarised_and_reclaimed() {
+    use gentle_eye::dayflow::retention::RetentionConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    // Two windows a dead process left behind, one sample each.
+    let old_a = dir.path().join("d0_w000000_20260830T090000000.png");
+    let old_b = dir.path().join("d0_w000001_20260830T091500000.png");
+    std::fs::write(&old_a, b"png-bytes").unwrap();
+    std::fs::write(&old_b, b"png-bytes").unwrap();
+
+    let mut lp = CaptureLoop::new(Vec::new(), Sampler::new(DeltaConfig::default()), dir.path());
+    assert_eq!(lp.adopt_orphans(), 2, "both orphaned windows must be adopted");
+    assert_eq!(lp.adopt_orphans(), 0, "adoption is idempotent — never re-adopt owned windows");
+
+    // They are summarisable — the whole point: reclaiming them unsummarised
+    // would delete evidence, leaking them would fill the disk.
+    let summarizer = FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 };
+    let sid = uuid::Uuid::new_v4();
+    let entries = lp.settle_due(&summarizer, sid, at(1_000_000)).await;
+    assert_eq!(entries.len(), 2, "adopted windows must settle into timeline entries");
+
+    // And once summarised, retention reclaims their files.
+    let cfg = RetentionConfig::from_policy(&gentle_eye::config::RetentionConfig::default());
+    let far_future = Utc.with_ymd_and_hms(2027, 8, 30, 9, 0, 0).unwrap();
+    lp.sweep_retention(&cfg, far_future);
+    assert!(!old_a.exists(), "a summarised orphan's samples must be reclaimed");
+    assert!(!old_b.exists(), "a summarised orphan's samples must be reclaimed");
+}
+
+/// A session started over a directory that already holds samples never reuses
+/// their sequences — the filenames carry no session id, so a reused
+/// `(display, sequence)` prefix resolves the old files into the new window.
+#[test]
+fn on_disk_samples_seed_the_sequence_floor() {
+    use gentle_eye::dayflow::sampler::max_sequences_on_disk;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("d0_w000004_20260830T090000000.png"), b"x").unwrap();
+    std::fs::write(dir.path().join("d0_w000002_20260830T080000000.png"), b"x").unwrap();
+    std::fs::write(dir.path().join("d2_w000009_20260830T080000000.png"), b"x").unwrap();
+    std::fs::write(dir.path().join("d0_w000004_20260830T090000000.regions.json"), b"x").unwrap();
+    let map = max_sequences_on_disk(dir.path());
+    assert_eq!(map.get(&0), Some(&4));
+    assert_eq!(map.get(&2), Some(&9));
+    assert_eq!(map.len(), 2, "sidecars and unknown displays must not appear");
+
+    // The join: start_with_source seeds the run PAST what is on disk.
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let svc = svc_for(&db);
+    svc.start_with_source(
+        DayflowMode::Session,
+        SourceSpec::Window { label: "w".into() },
+        ok_summarizer(),
+        dir.path().to_path_buf(),
+        &gentle_eye::dayflow::service::ResumeCarry::default(),
+        Utc::now(),
+    )
+    .expect("starts");
+    let next = svc.with_run(|r| r.current_sequence(0)).unwrap();
+    assert_eq!(
+        next, 5,
+        "the first window must open PAST the highest sequence on disk (4), \
+         or its samples merge with the dead files sharing the prefix"
+    );
+    svc.stop_capture().unwrap();
+    svc.stop(Utc::now()).unwrap();
+}
+
+/// The OS lock closes the race `live_peer_port` cannot: two daemons started
+/// SIMULTANEOUSLY both probe before either has published a port, both pass,
+/// and one silently overwrites the other's record. With the lock, the second
+/// is refused before it touches the state file.
+#[test]
+fn a_second_daemon_cannot_take_the_exclusive_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon.json");
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let d1 = Daemon::new(&state_path, svc_for(&db));
+    d1.lock_exclusive().expect("the first daemon takes the lock");
+
+    let d2 = Daemon::new(&state_path, svc_for(&db));
+    let refused = d2.lock_exclusive();
+    assert!(
+        refused.is_err(),
+        "a second daemon over the same state file must be refused — both passed \
+         the port probe (neither had published), and unlocked they interleave \
+         their windows into one timeline"
+    );
+
+    // The lock dies with its holder: a crashed daemon never wedges the next start.
+    drop(d1);
+    d2.lock_exclusive().expect("the lock must be free once the holder is gone");
+}
+
+/// A daemon record whose port does not answer is DISTINGUISHABLE from no
+/// daemon at all — a crashed daemon's leftovers and a clean absence call for
+/// different messages, and collapsing them silently reports "not running"
+/// about a session that may be running.
+#[test]
+fn probing_distinguishes_a_stale_record_from_no_daemon() {
+    use gentle_eye::dayflow::client::{DaemonClient, Discovery};
+    let dir = tempfile::tempdir().unwrap();
+    let store = DaemonStateStore::new(dir.path().join("daemon.json"));
+    assert!(matches!(DaemonClient::probe(&store), Discovery::NoDaemon));
+
+    let mut s = gentle_eye::dayflow::daemon::DaemonState::new(uuid::Uuid::new_v4(), at(0), 1);
+    s.port = Some(59_996);
+    store.save(&s).unwrap();
+    match DaemonClient::probe(&store) {
+        Discovery::Stale { port } => assert_eq!(port, 59_996),
+        Discovery::NoDaemon => panic!("a record naming a dead port is STALE, not absent"),
+        Discovery::Live(_) => panic!("nothing listens on 59996"),
+    }
+}
+
+/// `stop` over HTTP goes through the DAEMON, so the state file tracks the
+/// session's end. Routed straight to the service (as the wave did), the state
+/// file kept claiming the session runs — and the next `serve` RESUMED a
+/// session the user deliberately stopped.
+#[test]
+fn http_stop_through_the_daemon_clears_the_state_file() {
+    use gentle_eye::dayflow::client::DaemonClient;
+    use gentle_eye::dayflow::http;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon.json");
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let svc = svc_for(&db);
+    let daemon = Arc::new(Daemon::new(&state_path, Arc::clone(&svc)));
+    daemon
+        .start_or_resume(DayflowMode::Daemon, SourceSpec::Window { label: "w".into() }, Utc::now())
+        .unwrap();
+
+    let listener = http::bind(0).expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let served = Arc::clone(&daemon);
+    std::thread::spawn(move || http::serve_daemon(listener, served));
+    daemon.publish_port(port).expect("publishes");
+
+    let client = DaemonClient::new(port);
+    client.post("/dayflow/stop").expect("stop over HTTP");
+    assert!(
+        daemon.store().load().unwrap().is_none(),
+        "an HTTP stop must clear the daemon state — leaving it makes the next \
+         `serve` resume a session the user deliberately stopped"
+    );
+
+    // And an HTTP start goes through the daemon too: the new session is
+    // PERSISTED, so a crash after it does not lose it.
+    let body = client
+        .post("/dayflow/start?window=other")
+        .expect("start over HTTP");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let persisted = daemon.store().load().unwrap().expect(
+        "an HTTP start must write the state file — an unpersisted session dies \
+         silently with the next crash",
+    );
+    assert_eq!(v["session_id"], persisted.session_id.to_string());
+    assert_eq!(
+        persisted.spec,
+        Some(SourceSpec::Window { label: "other".into() }),
+        "the persisted spec must say what the HTTP start asked for"
+    );
+}
+
+/// The persisted spec is RESOLVED — an empty display list on disk would make a
+/// restart re-enumerate, which can name different displays than the session's
+/// own ordinals (D014-15's persistence consequence). An already-concrete spec
+/// must round-trip untouched.
+#[test]
+fn the_persisted_spec_is_stored_resolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let d = Daemon::new(dir.path().join("daemon.json"), svc_for(&db));
+    d.start_or_resume(
+        DayflowMode::Daemon,
+        SourceSpec::Displays { indices: vec![1, 2] },
+        at(0),
+    )
+    .unwrap();
+    let state = d.store().load().unwrap().unwrap();
+    assert_eq!(state.spec, Some(SourceSpec::Displays { indices: vec![1, 2] }));
+    match state.spec {
+        Some(SourceSpec::Displays { indices }) => {
+            assert!(!indices.is_empty(), "an unresolved display list must never be persisted")
+        }
+        other => panic!("expected a display spec, got {other:?}"),
+    }
 }

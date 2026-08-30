@@ -211,6 +211,78 @@ impl CaptureLoop {
         &self.sample_dir
     }
 
+    /// Adopt samples a DEAD process left in the sample directory (T022).
+    ///
+    /// The loop's ownership map (`samples`/`closed`/`summarized`) is in-memory
+    /// and dies with the process. Without adoption, a restarted daemon reads
+    /// every pre-restart window as unknown: its samples are invisible to
+    /// `segments()`, so retention can never reclaim them, and disk grows
+    /// without bound across restarts — a real leak in a recorder designed to
+    /// run all day, every day.
+    ///
+    /// Adoption reconstructs each orphaned window from the samples themselves
+    /// (the naming rule is [`sample_prefix`]'s, parsed by its own inverse
+    /// [`parse_sample_filename`](crate::dayflow::sampler::parse_sample_filename)
+    /// so the two cannot drift), enqueues it for summarisation, and records
+    /// its files — so the pre-restart tail is SUMMARISED and then reclaimed
+    /// through the normal retention gate, not deleted unsummarised and not
+    /// leaked.
+    ///
+    /// **Only call this when resuming the SAME session.** The entries a
+    /// settle produces are filed under the session the loop serves; adopting
+    /// another session's samples would attribute its screen to this one.
+    /// Windows the loop already owns are never re-adopted.
+    ///
+    /// The window's walls are the first and last sample instants — the only
+    /// evidence that survived. `end_wall` therefore understates the window by
+    /// up to one sampling interval; honest, and marked by `CloseReason::Stopped`,
+    /// which is what actually ended it.
+    pub fn adopt_orphans(&mut self) -> usize {
+        let Ok(entries) = std::fs::read_dir(&self.sample_dir) else {
+            return 0;
+        };
+        type OrphanFiles = Vec<(DateTime<Utc>, PathBuf)>;
+        let mut orphans: std::collections::BTreeMap<(u32, u64), OrphanFiles> =
+            std::collections::BTreeMap::new();
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some((display, sequence, taken_at)) =
+                crate::dayflow::sampler::parse_sample_filename(name)
+            else {
+                continue;
+            };
+            let key = (display, sequence);
+            if self.samples.contains_key(&key) || self.summarized.contains(&key) {
+                continue; // already owned by THIS loop
+            }
+            orphans.entry(key).or_default().push((taken_at, path));
+        }
+        let adopted = orphans.len();
+        for ((display_id, sequence), mut files) in orphans {
+            files.sort();
+            let start_wall = files.first().map(|(t, _)| *t).unwrap_or_default();
+            let end_wall = files.last().map(|(t, _)| *t).unwrap_or(start_wall);
+            let window = ClosedWindow {
+                display_id,
+                sequence,
+                start_wall,
+                end_wall,
+                sample_count: files.len() as u32,
+                clock_anomaly: false,
+                last_sample_at: Some(end_wall),
+                reason: crate::dayflow::window::CloseReason::Stopped,
+            };
+            self.samples.insert(
+                (display_id, sequence),
+                files.into_iter().map(|(_, p)| p).collect(),
+            );
+            self.closed.push(window.clone());
+            self.scheduler.enqueue(window);
+        }
+        adopted
+    }
+
     /// Summarise every window that is due, returning the timeline entries.
     ///
     /// Called between ticks so summarisation happens DURING the session rather

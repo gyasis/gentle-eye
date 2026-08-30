@@ -131,6 +131,58 @@ pub fn resolve_range(
     Ok((from, to))
 }
 
+/// Resolve "every display" to CONCRETE indices, exactly once.
+///
+/// The single-enumeration invariant (W7 gate, D014-15): the run's ordinals,
+/// the capture thread's built sources, and the daemon's PERSISTED spec must
+/// all come from the same enumeration. Resolving in more than one place lets
+/// two enumerations disagree (a monitor unplugged in between), and persisting
+/// an UNRESOLVED `Displays { [] }` makes a restart re-resolve — which can name
+/// different displays than the session's own ordinals, silently dropping every
+/// sample filed under an ordinal the run does not know.
+///
+/// Any spec other than an empty display list is already resolved and passes
+/// through unchanged.
+pub fn resolve_source_spec(
+    spec: &crate::dayflow::source::SourceSpec,
+) -> Result<crate::dayflow::source::SourceSpec, DayflowError> {
+    Ok(match spec {
+        crate::dayflow::source::SourceSpec::Displays { indices } if indices.is_empty() => {
+            let indices = crate::capture::display::DisplayManager::list_available()
+                .map_err(|e| DayflowError::Invalid(format!("enumerating displays: {e}")))?
+                .iter()
+                .map(|d| d.index as u32)
+                .collect();
+            crate::dayflow::source::SourceSpec::Displays { indices }
+        }
+        other => other.clone(),
+    })
+}
+
+/// What a RESUMED session carries into [`DayflowService::start_with_source`].
+///
+/// Both fields exist for the same reason — a restarted daemon must not treat
+/// the dead process's on-disk record as if it never happened — so they travel
+/// together. `Default` is the fresh-session case: nothing to continue from,
+/// nothing to adopt.
+#[derive(Debug, Clone, Default)]
+pub struct ResumeCarry {
+    /// The NEXT window sequence per display, from the persisted high-water
+    /// marks (T022: sequences keep climbing, never collide).
+    pub next_sequences: std::collections::BTreeMap<u32, u64>,
+    /// Adopt the dead process's samples as summarisable windows. ONLY for a
+    /// resume of the session that wrote them — adopted summaries are filed
+    /// under the running session.
+    pub adopt_orphaned_samples: bool,
+    /// The resumed session's identity: its id and its ORIGINAL start.
+    ///
+    /// `DayflowRun::start` mints a fresh UUID — right for a fresh session,
+    /// wrong for a resume: the record would claim "the same session" while the
+    /// run files every entry under a different id. Applied before the capture
+    /// thread spawns, so no entry can carry the discarded identity.
+    pub identity: Option<(Uuid, DateTime<Utc>)>,
+}
+
 /// The single Dayflow engine, shared by every surface.
 pub struct DayflowService {
     run: Arc<Mutex<Option<DayflowRun>>>,
@@ -262,6 +314,25 @@ impl DayflowService {
         sample_dir: std::path::PathBuf,
         interval: std::time::Duration,
     ) -> Result<(), DayflowError> {
+        self.start_capture_adopting(build_sources, summarizer, sample_dir, interval, false)
+    }
+
+    /// [`start_capture`](Self::start_capture), optionally adopting samples a
+    /// dead process left in `sample_dir`.
+    ///
+    /// `adopt_orphaned_samples` must be `true` ONLY when the running session is
+    /// a RESUME of the session that wrote those samples: adoption files their
+    /// summaries under the current session id, and adopting another session's
+    /// samples would attribute its screen to this one. The daemon (the one
+    /// caller that resumes) passes its own resume decision here.
+    pub fn start_capture_adopting(
+        &self,
+        build_sources: Box<dyn FnOnce() -> Vec<Box<dyn crate::dayflow::source::CaptureSource>> + Send>,
+        summarizer: Arc<dyn crate::dayflow::summarizer::ChunkSummarizer + Send + Sync>,
+        sample_dir: std::path::PathBuf,
+        interval: std::time::Duration,
+        adopt_orphaned_samples: bool,
+    ) -> Result<(), DayflowError> {
         let mut guard = self
             .capture
             .lock()
@@ -296,6 +367,16 @@ impl DayflowService {
             // `status()` is called from another, so a loop-private counter
             // would always read zero to every surface.
             .with_read_whole_counter(read_whole);
+            if adopt_orphaned_samples {
+                // T022/W8-note-b: the dead process's samples become closed,
+                // summarisable windows of the RESUMED session instead of a
+                // permanent, retention-invisible leak.
+                let adopted = lp.adopt_orphans();
+                if adopted > 0 {
+                    tracing::info!(adopted,
+                        "adopted pre-restart windows for summarisation and retention");
+                }
+            }
             // The summarizer is async (the perception ladder); this thread is
             // not. A current-thread runtime keeps the capture thread the sole
             // owner of the loop (D014-10) while still able to await it.
@@ -507,29 +588,48 @@ impl DayflowService {
         spec: crate::dayflow::source::SourceSpec,
         summarizer: Arc<dyn crate::dayflow::summarizer::ChunkSummarizer + Send + Sync>,
         sample_dir: std::path::PathBuf,
+        resume: &ResumeCarry,
         now: DateTime<Utc>,
     ) -> Result<Uuid, DayflowError> {
-        let resolved = match &spec {
-            crate::dayflow::source::SourceSpec::Displays { indices } if indices.is_empty() => {
-                let indices = crate::capture::display::DisplayManager::list_available()
-                    .map_err(|e| DayflowError::Invalid(format!("enumerating displays: {e}")))?
-                    .iter()
-                    .map(|d| d.index as u32)
-                    .collect();
-                crate::dayflow::source::SourceSpec::Displays { indices }
-            }
-            other => other.clone(),
-        };
+        let resolved = resolve_source_spec(&spec)?;
         // `start_session` derives the run's ordinals from the SAME resolved
         // spec the thread will build from, and names the sources in `status`
         // (availability `None` until the first tick republishes what the loop
         // actually observes).
-        let id = self.start_session(mode, resolved.clone(), now)?;
+        let mut id = self.start_session(mode, resolved.clone(), now)?;
+        // A RESUME continues the recorded session, not a freshly-minted one.
+        if let Some((session_id, started_at)) = resume.identity {
+            self.with_run(|r| r.adopt_identity(session_id, started_at))?;
+            id = session_id;
+        }
+        // T022: sequences keep climbing across a restart instead of colliding
+        // with what is already on disk. Two seed sources, merged monotonically:
+        // the caller's persisted high-water marks (`resume_sequences` holds the
+        // NEXT sequence per display), and the samples already in `sample_dir` —
+        // filenames carry no session id, so a reused `(display, sequence)`
+        // resolves a dead process's files into a new window's summary. The disk
+        // scan covers a state file that was lost or written late; the samples
+        // themselves are the evidence that survives. Seeded HERE, before the
+        // capture thread spawns, because the first tick may take a sample
+        // immediately — seeding after the spawn is a race.
+        let mut seeds = resume.next_sequences.clone();
+        for (display, max_on_disk) in
+            crate::dayflow::sampler::max_sequences_on_disk(&sample_dir)
+        {
+            let next = max_on_disk.saturating_add(1);
+            let e = seeds.entry(display).or_insert(next);
+            if next > *e {
+                *e = next;
+            }
+        }
+        if !seeds.is_empty() {
+            self.with_run(|r| r.seed_next_sequences(seeds.clone()))?;
+        }
         let interval = self
             .with_run(|r| r.sampling_interval(&self.config))
             .unwrap_or_else(|_| std::time::Duration::from_secs(60));
         let scratch = sample_dir.clone();
-        if let Err(e) = self.start_capture(
+        if let Err(e) = self.start_capture_adopting(
             Box::new(move || {
                 crate::dayflow::source::build_sources(&resolved, &scratch).unwrap_or_else(|err| {
                     // A source that cannot be built is a session that records
@@ -546,6 +646,7 @@ impl DayflowService {
             summarizer,
             sample_dir,
             interval,
+            resume.adopt_orphaned_samples,
         ) {
             // Do not leave a session claiming to run with no capture behind it.
             let _ = self.stop(now);

@@ -173,6 +173,29 @@ impl WindowController {
         self.interval
     }
 
+    /// Seed the NEXT sequence per display, for a session resuming a restart.
+    ///
+    /// Sequences are the durable half of a window's identity — sample files
+    /// and timeline rows both key on `(display, sequence)` — and this
+    /// controller starts every display at 0. A resumed session that restarts
+    /// at 0 reuses identities a dead process already wrote to disk, and
+    /// `samples_for` then merges the predecessor's screen into the new
+    /// window's summary (T022: sequences keep climbing, never collide).
+    ///
+    /// Monotonic like [`DaemonState::note_sequence`](crate::dayflow::daemon::DaemonState::note_sequence):
+    /// a seed never LOWERS what is already recorded, so seeding after samples
+    /// have flowed (or seeding twice) cannot make sequences go backwards.
+    /// Displays with an already-open window are not re-numbered — their
+    /// identity is already spent.
+    pub fn seed_next_sequences<I: IntoIterator<Item = (u32, u64)>>(&mut self, seeds: I) {
+        for (display_id, next) in seeds {
+            let e = self.next_sequence.entry(display_id).or_insert(next);
+            if next > *e {
+                *e = next;
+            }
+        }
+    }
+
     /// Whether capture is currently paused, and why.
     pub fn pause_cause(&self) -> Option<PauseCause> {
         self.paused.as_ref().map(|p| p.cause)

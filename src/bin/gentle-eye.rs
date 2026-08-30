@@ -1113,10 +1113,26 @@ async fn run_dayflow(args: &[String]) -> Result<()> {
     // while the daemon captures, and its `start` creates a second session
     // nothing else can see.
     let store = gentle_eye::dayflow::daemon::DaemonStateStore::new(daemon_state_path()?);
-    if let Some(client) = gentle_eye::dayflow::client::DaemonClient::discover(&store) {
-        let body = dayflow_remote(&client, args)?;
-        println!("{body}");
-        return Ok(());
+    match gentle_eye::dayflow::client::DaemonClient::probe(&store) {
+        gentle_eye::dayflow::client::Discovery::Live(client) => {
+            let body = dayflow_remote(&client, args)?;
+            println!("{body}");
+            return Ok(());
+        }
+        gentle_eye::dayflow::client::Discovery::Stale { port } => {
+            // A record exists but its port did not answer: a crashed daemon's
+            // leftovers, or a live one too wedged to reply. Falling back to a
+            // local view is the only usable behaviour, but doing it SILENTLY
+            // would report "not running" about a session that may be running —
+            // say what was found.
+            eprintln!(
+                "warning: a dayflow daemon record names port {port} but nothing answered \
+                 there; answering from a local view instead. If a daemon is running, it is \
+                 wedged; if it crashed, the record is stale and the next `dayflow serve` \
+                 will resume the session."
+            );
+        }
+        gentle_eye::dayflow::client::Discovery::NoDaemon => {}
     }
 
     let server = GentleEyeServer::new().await?;
@@ -1242,7 +1258,7 @@ fn daemon_state_path() -> Result<std::path::PathBuf> {
     let root = AppConfig::load()
         .map(|c| c.storage.base_dir)
         .map_err(|e| anyhow!("config error: {e}"))?;
-    Ok(root.join("dayflow-daemon.json"))
+    Ok(gentle_eye::dayflow::daemon::state_path_under(&root))
 }
 
 /// Run the daemon: own the session, serve the surfaces.
@@ -1254,10 +1270,7 @@ async fn run_dayflow_serve(args: &[String]) -> Result<()> {
         .unwrap_or(7431);
 
     let server = GentleEyeServer::new().await?;
-    let daemon = gentle_eye::dayflow::daemon::Daemon::new(
-        daemon_state_path()?,
-        std::sync::Arc::clone(server.dayflow()),
-    );
+    let cfg = AppConfig::load().map_err(|e| anyhow!("config error: {e}"))?;
 
     let displays = match flag(args, "--displays") {
         Some(list) => Some(
@@ -1276,9 +1289,76 @@ async fn run_dayflow_serve(args: &[String]) -> Result<()> {
     )
     .map_err(|e| anyhow!(e))?;
 
+    // The PRODUCTION summariser (T022): the two configured perception tiers,
+    // resolving samples in the SAME directory the loop writes them (the
+    // invariant `the_production_summarizer_finds_the_loops_sidecars_and_crops`
+    // pins), with the configured residency applied AT CONSTRUCTION — without
+    // `.with_residency`, `ResidencyPolicy::Resident` is a policy the running
+    // system cannot express (T020's W8 note).
+    let p = cfg.dayflow.perception.clone();
+    let tier = |model: &str| -> Result<std::sync::Arc<dyn gentle_eye::contracts::traits::VisionProvider>> {
+        let vc = gentle_eye::contracts::traits::VisionConfig {
+            provider: "ollama".to_string(),
+            api_key: None,
+            model: model.to_string(),
+            timeout_seconds: cfg.vision.timeout_seconds,
+            max_video_size_bytes: 0, // 0 => provider default
+        };
+        Ok(std::sync::Arc::new(
+            gentle_eye::analysis::OllamaProvider::with_url(&vc, p.endpoint.clone())
+                .map_err(|e| anyhow!("perception provider: {e}"))?,
+        ))
+    };
+    let interval = cfg
+        .dayflow
+        .sampling
+        .interval_for(gentle_eye::dayflow::models::DayflowMode::Daemon);
+    // A COUNT for the budget, not an identity — the run's actual ordinals are
+    // resolved once, inside the daemon (the W7 single-enumeration invariant).
+    let display_count = {
+        let ords = spec.ordinals();
+        if ords.is_empty() {
+            gentle_eye::capture::display::DisplayManager::list_available()
+                .map(|d| d.len().max(1))
+                .unwrap_or(1) as u32
+        } else {
+            ords.len() as u32
+        }
+    };
+    let budget = gentle_eye::dayflow::perception::dayflow_budget(
+        interval.as_secs(),
+        display_count,
+        p.max_regions_per_segment,
+    );
+    let router = std::sync::Arc::new(gentle_eye::dayflow::perception::PerceptionRouter::new(
+        tier(&p.text_model)?,
+        tier(&p.reason_model)?,
+        budget,
+    ));
+    let sample_dir = cfg.storage.base_dir.join("dayflow-samples");
+    std::fs::create_dir_all(&sample_dir)
+        .map_err(|e| anyhow!("cannot create {}: {e}", sample_dir.display()))?;
+    let summarizer = gentle_eye::dayflow::summarizer::RoutedChunkSummarizer::new(
+        std::sync::Arc::clone(&router),
+        &sample_dir,
+    )
+    .with_max_regions(p.max_regions_per_segment as usize)
+    .with_residency(p.residency, cfg.dayflow.segment_duration());
+
+    let daemon = std::sync::Arc::new(
+        gentle_eye::dayflow::daemon::Daemon::new(
+            daemon_state_path()?,
+            std::sync::Arc::clone(server.dayflow()),
+        )
+        .with_capture(std::sync::Arc::new(summarizer), sample_dir),
+    );
+
     // Refuse to become a SECOND daemon over the same state file. Two daemons
     // interleave their sequences into one timeline and each overwrites the
-    // other's record, with nothing reporting the collision.
+    // other's record, with nothing reporting the collision. The probe names
+    // the live peer for a friendly error; the OS lock is what actually closes
+    // the race — two daemons starting simultaneously both pass the probe,
+    // because neither has published a port yet.
     if let Some(live) = daemon.live_peer_port() {
         return Err(anyhow!(
             "a dayflow daemon is already serving on port {live}. \
@@ -1286,6 +1366,7 @@ async fn run_dayflow_serve(args: &[String]) -> Result<()> {
              a second daemon would interleave its windows into the same timeline."
         ));
     }
+    daemon.lock_exclusive()?;
 
     let now = Utc::now();
     let (id, decision) = daemon.start_or_resume(
@@ -1293,20 +1374,16 @@ async fn run_dayflow_serve(args: &[String]) -> Result<()> {
         spec,
         now,
     )?;
-
-    // The interruption between the previous process and this one is a RECORDED
-    // fact. Without it the hole reads as a quiet afternoon.
-    if decision == gentle_eye::dayflow::daemon::ResumeDecision::Resumed {
-        if let Ok(Some(prior)) = daemon.store().load() {
-            if let Err(e) = daemon.record_interruption(id, prior.updated_at, now) {
-                tracing::warn!(error = %e, "could not record the restart gap");
-            }
-        }
-    }
+    // The restart gap is recorded INSIDE start_or_resume, from the prior
+    // record's own updated_at — reading the state back here, after the save,
+    // dated the gap `now`→`now`: a zero-width interval no timeline shows.
 
     let listener = gentle_eye::dayflow::http::bind(port)
         .map_err(|e| anyhow!("cannot bind port {port}: {e}"))?;
     daemon.publish_port(port)?;
+    // Keep the persisted sequence marks fresh while the session runs: a
+    // restart can only continue from what was WRITTEN.
+    let _keeper = daemon.spawn_state_keeper(std::time::Duration::from_secs(30));
     println!(
         "{}",
         serde_json::json!({
@@ -1315,7 +1392,7 @@ async fn run_dayflow_serve(args: &[String]) -> Result<()> {
             "port": port,
         })
     );
-    gentle_eye::dayflow::http::serve(listener, std::sync::Arc::clone(server.dayflow()));
+    gentle_eye::dayflow::http::serve_daemon(listener, daemon);
     Ok(())
 }
 
@@ -1362,19 +1439,11 @@ fn dayflow_remote(
     }
 }
 
-/// Percent-encode a query value. Small and local: the alternative is a
-/// dependency for five routes against localhost.
+/// Percent-encode a query value — the ONE encoder, shared with the MCP
+/// surface so the two attached paths cannot send different bytes for the same
+/// question (R37/R40).
 fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    gentle_eye::dayflow::client::urlencode(s)
 }
 
 

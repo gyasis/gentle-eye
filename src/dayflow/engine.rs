@@ -194,6 +194,30 @@ impl DayflowRun {
         self.windows.current_sequence(display_id)
     }
 
+    /// Seed the next window sequence per display, for a resumed session.
+    ///
+    /// Call BEFORE any sample flows: a restart that reuses sequences a dead
+    /// process already wrote collides on the durable `(display, sequence)`
+    /// identity — see [`WindowController::seed_next_sequences`].
+    pub fn seed_next_sequences<I: IntoIterator<Item = (u32, u64)>>(&mut self, seeds: I) {
+        self.windows.seed_next_sequences(seeds);
+    }
+
+    /// Adopt a RESUMED session's identity: the id and true start of the
+    /// session this run CONTINUES (T022).
+    ///
+    /// `start` mints a fresh UUID, which is right for a fresh session and
+    /// wrong for a resume: the daemon's record would say "the same session"
+    /// while every entry the run settles files under a DIFFERENT id, and the
+    /// restart gap keys to the one the entries do not use — one session with
+    /// two identities, diverging silently (013/R29). Call before any entry is
+    /// produced; the resume decision guarantees `started_at` is the same day.
+    pub fn adopt_identity(&mut self, session_id: Uuid, started_at: DateTime<Utc>) {
+        self.session_id = session_id;
+        self.started_at = started_at;
+        self.day = started_at.date_naive();
+    }
+
     pub fn on_sample(&mut self, display_id: u32, now: DateTime<Utc>) -> Option<ClosedWindow> {
         // Enforce the cap before accepting the sample: a bounded session must not
         // record past its own limit just because something kept feeding it.

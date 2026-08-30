@@ -454,6 +454,57 @@ fn sample_filename(display_id: u32, sequence: u64, taken_at: DateTime<Utc>) -> S
     )
 }
 
+/// Parse a sample filename back into `(display_id, sequence, taken_at)`.
+///
+/// The INVERSE of [`sample_filename`], kept beside it so the two cannot drift:
+/// a parser written anywhere else would re-encode the naming rule, and the
+/// naming rule is what a restarted daemon has to read its predecessor's
+/// samples by — the in-memory ownership map died with the process (T022).
+///
+/// Returns `None` for anything that is not a sample: sidecars, temp files,
+/// foreign files. Refusing quietly is correct here — the caller is scanning a
+/// directory, not validating an input.
+pub fn parse_sample_filename(name: &str) -> Option<(u32, u64, DateTime<Utc>)> {
+    let rest = name.strip_prefix('d')?;
+    let (display, rest) = rest.split_once("_w")?;
+    let display: u32 = display.parse().ok()?;
+    let (sequence, rest) = rest.split_once('_')?;
+    let sequence: u64 = sequence.parse().ok()?;
+    let stamp = rest.strip_suffix(".png")?;
+    let taken_at = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S%3f")
+        .ok()?
+        .and_utc();
+    Some((display, sequence, taken_at))
+}
+
+/// The highest sample sequence already ON DISK per display.
+///
+/// A restarted daemon must not reuse a sequence a dead process already wrote:
+/// sample filenames carry no session id, so `samples_for` resolves a window's
+/// files by `(display, sequence)` PREFIX alone — a reused sequence silently
+/// merges a predecessor's screen into a new window's summary. The persisted
+/// high-water mark ([`DaemonState::last_sequence`](crate::dayflow::daemon::DaemonState))
+/// covers the common case; this scan covers the state file being lost or never
+/// written, because the samples themselves are the evidence that survives.
+pub fn max_sequences_on_disk(dir: &std::path::Path) -> std::collections::BTreeMap<u32, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        // No directory yet: nothing on disk to collide with.
+        return out;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if let Some((display, sequence, _)) = parse_sample_filename(name) {
+            let e = out.entry(display).or_insert(sequence);
+            if sequence > *e {
+                *e = sequence;
+            }
+        }
+    }
+    out
+}
+
 /// Downscale a BGRA frame to a greyscale buffer `target_width` px wide.
 ///
 /// Nearest-neighbour on purpose: this buffer is only ever compared against

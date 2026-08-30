@@ -75,6 +75,105 @@ fn handle(mut stream: TcpStream, service: &DayflowService) -> std::io::Result<()
     )
 }
 
+/// Serve on behalf of a DAEMON: mutating routes go through the daemon.
+///
+/// The plain [`serve`] routes `/dayflow/start` and `/dayflow/stop` straight to
+/// the service, which is correct for a service with no durable state — and
+/// silently wrong for a daemon: a client's `stop` would end the session while
+/// the state file kept claiming it runs, so the next `serve` RESUMES a session
+/// the user deliberately stopped, and a client's `start` would begin a session
+/// the state file never records, so a crash loses it. T023's requirement is
+/// exactly ONE state store; a surface that mutates the session without going
+/// through the store's owner is a second, silent one.
+pub fn serve_daemon(listener: TcpListener, daemon: std::sync::Arc<crate::dayflow::daemon::Daemon>) {
+    for stream in listener.incoming().flatten() {
+        // Same read-timeout mitigation and panic guard as `serve` — see the
+        // comments there.
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+        let d = std::sync::Arc::clone(&daemon);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            handle_daemon(stream, &d)
+        }));
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "dayflow http request failed"),
+            Err(_) => tracing::error!("dayflow http request PANICKED; surface continues"),
+        }
+    }
+}
+
+fn handle_daemon(
+    mut stream: TcpStream,
+    daemon: &crate::dayflow::daemon::Daemon,
+) -> std::io::Result<()> {
+    let mut line = String::new();
+    BufReader::new(&stream).read_line(&mut line)?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("/");
+
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (code, body) = route_daemon_at(method, path, query, daemon, Utc::now());
+    write!(
+        stream,
+        "HTTP/1.1 {code}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// [`route_at`], with the two mutating routes redirected through the daemon so
+/// the state file tracks what the session actually is.
+pub fn route_daemon_at(
+    method: &str,
+    path: &str,
+    query: &str,
+    daemon: &crate::dayflow::daemon::Daemon,
+    now: DateTime<Utc>,
+) -> (&'static str, String) {
+    match path {
+        "/dayflow/start" => {
+            if method != "POST" {
+                return (
+                    "405 Method Not Allowed",
+                    json_err("start and stop change state and require POST"),
+                );
+            }
+            match parse_start_query(query) {
+                Err(e) => ("400 Bad Request", json_err(&e)),
+                Ok((mode, spec)) => match daemon.start_or_resume(mode, spec, now) {
+                    Ok((id, decision)) => (
+                        "200 OK",
+                        serde_json::json!({
+                            "session_id": id.to_string(),
+                            "resume": format!("{decision:?}"),
+                        })
+                        .to_string(),
+                    ),
+                    Err(e) => ("400 Bad Request", json_err(&e.to_string())),
+                },
+            }
+        }
+        "/dayflow/stop" => {
+            if method != "POST" {
+                return (
+                    "405 Method Not Allowed",
+                    json_err("start and stop change state and require POST"),
+                );
+            }
+            match daemon.stop(now) {
+                Ok(closed) => (
+                    "200 OK",
+                    serde_json::json!({ "windows_closed": closed }).to_string(),
+                ),
+                Err(e) => ("409 Conflict", json_err(&e.to_string())),
+            }
+        }
+        _ => route_at(method, path, query, daemon.service(), now),
+    }
+}
+
 /// Resolve one request to a status line and a JSON body.
 ///
 /// Separate from the socket so the ROUTING — which is the part that can be
@@ -190,6 +289,18 @@ pub fn route_at(
 }
 
 fn start_from_query(query: &str, service: &DayflowService, now: DateTime<Utc>) -> Result<String, String> {
+    let (mode, spec) = parse_start_query(query)?;
+    service
+        .start_session(mode, spec, now)
+        .map(|id| id.to_string())
+        .map_err(|e| e.to_string())
+}
+
+/// Parse a `/dayflow/start` query into `(mode, spec)`, shared by the plain
+/// route and the daemon route so the two cannot accept different grammars.
+fn parse_start_query(
+    query: &str,
+) -> Result<(crate::dayflow::models::DayflowMode, crate::dayflow::source::SourceSpec), String> {
     let mode = match param(query, "mode").as_deref() {
         None | Some("session") => crate::dayflow::models::DayflowMode::Session,
         Some("daemon") => crate::dayflow::models::DayflowMode::Daemon,
@@ -211,10 +322,7 @@ fn start_from_query(query: &str, service: &DayflowService, now: DateTime<Utc>) -
         param(query, "target"),
         param(query, "input"),
     )?;
-    service
-        .start_session(mode, spec, now)
-        .map(|id| id.to_string())
-        .map_err(|e| e.to_string())
+    Ok((mode, spec))
 }
 
 fn param(query: &str, key: &str) -> Option<String> {
