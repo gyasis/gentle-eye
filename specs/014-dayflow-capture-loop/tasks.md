@@ -90,9 +90,9 @@ line says so.
 
 ## Phase 9: User Story 3 — a real answer (P2)
 
-- [ ] T024 [US3] Replace `ask_day`'s stub answerer with a call through the governed lane at the reasoning tier.
+- [x] T024 [US3] Replace `ask_day`'s stub answerer with a call through the governed lane at the reasoning tier.
       `> DONE:` a range WITH records returns prose naming what those entries contain, on all three surfaces.
-- [ ] T025 [S] [US3] The refusal path is unchanged and still consults NO model on an empty range.
+- [x] T025 [S] [US3] The refusal path is unchanged and still consults NO model on an empty range.
       `> DONE:` the existing test still passes unmodified; an answer carries its grounding, so confident prose with empty grounding stays detectable. `cargo check` + clippy = 0.
 
 ## Phase 10: Polish
