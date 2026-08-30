@@ -2403,3 +2403,173 @@ fn the_capture_thread_sweeps_retention_on_a_schedule() {
          `sweep_retention` is an orphan the running system cannot reach"
     );
 }
+
+
+/// A shrunk window must not be re-planned forever. After a sweep executes a
+/// Shrink, the record shows raw gone (`samples` cleared) while `closed` still
+/// holds the window — a SECOND sweep must read that as Cold/nothing-to-do,
+/// not as a fresh Shrink of a segment whose bytes are already zero. The
+/// load-bearing line is `self.samples.remove(&key)`: without it the record
+/// keeps a non-empty `raw` of dead paths, reads as Hot forever, and every
+/// sweep re-decides a Shrink that frees nothing.
+#[tokio::test]
+async fn a_shrunk_window_is_not_replanned_by_the_next_sweep() {
+    let (mut run, cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..200).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    let sources: Vec<Box<dyn CaptureSource>> = vec![Box::new(FakeSource::new(0, script))];
+    let mut lp = CaptureLoop::new(sources, Sampler::new(DeltaConfig::default()), dir.path());
+
+    let segment = cfg.segment_seconds as i64;
+    let mut t = 0i64;
+    for _ in 0..30 {
+        t += segment / 3;
+        lp.tick(&mut run, at(t));
+    }
+    let summarizer = FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 };
+    let entries = lp.settle_due(&summarizer, uuid::Uuid::new_v4(), at(t)).await;
+    assert!(!entries.is_empty(), "nothing settled");
+
+    let retention = RetentionConfig::default();
+    let later = at(t) + chrono::Duration::from_std(retention.hot).unwrap() + Duration::hours(1);
+    let first = lp.sweep_retention(&retention, later);
+    let shrunk: Vec<(u32, u64)> = first
+        .iter()
+        .filter(|d| d.action == Action::Shrink)
+        .map(|d| (d.display_id, d.sequence))
+        .collect();
+    assert!(!shrunk.is_empty(), "the first sweep shrank nothing — the fixture proves nothing");
+
+    let second = lp.sweep_retention(&retention, later + Duration::minutes(1));
+    for d in &second {
+        if shrunk.contains(&(d.display_id, d.sequence)) {
+            assert_eq!(
+                d.action,
+                Action::Keep(gentle_eye::dayflow::retention::Refusal::NothingToReclaim),
+                "window ({}, {}) was already shrunk yet the next sweep decided {:?} — \
+                 the record still reads as Hot and will be re-planned forever",
+                d.display_id, d.sequence, d.action
+            );
+        }
+    }
+}
+
+/// A Shrink reclaims the region SIDECAR beside each sample, not only the
+/// sample. The sidecar describes pixels that no longer exist once the sample
+/// is gone, and nothing else ever deletes it — leaving it grows one orphan
+/// JSON per reclaimed sample for the life of the directory.
+#[tokio::test]
+async fn a_sweep_reclaims_the_region_sidecars_beside_the_samples() {
+    let (mut run, cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..200).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    let mut src = FakeSource::new(0, script);
+    src.regions = Some(boxes(2));
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let segment = cfg.segment_seconds as i64;
+    let mut t = 0i64;
+    for _ in 0..30 {
+        t += segment / 3;
+        lp.tick(&mut run, at(t));
+    }
+    let summarizer = FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 };
+    let entries = lp.settle_due(&summarizer, uuid::Uuid::new_v4(), at(t)).await;
+    assert!(!entries.is_empty(), "nothing settled");
+
+    // Snapshot the raw paths BEFORE the sweep clears them from the record.
+    let pre: Vec<gentle_eye::dayflow::retention::SegmentRecord> = lp.segments();
+
+    let retention = RetentionConfig::default();
+    let later = at(t) + chrono::Duration::from_std(retention.hot).unwrap() + Duration::hours(1);
+    let decisions = lp.sweep_retention(&retention, later);
+    let mut checked = 0usize;
+    for d in decisions.iter().filter(|d| d.action == Action::Shrink) {
+        let seg = pre
+            .iter()
+            .find(|s| s.key() == (d.display_id, d.sequence))
+            .expect("a Shrink decision names a segment the pre-sweep record holds");
+        for raw in &seg.raw {
+            assert!(!raw.exists(), "sample {} survived its Shrink", raw.display());
+            let side = gentle_eye::dayflow::perception::regions_path(raw);
+            assert!(!side.exists(),
+                "orphan sidecar {} left behind after its sample was reclaimed", side.display());
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no reclaimed sample had a sidecar to check — the fixture proves nothing");
+}
+
+/// Provenance names the arrangement the window OPENED with — the FIRST
+/// sample's sidecar — and the fixture actually produces the condition: the
+/// layout CHANGES after the first sample, so first and later samples yield
+/// different rank-0 identities and reading the wrong sidecar is visible.
+#[tokio::test]
+async fn provenance_names_the_first_samples_layout_when_it_changes_mid_window() {
+    /// Regions shift after the first cascade answer.
+    struct ShiftingRegions {
+        inner: FakeSource,
+        calls: std::cell::Cell<u32>,
+    }
+    impl CaptureSource for ShiftingRegions {
+        fn next_frame(&mut self) -> Result<SourceFrame, SourceError> {
+            self.inner.next_frame()
+        }
+        fn regions_for(&self, _f: &SourceFrame) -> Option<Vec<Region>> {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            let y = if n == 0 { 0 } else { 16 };
+            Some(vec![Region::new(
+                PixelRect { x: 0, y, w: 32, h: 8 },
+                RegionSource::Wm,
+                Granularity::Pane,
+                1.0,
+            )
+            .on_display(0)])
+        }
+        fn availability(&self) -> Availability {
+            self.inner.availability()
+        }
+        fn identity(&self) -> SourceIdentity {
+            self.inner.identity()
+        }
+        fn ordinal(&self) -> u32 {
+            self.inner.ordinal()
+        }
+    }
+
+    let (mut run, cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..200).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    let src = ShiftingRegions { inner: FakeSource::new(0, script), calls: std::cell::Cell::new(0) };
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let segment = cfg.segment_seconds as i64;
+    let mut t = 0i64;
+    let mut samples_in_window = 0;
+    for _ in 0..12 {
+        t += segment / 3;
+        samples_in_window += 1;
+        if !lp.tick(&mut run, at(t)).closed.is_empty() {
+            break;
+        }
+    }
+    assert!(samples_in_window >= 2, "one-sample window: first and later are the same sidecar \
+             and this test cannot discriminate");
+
+    let summarizer = FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 };
+    let entries = lp.settle_due(&summarizer, uuid::Uuid::new_v4(), at(t)).await;
+    assert!(!entries.is_empty());
+    let p = entries[0].provenance.as_ref().expect("non-null provenance");
+
+    let first_layout = Region::new(PixelRect { x: 0, y: 0, w: 32, h: 8 }, RegionSource::Wm, Granularity::Pane, 1.0).on_display(0);
+    let later_layout = Region::new(PixelRect { x: 0, y: 16, w: 32, h: 8 }, RegionSource::Wm, Granularity::Pane, 1.0).on_display(0);
+    assert_ne!(first_layout.identity(), later_layout.identity(), "fixture layouts collide");
+    assert_eq!(
+        p.region_id,
+        first_layout.identity(),
+        "provenance must name the FIRST sample's layout (the arrangement the window opened \
+         with), not a later sample's"
+    );
+    assert_ne!(p.region_id, later_layout.identity());
+}

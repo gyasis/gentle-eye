@@ -474,6 +474,22 @@ mod tests {
         }
     }
 
+    /// The ONE production provider that implements the channel must actually
+    /// STORE the hint — the trait's default is a no-op, so deleting this
+    /// override would compile, pass every request-body unit test (they take
+    /// the value as a parameter), and silently turn `Resident` back into a
+    /// policy the running system cannot express (W8 gate; mutation
+    /// "remove the override" survived the suite before this test).
+    #[test]
+    fn set_keep_alive_stores_the_value_the_request_path_reads() {
+        let p = OllamaProvider::with_url(&cfg(), "http://host:11434").unwrap();
+        assert_eq!(p.keep_alive(), None, "unmanaged until a caller asks");
+        p.set_keep_alive(Some("1860s".to_string()));
+        assert_eq!(p.keep_alive().as_deref(), Some("1860s"));
+        p.set_keep_alive(None);
+        assert_eq!(p.keep_alive(), None, "a later None must clear it, not linger");
+    }
+
     #[test]
     fn new_applies_defaults_and_trims_url() {
         let p = OllamaProvider::with_url(&cfg(), "http://host:11434/").unwrap();
