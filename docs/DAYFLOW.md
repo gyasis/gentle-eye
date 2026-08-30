@@ -36,6 +36,46 @@ Consequences that follow from D9:
   and are eventually shrunk and evicted (see Retention); timeline entries are never
   evicted.
 
+## What it captures: a source, not a screen
+
+Dayflow captures a **source**. A source is one of two co-equal kinds:
+
+- an **input taken** — a stream URL, a capture card, an IP camera. Content that may never
+  have been rendered on this machine's screen.
+- a **display consumed** — a whole screen, a named window, or a saved target region.
+
+Neither is the special case. The loop depends on the `CaptureSource` trait and never
+matches on the kind, so a new kind is added by writing an implementor and changing nothing
+else (FR-111a, D014-1). That claim is tested against reality rather than asserted: the live
+input test reads a word back out of a synthetic video file that was never on this desktop.
+
+| kind | what you point it at | regions |
+|---|---|---|
+| `--displays 0,1` | whole screens (the default) | from the region cascade |
+| `--window <label>` | one window, by title or class | the cascade's, clipped to the window |
+| `--target <name>` | a saved normalised region | the cascade's, clipped to the target |
+| `--input <url>` | a stream or capture device | **none** — see below |
+
+An input reports **no regions, honestly**. There is no window manager to ask about a video
+feed, and synthesising a whole-frame region would be indistinguishable from a real
+detection — the whole-frame read would then be invisible. So `regions_for` returns `None`,
+no sidecar is written, and the sample is counted into `samples_read_whole`, which `status`
+reports (FR-103, D014-3).
+
+### `display_id` means "which source", not "which monitor"
+
+This is a **redefinition** (D014-2) and it matters when reading stored rows. The durable
+key has always been `(session, display_id, sequence)`. With sources, `display_id` holds the
+source's **ordinal** — its position in the session's source list. For a display session
+that is still the monitor index, which is why no schema changed and no migration was
+needed. For a window, target or input session, ordinal `0` is *that source*, and is **not**
+display 0.
+
+A stored row therefore says which source produced it, not which physical monitor. `status`
+carries the `sources` array — kind, name and live availability — so a timeline can always
+say what it is a record *of*; `displays` alone cannot, because a window session and a
+display session look identical there.
+
 ## The two intents: Activity and Content
 
 A run is started with one of two intents (D12). They are **either/or, chosen at start**,

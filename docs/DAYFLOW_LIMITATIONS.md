@@ -9,94 +9,44 @@ that is written, documented, unit-tested — and called by nothing, with every t
 (six escalating occurrences, R24/R28/R29). A checkbox that implies more than the code does
 is a lie told to the next reader, so the gaps are written down here instead.
 
-## The big one: no live capture loop yet
+## Closed by feature 014 (the capture loop)
 
-The engine (`DayflowRun`), the daemon's durable state, the sampler, the window controller,
-the perception ladder and the retention rules are all built and mutation-tested — **but
-nothing yet wires them to real hardware in a running binary** (T018/T019 SCOPE notes:
-`daemon.rs` is an island; the types are not called from a running process). Several items
-below are downstream consequences of this one seam. It closes when the capture-loop task
-lands; T051 (the `#[ignore]`d live validation answering "what was I doing at 2pm?"
-against real displays and real perception) is the acceptance test for it, and it has not
-been run green. **A green `cargo test` alone does not certify this feature.**
+The item that used to head this file — *"no live capture loop yet"* — is **closed**.
+`CaptureLoop` drives the pipeline, `gentle-eye dayflow serve` runs it as a daemon that
+owns the session across restarts, and the live validation has been run green against
+three real displays, real models and a real input.
+
+Six itemised gaps went with it and have been **removed from this ledger rather than left
+standing**: the missing `.regions.json` producer, `Resident` being inexpressible,
+`ask_day`'s stub answerer, cross-process `start`/`stop`/`status`, retention never being
+called on a schedule, and provenance never reaching an entry. What replaced each is in
+`specs/014-dayflow-capture-loop/research.md` (D014-1 … D014-15).
+
+**A green `cargo test` still does not certify the whole feature.** The parts that need
+real hardware are `#[ignore]`d and must be run deliberately — see *What only a live run
+certifies*, below.
 
 ## The itemised gaps
 
-### 1. Nothing writes the `.regions.json` sidecar
+### 1. The durable window ledger is unwired
 
-The crop-before-extract path (T027) consumes a `<sample>.regions.json` sidecar written at
-capture time — because the region cascade runs when the frame is taken, while
-summarization happens at segment close, and re-detecting later would describe a different
-moment than the pixels do. **No producer exists yet**; the capture loop owes it.
+`dayflow_segments` and `dayflow_samples` exist in the sqlite schema — and that schema's
+own comment says liveness and eviction "must be answerable from rows another process
+wrote" — but **nothing reads or writes them**. The capture loop keeps `closed`,
+`samples` and `summarized` in memory, so what a restarted daemon knows about the previous
+process comes from adoption (reconstructing windows from the samples on disk) rather than
+from a ledger. Adoption is the mitigation; the ledger is the fix. No task in feature 014
+owns it.
 
-Why it is invisible: the path fails **open** (a missing sidecar means the frame is read
-whole rather than dropped — correct, per the never-lose-a-sample rule), so its absence
-produces no error, ever. Every test passes while T027's entire benefit — correct per-pane
-reading order, no column scramble, no misread digits — is silently absent.
-`SegmentLatency::samples_read_whole` counts the degradation so it is at least measurable.
-Closes with the capture loop, which must name this file as a deliverable.
+### 2. Cropping works only on display 0
 
-### 2. `Resident` is a policy the running system cannot express
+The region cascade's WM provider tags every region `display_id: 0` in root coordinates,
+so on a multi-monitor desk only display 0 gets a usable sidecar. Displays 1 and 2 are
+**visibly** degraded rather than silently: they write no sidecar, and every one of their
+samples is counted into `samples_read_whole`, which `status` reports on all three
+surfaces. Closes when the cascade attributes real per-display origins.
 
-`ResidencyPolicy::keep_alive` computes the right value against the right cadence (the
-segment gap, not the sample interval — itself a fixed bug, R28), and the governor honours
-`keep_alive` per request (R27). But `VisionProvider::analyze_image(path, prompt)` **has no
-parameter to carry it**, so nothing sends it: the effective residency is always
-`OnDemand`, whatever the config says. Closes with a provider-level signature change.
-Mitigating fact: at the default cadence the burst pattern makes `OnDemand`'s cold-load
-overhead ~0.4%, so the default behaviour is the intended one — only the `resident` knob is
-aspirational.
-
-### 3. `ask_day`'s answerer is a stub on every surface
-
-The grounding rules are real and enforced — an empty range returns
-`"No activity was recorded for that period."` without consulting anything, and the
-`grounding` array always accompanies the answer. But no model is wired behind the prompt:
-a non-empty range returns `[no model configured for ask_day]` plus the built prompt. Only
-the refusal path works as advertised, and the tool description says so (T041 SCOPE, R37 —
-the stub strings originally even differed per surface, a parity violation in the wave
-about parity; they are one string now). Closes when a provider is attached to the
-answerer seam, which every surface already passes through.
-
-### 4. CLI `start` / `stop` / `status` cannot span processes
-
-Each CLI invocation builds a fresh in-memory service, so `gentle-eye dayflow start`
-prints a session id and the session dies with the process; a later `status` from a new
-process reports nothing running. `timeline`, `standup` and `ask` DO share state across
-processes, through SQLite (T042 SCOPE). This is a truthful consequence of item 0 — a
-cross-process session needs the daemon to be the process that owns it. The help text and
-this ledger say so rather than letting the checkbox imply otherwise.
-
-### 5. No daemon loop calls retention on a schedule
-
-`plan` / `shrink` / `reclaim_file` are built, ordered correctly (tier before age, encode
-before delete) and mutation-proven, and the end-to-end test drives
-summarize → shrink → evict through them. But **no scheduled sweep exists** (T040 SCOPE:
-"marked done for the retention RULES, not for a running sweep"). Until the capture loop
-lands, disk-budget enforcement happens only when something calls the planner. Watch the
-disk on any long manual run.
-
-### 6. Provenance is not attached end-to-end
-
-The structural pieces are all real — provenance columns, geometric reading order,
-persisted region identity, the SQLite round-trip, all mutation-proven — but
-`scheduler::entry_from` still writes `provenance: None`, because it sees a summary and a
-window and has no regions (T035 SCOPE). Attaching provenance needs the perception path to
-return *which region each extracted text came from*, which is the US3+US4 seam the capture
-loop closes. Until then every new entry looks like a pre-migration entry.
-
-### 7. Recorded pauses are not surfaced as `gaps` in timeline queries
-
-Pauses are recorded durably — the window controller's pause ledger and the
-`dayflow_pauses` table, each interval with its cause and close time — and tests assert a
-gap is a recorded fact rather than an absence of rows. But the timeline query surfaces
-(`get_timeline` on MCP, `GET /dayflow/timeline`, the CLI) return `entries` only: the
-`gaps` array that `contracts/mcp-tools.md` promises, and that T023's checkbox describes,
-is **not present in any surface's response**. A caller who wants to distinguish "paused"
-from "missing" for a past range currently cannot do it through the query API. Closes by
-joining `dayflow_pauses` into the range query result.
-
-### 8. The HTTP surface is single-threaded, with a 5-second read timeout
+### 3. The HTTP surface is single-threaded, with a 5-second read timeout
 
 One connection is served at a time. The read timeout stops a silent client from freezing
 the surface *forever* (which it did), but it is a **mitigation, not a fix** — measured,
@@ -105,13 +55,39 @@ seconds, and an honest client sending a large request line slowly is cut off (R3
 Thread-per-connection is the real answer; loopback-only binding is what makes the current
 behaviour survivable. The caveat is also recorded next to the code it constrains.
 
-### 9. Four known clippy errors block the lint gate (T050)
+### 4. Cross-session orphaned samples are neither adopted nor deleted
 
-`-D warnings` comes from `.cargo/config.toml`, so `cargo clippy --all-targets` cannot pass
-until four **pre-existing** errors are fixed: `regions/providers/wm.rs:41,48`
-(`and_then(|x| Ok(y))`) and `regions/mod.rs:302,340` (`map_or`). They predate this branch
-and were deliberately not fixed as a drive-by — T050 owns that gate, and drive-by fixes in
-unrelated tasks are how reviews lose track of what changed and why.
+A daemon that resumes the same day adopts the previous process's orphaned samples,
+summarises them under the resumed session and lets retention reclaim them normally. A
+**fresh** session (a new day, or after an explicit stop) deliberately does neither: adopting
+them would misattribute another session's screen, and deleting them would destroy
+unsummarised evidence. They stay on disk. A policy is needed — most likely filing them
+under the prior session id read from the pre-overwrite state.
+
+### 5. `WindowSource` is X11-only, and says the wrong thing off X11
+
+`WmLocator` is the only production `WindowLocator`, and `x11rb` is an unconditional
+dependency with no `cfg` gate — so it compiles on macOS and fails at connect. A failed
+connect maps to `Minimised`, which is right for a transient X error and **wrong for a
+platform that has no X11**: a `--window` session there retries every tick forever,
+capturing nothing, while `status` reports the window as minimised. D014-14 records the
+fix — a fourth `Unsupported` state that fails loudly once. The trait seam is already
+correct; a CoreGraphics or Wayland locator drops in without touching the loop.
+
+## What only a live run certifies
+
+These are `#[ignore]`d because they need real hardware, real models, or ffmpeg. A green
+`cargo test` says nothing about them:
+
+| Test | What it proves | How to run |
+|---|---|---|
+| `dayflow_live::a_real_session_flows_from_pixels_to_a_grounded_answer` | capture → gate → ladder → timeline → a grounded answer, on real displays | `GE_DAYFLOW_ENDPOINT=… cargo test --test dayflow_live -- --ignored` |
+| `dayflow_live::an_input_source_records_content_never_shown_on_this_screen` | **SC-103a** — the source abstraction is real, not a filter over screen capture | same, plus `ffmpeg` |
+| `dayflow_surfaces::a_range_with_records_returns_real_prose_about_them` | `ask_day` returns prose naming what the entries contain | same |
+| `regions::providers::wm::window_states_reports_visibility` | a minimised window is detected by state, not by zero area | `DISPLAY=:1 cargo test --lib -- --ignored` |
+
+Measured, 2026-08-30: the input run read `ZEPHYRANTHES` — a word existing only inside a
+synthetic video file — back out of the perception ladder.
 
 ## Smaller honest notes
 
@@ -131,6 +107,8 @@ unrelated tasks are how reviews lose track of what changed and why.
   lines per sample will fragment a document; and captures of one or two lines are
   degenerate (coverage is 0.0 or 1.0 with nothing between). Recorded as a known accepted
   limit (R24) — untestable without real OCR pairs.
+- **The lint gate is clean.** The four clippy errors this file used to list are fixed;
+  `cargo clippy --all-targets` passes under `-D warnings`, which is T028's gate.
 - **`security::path_validator` coverage (T047) is still open** as a polish task: retention
   validates deletion paths, but the sweep of every segment/shrink/eviction path on both
   the write and delete side has not been completed.

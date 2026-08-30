@@ -23,10 +23,35 @@ failure. **A `degraded` status still exits 0** — the degradation is in the pay
 because a non-zero exit would make every shell script treat a recoverable state as a
 crash.
 
+### The daemon, and why every other invocation attaches to it
+
+Run the daemon FIRST. It owns the session; every other invocation discovers it through
+the state file and talks HTTP to it, instead of building its own engine:
+
 ```bash
-# Start (default mode: session; default displays: [0])
-gentle-eye dayflow start [--mode session|daemon] [--displays 0,1]
+# The daemon: owns the session, serves the surfaces, captures.
+gentle-eye dayflow serve [--port 7431] [--window <label> | --target <name> | --input <url> | --displays 0,1]
+# → {"session_id": "…", "resume": "Fresh|Resumed|NewDay", "port": 7431}
+```
+
+Without a running daemon each invocation builds a PRIVATE in-memory service — `start` in
+one process and `status` in the next are different sessions talking to nobody. That was
+the bug; `serve` plus attach is the fix (D014-15). A second `serve` over the same state
+file is refused rather than silently interleaving two sessions into one timeline.
+
+Restarting the daemon on the same day **resumes** the same session id and the same
+sources, and records the interruption as a gap with cause `daemon_restart` — an
+interruption that left no gap would read as a quiet afternoon.
+
+```bash
+# Start (default mode: session; ONE source kind, default: every display)
+gentle-eye dayflow start [--mode session|daemon] \
+    [--displays 0,1 | --window <label> | --target <name> | --input <url>]
 # → {"session_id": "…"}
+#
+# Asking for two kinds is REFUSED, not resolved: a caller who passed both
+# --window and --input has two intentions, and honouring one silently records
+# the wrong thing all day.
 
 # Stop the running session
 gentle-eye dayflow stop
@@ -215,6 +240,33 @@ by retry-never-drop, retrying forever while starving every other segment.
 | `hot_grace_hours` | `48` | How long summarized raw samples are kept before they become shrinkable by age. Note: budget pressure can shrink a **summarized** window of any age — the only hard floor is the `summarized` flag itself. |
 | `warm_days` | `14` | How long a shrunk (warm) timelapse is kept before it is evictable by age. |
 | `disk_budget_bytes` | `21474836480` (20 GiB) | Over this, evict: all reclaimable raw oldest-first, then warm oldest-first. Never a timeline entry, never an unsummarized segment. |
+
+## `ask` needs a model
+
+`ask` is the one subcommand that consults a model. Point it at the governed lane:
+
+```bash
+export GE_DAYFLOW_ENDPOINT=http://<governor-host>:8799/llm/ollama
+export GE_DAYFLOW_REASON_MODEL=ornith-1.5-9b:latest   # optional; config supplies a default
+gentle-eye dayflow ask "what was I doing at 2pm?"
+```
+
+Unconfigured, it says so and names the variable — it does **not** echo the prompt back.
+An echoed prompt is long and prose-shaped enough to look like an answer, which is how the
+stub survived on three surfaces unnoticed.
+
+Two behaviours worth knowing, both from a measured failure (D014-12):
+
+- **A cold model load can take ~95 s.** The connect budget (3 s) is separate from the read
+  budget (180 s), so a wrong URL fails in a second while a legitimate cold load completes.
+- **One retry, on a dropped connection only.** The first question after an idle period is
+  exactly when the model is cold and the lane drops the connection. A timeout is NOT
+  retried — that would spend another full read budget on one question.
+
+An **empty range never reaches the model at all**: with no evidence it would produce
+plausible invention, and a fabricated account of someone's day is worse than an admission
+of ignorance. Every answer carries its `grounding`, so confident prose with no evidence
+behind it stays detectable.
 
 ## Troubleshooting
 

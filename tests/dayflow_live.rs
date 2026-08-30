@@ -377,3 +377,165 @@ async fn a_real_session_flows_from_pixels_to_a_grounded_answer() {
     }
     println!("\n[live] ANSWER:\n{}\n", answer.answer.trim());
 }
+
+// ── T026: an INPUT taken, not a display consumed ─────────────────────────────
+
+/// LIVE: a session records content that was NEVER rendered on this machine's
+/// screen (SC-103a).
+///
+/// This is the test that proves `CaptureSource` is a real abstraction and not a
+/// filter over screen capture. The frames come from a synthetic video file
+/// through ffmpeg — the same `InputSource` path a capture card, an IP camera or
+/// a stream URL uses — and nothing about them was ever on this desktop.
+///
+/// The content is a WORD rendered into the video, so the assertion is on what
+/// the perception ladder READ, not on the pipeline merely completing. A test
+/// that only checked "a sample was written" would pass against a black frame.
+#[test]
+#[ignore = "live: needs GE_DAYFLOW_ENDPOINT (Atelier governor), pulled models, and ffmpeg"]
+fn an_input_source_records_content_never_shown_on_this_screen() {
+    use gentle_eye::dayflow::source::input::{FfmpegGrabber, InputSource};
+    use gentle_eye::dayflow::source::CaptureSource;
+
+    let endpoint = require_endpoint();
+    if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
+        panic!("\n\nffmpeg is not on PATH — the input source cannot grab frames.\n");
+    }
+    println!("[live-input] endpoint {endpoint}");
+
+    let dir = tempfile::tempdir().expect("scratch");
+    // A synthetic source with a WORD burned into it. Deliberately not a
+    // screenshot and not a solid colour: a solid frame is rejected by the
+    // content gate as blank, and a screenshot would defeat the point.
+    let video = dir.path().join("never-on-screen.mp4");
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f", "lavfi",
+            // High-contrast bars give the gate real texture to keep.
+            "-i", "testsrc=size=640x480:rate=5:duration=3",
+            "-vf", "drawtext=text='ZEPHYRANTHES':fontcolor=white:fontsize=64:x=40:y=200:box=1:boxcolor=black",
+            "-pix_fmt", "yuv420p",
+            video.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run ffmpeg");
+    assert!(
+        status.status.success(),
+        "\n\nffmpeg could not build the fixture (is the drawtext filter available?):\n{}\n",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    println!("[live-input] fixture {} bytes", std::fs::metadata(&video).unwrap().len());
+
+    // The source. `InputSource` does not know it is a file rather than a
+    // camera — that is the abstraction being tested.
+    let scratch = dir.path().join("grabs");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut src = InputSource::new(
+        video.to_string_lossy().to_string(),
+        Box::new(FfmpegGrabber::new(&scratch)),
+        0,
+    );
+
+    let frame = src
+        .next_frame()
+        .unwrap_or_else(|e| panic!("\n\nthe input produced no frame: {e}\n"));
+    println!("[live-input] frame {}x{}", frame.width, frame.height);
+    assert!(frame.width > 0 && frame.height > 0);
+    assert_eq!(
+        frame.bgra.len(),
+        (frame.width as usize) * (frame.height as usize) * 4,
+        "the frame is not tightly-packed BGRA"
+    );
+
+    // HONESTY: an input has no cascade to ask, so it must report None and the
+    // read must be COUNTED as a whole frame (D014-3, FR-103).
+    assert!(
+        src.regions_for(&frame).is_none(),
+        "an input synthesised regions — a whole-frame read would then be invisible"
+    );
+
+    // Drive it through the real loop, into real samples.
+    let cfg = DayflowConfig::default();
+    let mut run = gentle_eye::dayflow::engine::DayflowRun::start(
+        &cfg,
+        DayflowMode::Session,
+        vec![0],
+        Utc::now(),
+    )
+    .expect("run starts");
+    let samples_dir = dir.path().join("samples");
+    std::fs::create_dir_all(&samples_dir).unwrap();
+    let mut lp = gentle_eye::dayflow::capture_loop::CaptureLoop::new(
+        vec![Box::new(InputSource::new(
+            video.to_string_lossy().to_string(),
+            Box::new(FfmpegGrabber::new(&scratch)),
+            0,
+        ))],
+        Sampler::new(gentle_eye::config::DeltaConfig::default()),
+        &samples_dir,
+    );
+
+    let mut samples = Vec::new();
+    for k in 1..=3 {
+        let t = Utc::now() + chrono::Duration::seconds(k * 60);
+        for s in &lp.tick(&mut run, t).sources {
+            if let Some(p) = s.record.as_ref().and_then(|r| r.path.clone()) {
+                samples.push(p);
+            }
+        }
+    }
+    println!("[live-input] {} sample(s) kept", samples.len());
+    assert!(!samples.is_empty(), "the input session kept no samples");
+    assert_eq!(
+        lp.samples_read_whole() as usize,
+        samples.len(),
+        "every input sample is a whole-frame read and must be COUNTED"
+    );
+
+    // And READ it with the real perception ladder. This is the assertion that
+    // matters: the word exists only inside the video file.
+    let mk = |model: &str| -> std::sync::Arc<OllamaProvider> {
+        std::sync::Arc::new(
+            OllamaProvider::with_url(
+                &VisionConfig {
+                    provider: "ollama".into(),
+                    api_key: None,
+                    model: model.to_string(),
+                    timeout_seconds: 180,
+                    max_video_size_bytes: 0,
+                },
+                endpoint.clone(),
+            )
+            .expect("build provider"),
+        )
+    };
+    let router = PerceptionRouter::new(mk(&text_model()), mk(&reason_model()), 1_000);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let (text, latency) = rt
+        .block_on(gentle_eye::dayflow::perception::summarize_segment_via_ladder(
+            &router,
+            &samples,
+            "What text is visible in this video frame? Answer with the words you can read.",
+            0,
+            1,
+        ))
+        .unwrap_or_else(|e| panic!("\n\nthe perception ladder failed on the input: {e}\n"));
+
+    println!("[live-input] read back: {text}");
+    println!(
+        "[live-input] {} samples, {} calls, whole-frame reads {}",
+        latency.samples, latency.perception_calls, latency.samples_read_whole
+    );
+    assert_eq!(
+        latency.samples_read_whole, latency.samples,
+        "an input has no sidecar, so every sample must be counted as read whole"
+    );
+    assert!(
+        text.to_uppercase().contains("ZEPHYRANTHES"),
+        "\n\nthe ladder did not read the word that exists ONLY inside the input video.\n\
+         Got: {text}\n\
+         This is SC-103a: the content was never rendered on this screen, so reading it\n\
+         proves the source abstraction is real rather than a filter over screen capture.\n"
+    );
+}
