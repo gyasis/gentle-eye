@@ -4,9 +4,14 @@ What an agent can do with gentle-eye. Two surfaces over one library:
 **MCP tools** (in-agent) and **CLI subcommands** (shell out, JSON on stdout).
 
 > Regenerated 2026-05-30 from the live `tool_catalog()` (`src/mcp/server.rs`) and
-> the CLI `HELP` (`src/bin/gentle-eye.rs`); updated 2026-06-01 with the
-> `screenshot` + `redpen-list` / `redpen-analyze` CLI commands and the redpen
-> visual-direction loop. The 12 MCP tools are unchanged (redpen is CLI-only).
+> the CLI `HELP` (`src/bin/gentle-eye.rs`); updated 2026-06-01 with `screenshot`
+> + redpen; updated 2026-08-30 with **dayflow** (17 MCP tools now).
+>
+> `tests/docs_agree_with_code.rs` fails if this file and the code disagree — a
+> reference that has drifted is worse than none, because it is trusted.
+
+**For humans:** `docs/GENTLE_EYE_GUIDE.md` is the task-shaped guide. This file is
+the lookup table.
 
 ---
 
@@ -14,6 +19,9 @@ What an agent can do with gentle-eye. Two surfaces over one library:
 
 | Want to… | MCP tool | CLI |
 |---|---|---|
+| **Record a whole day, by itself** | `start_dayflow` / `stop_dayflow` / `dayflow_status` | `dayflow serve`, `dayflow start\|stop\|status` |
+| **Ask what happened earlier** | `ask_day` | `dayflow ask "…"` |
+| **Read the day's timeline / standup** | `get_timeline` (`standup:true`) | `dayflow timeline`, `dayflow standup` |
 | Record the screen | `start_recording` / `stop_recording` / `get_recording_status` / `cancel_recording` | `record` |
 | List recordings | `list_recordings` | `list` |
 | Analyze a video/image with a VLM | `analyze_video` | `analyze` |
@@ -129,6 +137,102 @@ gentle-eye target list
 ```
 
 ---
+
+## Dayflow — the all-day recorder
+
+Dayflow records a **source** and answers questions about it later. It is the one
+subsystem that runs *by itself*: a daemon owns the session, so start it once and
+query it from anywhere.
+
+```bash
+# 1. Start the daemon. It owns the session and serves the other surfaces.
+gentle-eye dayflow serve [--port 7431] [SOURCE]
+
+# 2. Every other invocation ATTACHES to it (no second engine, no MCP install).
+gentle-eye dayflow status
+gentle-eye dayflow timeline --from 2026-08-30T09:00:00Z --to 2026-08-30T17:00:00Z
+gentle-eye dayflow standup
+gentle-eye dayflow ask "what was I doing at 2pm?"
+gentle-eye dayflow stop
+```
+
+### SOURCE — exactly one kind
+
+| flag | captures | regions |
+|---|---|---|
+| `--displays 0,1` | whole screens (default: all) | from the region cascade |
+| `--window <label>` | one window, by title or class | cascade, clipped to the window |
+| `--target <name>` | a saved normalised region (`gentle-eye target add`) | cascade, clipped to the target |
+| `--input <url>` | a stream / capture device / video file | **none** — reported honestly |
+
+Two kinds at once is **refused**, not resolved. An input reports no regions
+because there is no window manager to ask about a video feed; the sample is
+counted into `samples_read_whole`, which `status` shows.
+
+### What an agent should know
+
+- `display_id` in a stored row means **which source**, not which monitor. For a
+  window/target/input session ordinal `0` is that source and is not display 0.
+- `status.sources[]` gives kind, name and live availability — `displays` alone
+  cannot tell a window session from a display session.
+- `ask` needs `GE_DAYFLOW_ENDPOINT` (the governed lane). Unconfigured, it says so
+  and does **not** echo the prompt.
+- An **empty range never reaches a model** — with no evidence it would invent a
+  day. Every answer carries `grounding`, so confident prose with no evidence
+  stays detectable.
+- `timeline` returns `entries` **and** `gaps`. A gap is a recorded pause with a
+  cause; absence of entries is not the same fact.
+
+## How the pieces compose
+
+None of these tools is meant to be used alone. The chains that matter:
+
+| Chain | What it does |
+|---|---|
+| `target add` → `dayflow serve --target` | record only one region of one screen, all day |
+| `regions` → `dayflow` sidecars | the cascade's boxes become the crops perception reads, instead of whole frames |
+| `redpen` (user draws) → `redpen-analyze` | the human points at something; the agent reads the markup |
+| `dayflow ask` → the governed lane | a question answered from the day's own grounded records |
+| `screenshot --target` → `analyze` | grab one region, ask a VLM about it |
+
+`redpen` is the **inbound** channel (human → agent: markup on a screenshot);
+`target`/`regions` are the **outbound** one (agent → screen: pick a region to
+watch). They are mirrors, not alternatives.
+
+## What gentle-eye is built ON
+
+| Library | Used for | Constraint it imposes |
+|---|---|---|
+| `scrap` 0.5 | display capture | handles are **thread-affine** — a capture source cannot be `Send` |
+| `x11rb` | window geometry, idle detection | **X11 only**; `--window` misreports on macOS/Wayland (a known gap) |
+| `atspi` | accessibility tree regions | needs the a11y bus; absent under some sandboxes |
+| `rmcp` 0.1 | the MCP server | — |
+| `reqwest` | vision providers, daemon client | split connect/read timeouts matter (cold loads reach ~95 s) |
+| `rusqlite` | the timeline store | one store, shared by every surface |
+| `image` | PNG encode/decode | — |
+
+External processes: **ffmpeg** (input sources, video), **ffplay** (preview),
+**ffprobe**, **tesseract** (OCR). Absent, each degrades to a stated failure.
+
+Services beside it: the **Atelier governor** (`:8799/llm/ollama`) is the
+perception and reasoning lane; **ollama** and **Gemini** are the providers behind
+it. A cold model load is slow but normal — budget for it rather than treating it
+as a fault.
+
+## How other tools consume gentle-eye
+
+gentle-eye is a library, a CLI, and an MCP server, in that order of generality.
+
+- **As an MCP server** — 17 tools for a coding agent. Register it once per host.
+- **As a CLI, from any harness** — every subcommand prints JSON on stdout,
+  diagnostics on stderr, and exits 0 on a *degraded but recoverable* state so a
+  script does not treat it as a crash. This is the zero-install path: no MCP
+  registration, works from any agent that can run a shell.
+- **As an HTTP surface** — `dayflow serve` exposes `/dayflow/{status,start,stop,
+  timeline,standup,ask}`. A client on another machine can drive a capture daemon
+  it is not running on: the daemon must be native to the box being captured, a
+  client need not be.
+- **As a Rust library** — `gentle_eye::{capture,target,regions,dayflow,analysis}`.
 
 ## Notes
 

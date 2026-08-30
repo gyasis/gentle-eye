@@ -47,10 +47,21 @@ USAGE:
   gentle-eye redpen-list [--limit N]                  List redpen annotation captures (newest first) for the agent to ingest
   gentle-eye redpen-analyze [--image PATH] [--prompt TEXT] [--provider gemini|ollama]   Send a redpen capture (default: latest) + its boxes to vision AI
   gentle-eye provider-info [--provider gemini|ollama]
+  gentle-eye regions [--depth window|pane|element|text] [--display IDX]   Structure the screen into boxes, in reading order
+
+  gentle-eye dayflow serve [--port N] [--displays 0,1 | --window LABEL | --target NAME | --input URL]   Run the all-day recorder as a daemon (owns the session)
+  gentle-eye dayflow start [--displays 0,1 | --window LABEL | --target NAME | --input URL]   Start a session (attaches to a running daemon if there is one)
+  gentle-eye dayflow status | stop                    Whether it is running and PRODUCING; stop it
+  gentle-eye dayflow timeline [--from T] [--to T]     Entries AND recorded gaps over a range (default: today)
+  gentle-eye dayflow standup [--from T] [--to T]      The categorised digest of that range
+  gentle-eye dayflow ask <QUESTION> [--from T] [--to T]   Answer from the day's own records (needs GE_DAYFLOW_ENDPOINT)
+
+  gentle-eye serve [--port N]                         Preview/gallery HTTP server
   gentle-eye help
 
 Env: GENTLE_EYE_PROVIDER, GEMINI_API_KEY/GOOGLE_API_KEY, OLLAMA_HOST, OLLAMA_PORT,
-     GENTLE_EYE_DATA, GENTLE_EYE_FPS. CLI subcommands print JSON to stdout.";
+     GENTLE_EYE_DATA, GENTLE_EYE_FPS, GE_DAYFLOW_ENDPOINT (dayflow ask).
+     CLI subcommands print JSON to stdout. Guide: docs/GENTLE_EYE_GUIDE.md";
 
 #[tokio::main]
 async fn main() -> ExitCode {
