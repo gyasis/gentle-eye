@@ -549,6 +549,20 @@ mod tests {
     }
 
     #[test]
+    fn seeding_never_lowers_the_next_sequence() {
+        // The monotonic guard matters on an OCCUPIED entry: a stale or
+        // double-applied seed must not send sequences backwards, or a resume
+        // reuses identities already on disk.
+        let mut c = WindowController::new(Duration::from_secs(60));
+        c.seed_next_sequences([(0, 5)]);
+        assert_eq!(c.current_sequence(0), 5, "a seed sets the floor");
+        c.seed_next_sequences([(0, 3)]);
+        assert_eq!(c.current_sequence(0), 5, "a LOWER seed must not lower the record");
+        c.seed_next_sequences([(0, 9)]);
+        assert_eq!(c.current_sequence(0), 9, "a higher seed raises it");
+    }
+
+    #[test]
     fn sequence_is_monotonic_per_display_across_pauses_and_interval_changes() {
         // The durable identity. It must not restart when anything interrupts.
         let mut c = ctl();

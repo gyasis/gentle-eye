@@ -3167,3 +3167,103 @@ fn the_persisted_spec_is_stored_resolved() {
         other => panic!("expected a display spec, got {other:?}"),
     }
 }
+
+/// End to end through the DAEMON: a resume adopts the dead process's samples,
+/// summarises them under the resumed session, and their entries land in the
+/// shared store. This is the wire `adopt_orphaned_samples` travels — a daemon
+/// that dropped the flag would leak the pre-restart tail forever while the
+/// loop-level adoption tests stayed green.
+#[test]
+fn a_resumed_daemon_summarises_the_dead_processes_samples() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon.json");
+    let samples = dir.path().join("samples");
+    std::fs::create_dir_all(&samples).unwrap();
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let spec = SourceSpec::Window { label: "w".into() };
+
+    // ── first process: starts, then dies mid-window ──
+    let d1 = Daemon::new(&state_path, svc_for(&db));
+    let t0 = Utc::now() - Duration::minutes(30);
+    d1.start_or_resume(DayflowMode::Daemon, spec.clone(), t0).unwrap();
+    // The sample its capture loop wrote before the crash.
+    let stamp = (Utc::now() - Duration::minutes(25)).format("%Y%m%dT%H%M%S%3f");
+    let orphan = samples.join(format!(
+        "{}{stamp}.png",
+        gentle_eye::dayflow::sampler::sample_prefix(0, 0)
+    ));
+    std::fs::write(&orphan, b"png-bytes").unwrap();
+    drop(d1);
+
+    // ── the restart: a capturing daemon over the same state file ──
+    let svc2 = svc_for(&db);
+    let d2 = Daemon::new(&state_path, Arc::clone(&svc2)).with_capture(ok_summarizer(), &samples);
+    let (id, dec) = d2.start_or_resume(DayflowMode::Daemon, spec, Utc::now()).unwrap();
+    assert_eq!(dec, ResumeDecision::Resumed);
+
+    // The capture thread adopts and settles on its first iteration.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut entries = Vec::new();
+    while std::time::Instant::now() < deadline {
+        entries = svc2
+            .timeline(Utc::now() - Duration::hours(2), Utc::now() + Duration::hours(1))
+            .unwrap()
+            .entries;
+        if !entries.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        !entries.is_empty(),
+        "the resumed daemon never summarised the dead process's sample — the \
+         pre-restart tail is orphaned on disk forever"
+    );
+    assert_eq!(
+        entries[0].recording_id, id,
+        "the adopted window must be filed under the RESUMED session"
+    );
+    d2.stop(Utc::now()).unwrap();
+}
+
+/// The other polarity: a FRESH daemon must NOT adopt leftover samples — they
+/// belong to some other session, and adopting them would attribute another
+/// session's screen to this one.
+#[test]
+fn a_fresh_daemon_does_not_adopt_another_sessions_samples() {
+    let dir = tempfile::tempdir().unwrap();
+    let samples = dir.path().join("samples");
+    std::fs::create_dir_all(&samples).unwrap();
+    let stamp = (Utc::now() - Duration::minutes(25)).format("%Y%m%dT%H%M%S%3f");
+    std::fs::write(
+        samples.join(format!("{}{stamp}.png", gentle_eye::dayflow::sampler::sample_prefix(0, 0))),
+        b"png-bytes",
+    )
+    .unwrap();
+
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let svc = svc_for(&db);
+    let d = Daemon::new(dir.path().join("daemon.json"), Arc::clone(&svc))
+        .with_capture(ok_summarizer(), &samples);
+    // No prior state: this is a FRESH session, whatever is in the directory.
+    d.start_or_resume(DayflowMode::Daemon, SourceSpec::Window { label: "w".into() }, Utc::now())
+        .unwrap();
+
+    // Adoption settles within milliseconds when it happens; give it ample time
+    // to be wrong before asserting it was not.
+    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    let entries = svc
+        .timeline(Utc::now() - Duration::hours(2), Utc::now() + Duration::hours(1))
+        .unwrap()
+        .entries;
+    assert!(
+        entries.is_empty(),
+        "a FRESH session summarised another session's leftover samples — \
+         its screen is now attributed to the wrong session: {entries:?}"
+    );
+    d.stop(Utc::now()).unwrap();
+}
