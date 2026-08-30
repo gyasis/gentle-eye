@@ -83,9 +83,9 @@ line says so.
 
 ## Phase 8: User Story 4 — the record survives a restart (P2)
 
-- [ ] T022 [US4] The daemon owns the session: `DaemonState`/`DaemonStateStore`/`decide_resume` get their first real owner, persisting the `SessionSpec` including its sources.
+- [x] T022 [US4] The daemon owns the session: `DaemonState`/`DaemonStateStore`/`decide_resume` get their first real owner, persisting the `SessionSpec` including its sources.
       `> DONE:` a restarted process resumes the SAME session with the same sources; the interruption is a gap with a cause, not an absence.
-- [ ] T023 [S] [US4] Surfaces attach to the running daemon instead of constructing their own engine.
+- [x] T023 [S] [US4] Surfaces attach to the running daemon instead of constructing their own engine.
       `> DONE:` `status` from a NEW process reports the daemon's session; `stop` from a new process stops it. There must be exactly ONE state store — a second is how the two diverge (013/R29). `cargo check` + clippy = 0.
 
 ## Phase 9: User Story 3 — a real answer (P2)
