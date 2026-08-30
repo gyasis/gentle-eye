@@ -41,12 +41,6 @@ impl DisplaySource {
         })
     }
 
-    /// Ask the cascade to this depth instead of `Window`.
-    pub fn with_depth(mut self, depth: Granularity) -> Self {
-        self.depth = depth;
-        self
-    }
-
     /// Keep only the regions the cascade can attribute to display `index`,
     /// or admit that it cannot answer.
     ///

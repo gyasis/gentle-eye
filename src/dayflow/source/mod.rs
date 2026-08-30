@@ -255,7 +255,10 @@ impl SourceIdentity {
         Self { kind, key: key.into() }
     }
 
-    /// A stable 64-bit id, written to disk and compared across runs.
+    /// A stable 64-bit id, safe to write to disk and compare across runs.
+    ///
+    /// Nothing persists it yet — the pinned algorithm exists so that when a row
+    /// does store it, a toolchain upgrade cannot silently rebind every source.
     ///
     /// FNV-1a with pinned constants, matching `regions::Region::identity`, and
     /// for the same reason: `DefaultHasher` is explicitly not stable across

@@ -150,12 +150,6 @@ impl CaptureLoop {
         self
     }
 
-    /// How many acquisition attempts the sampler may make per interval.
-    pub fn with_max_attempts(mut self, attempts: u32) -> Self {
-        self.max_attempts = attempts;
-        self
-    }
-
     /// Every source's identity, ordinal and CURRENT availability.
     ///
     /// A retired source is still described — a session that lost its window
@@ -188,12 +182,6 @@ impl CaptureLoop {
     /// The summary queue, so the caller can settle due windows.
     pub fn scheduler(&mut self) -> &mut SummaryScheduler {
         &mut self.scheduler
-    }
-
-    /// A handle to the whole-frame-read counter, for a caller that owns the
-    /// loop on another thread and must still report it.
-    pub fn read_whole_handle(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.read_whole)
     }
 
     /// How many samples will be read as whole frames.

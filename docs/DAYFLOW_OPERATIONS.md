@@ -84,13 +84,13 @@ Notes:
 - Flag values are consumed as two-token pairs, so
   `dayflow ask --from 2026-08-26T09:00:00Z "what did I do"` works — the timestamp is not
   mistaken for the question.
-- The `ask` answerer is currently a stub on every surface (see limitations): only the
-  empty-range refusal path behaves as advertised; a non-empty range returns a placeholder
-  plus the grounding prompt.
+- `ask` consults a real model when one is configured — see *`ask` needs a model*, below.
+  Unconfigured, it says so and names the variable instead of answering.
 - The contract file (`specs/013-dayflow-perception-waves/contracts/cli.md`) also names
   `--max-duration-minutes`, `--segment-minutes`, `--session-id` and `--display-id`; those
-  flags are **not implemented yet** — mode and displays are the accepted start options
-  today, and stop always targets the active session.
+  flags are **not implemented yet** — mode and ONE source kind (`--displays` / `--window`
+  / `--target` / `--input`) are the accepted start options today, and stop always targets
+  the active session.
 
 ## HTTP
 
@@ -309,10 +309,11 @@ about intent.
 
 ### The disk is filling
 
-1. **Is anything sweeping at all?** No daemon loop calls retention on a schedule yet
-   (limitations) — `plan`/`shrink`/`reclaim` are built and correct, but until the capture
-   loop lands they run only when driven. A filling disk with a green suite is consistent
-   with "nobody is calling the sweeper".
+1. **The sweep runs during a session** — after any settle that lands entries, and on a
+   60 s timer (the two moments a segment's eligibility can change). A filling disk while a
+   daemon runs therefore means the planner is *refusing*, not absent — read on. (Note the
+   warm tier: an executed Shrink deletes raw samples without producing the warm timelapse,
+   because the encoder is not wired into the loop — see limitations.)
 2. **Read the plan, including its refusals.** The planner returns a decision for every
    segment with a reason for each one it did *not* touch. The important refusal is
    `NotSummarized`: unsummarized segments are **never** evicted, whatever the budget, so a
@@ -337,9 +338,10 @@ If per-call latency is far above warm (~0.18 s measured; ~1.6 s on a real croppe
 - **Co-tenancy, not cold load, is the usual culprit.** With another large model contending
   on the same machine the identical call measured **17.8 s/frame** — 10× worse. Check
   what else the governed lane is serving before touching Dayflow's config.
-- Setting `residency: resident` is currently aspirational: the computed `keep_alive` has
-  no channel to the provider call yet, so the effective policy is always `on_demand`
-  (limitations). Don't burn time wondering why `resident` changed nothing.
+- `residency: resident` is real: the daemon applies it to the text tier at construction,
+  and the computed `keep_alive` (sized to the segment gap) rides every request. If
+  `resident` appears to change nothing, check co-tenancy first — eviction by ANOTHER
+  model's load is indistinguishable from a residency that was never sent.
 - The model's own idle-unload window is ~50 s and **per-model** — observing a different
   model resident for hours tells you nothing about this one. That misreading caused a
   full design reversal once already (R5→R27).

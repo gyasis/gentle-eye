@@ -74,6 +74,16 @@ capturing nothing, while `status` reports the window as minimised. D014-14 recor
 fix — a fourth `Unsupported` state that fails loudly once. The trait seam is already
 correct; a CoreGraphics or Wayland locator drops in without touching the loop.
 
+### 6. Shrink reclaims raw without producing the warm timelapse
+
+`retention::shrink` (the timelapse encoder) is built and tested but not wired into the
+loop's sweep: an executed `Shrink` decision deletes the segment's raw samples and their
+sidecars and produces **no warm artifact** — the segment goes Hot→Cold directly, and the
+plan's `freed_by_shrink` under-credits what was actually freed. Conservative in the safe
+direction (nothing is kept that should have been deleted, and nothing unsummarised is
+ever touched), but `warm_days` and `DropWarm` currently govern a tier that production
+never populates. Closes by running the encoder in `sweep_retention` before the reclaim.
+
 ## What only a live run certifies
 
 These are `#[ignore]`d because they need real hardware, real models, or ffmpeg. A green
@@ -84,7 +94,7 @@ These are `#[ignore]`d because they need real hardware, real models, or ffmpeg. 
 | `dayflow_live::a_real_session_flows_from_pixels_to_a_grounded_answer` | capture → gate → ladder → timeline → a grounded answer, on real displays | `GE_DAYFLOW_ENDPOINT=… cargo test --test dayflow_live -- --ignored` |
 | `dayflow_live::an_input_source_records_content_never_shown_on_this_screen` | **SC-103a** — the source abstraction is real, not a filter over screen capture | same, plus `ffmpeg` |
 | `dayflow_surfaces::a_range_with_records_returns_real_prose_about_them` | `ask_day` returns prose naming what the entries contain | same |
-| `regions::providers::wm::window_states_reports_visibility` | a minimised window is detected by state, not by zero area | `DISPLAY=:1 cargo test --lib -- --ignored` |
+| `regions::providers::wm::window_states_reports_visibility` | a minimised window is detected by state, not by zero area | `DISPLAY=:1 cargo test --lib window_states_reports_visibility -- --ignored` (unfiltered, `--lib -- --ignored` also runs pre-014 env-bound tests — atspi under AppArmor, an OCR fixture — that fail on boxes without their fixtures) |
 
 Measured, 2026-08-30: the input run read `ZEPHYRANTHES` — a word existing only inside a
 synthetic video file — back out of the perception ladder.

@@ -85,12 +85,6 @@ impl DaemonState {
         self
     }
 
-    /// Publish the port a surface can attach on.
-    pub fn with_port(mut self, port: u16) -> Self {
-        self.port = Some(port);
-        self
-    }
-
     pub fn note_sequence(&mut self, display_id: u32, sequence: u64, now: DateTime<Utc>) {
         let e = self.last_sequence.entry(display_id).or_insert(sequence);
         if sequence > *e {
