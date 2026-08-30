@@ -16,10 +16,12 @@ The item that used to head this file — *"no live capture loop yet"* — is **c
 owns the session across restarts, and the live validation has been run green against
 three real displays, real models and a real input.
 
-Six itemised gaps went with it and have been **removed from this ledger rather than left
-standing**: the missing `.regions.json` producer, `Resident` being inexpressible,
+Seven itemised gaps went with it and have been **removed from this ledger rather than
+left standing**: the missing `.regions.json` producer, `Resident` being inexpressible,
 `ask_day`'s stub answerer, cross-process `start`/`stop`/`status`, retention never being
-called on a schedule, and provenance never reaching an entry. What replaced each is in
+called on a schedule, provenance never reaching an entry, and recorded pauses being
+absent from timeline queries (all three surfaces now return the `gaps` array beside
+`entries`). What replaced each is in
 `specs/014-dayflow-capture-loop/research.md` (D014-1 … D014-15).
 
 **A green `cargo test` still does not certify the whole feature.** The parts that need
