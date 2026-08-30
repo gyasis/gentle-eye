@@ -841,7 +841,7 @@ async fn a_resident_run_pays_the_cold_load_once_and_an_ondemand_run_pays_it_per_
             let (_s, latency) =
                 gentle_eye::dayflow::perception::summarize_segment_via_ladder(
                     &router,
-                    &[sample.clone()],
+                    std::slice::from_ref(&sample),
                     "what?",
                     0,
                     1,
