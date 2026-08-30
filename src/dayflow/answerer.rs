@@ -7,15 +7,33 @@
 //! One implementation here, so the surfaces cannot drift: an answer that
 //! differs by which surface asked is a bug nobody would think to look for.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::config::DayflowConfig;
 
+/// SPLIT timeouts, per D014-12. A single flat budget cannot tell a dead
+/// endpoint from a legitimate cold load: measured 2026-08-29, the first
+/// ask after an idle period failed with a transport error while the
+/// governor spent 95 s loading the reasoning model. A short CONNECT
+/// fails a wrong URL in a second; a long READ lets a cold load finish.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const READ_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Calls the reasoning tier through the governed lane.
+///
+/// `Clone` is cheap — the client is an `Arc` around a shared pool — and it is
+/// what lets `answer_blocking` hand the SAME pooled connections to its worker
+/// thread instead of rebuilding TLS state per question.
+#[derive(Clone)]
 pub struct ModelAnswerer {
     endpoint: String,
     model: String,
-    client: reqwest::Client,
+    /// `Err` when the HTTP client could not be built. Kept as a value rather
+    /// than unwrapped at construction so a broken TLS backend produces a
+    /// STATED ask failure — and never a default client, whose missing
+    /// timeouts would silently undo the D014-12 fix.
+    client: Result<reqwest::Client, String>,
 }
 
 /// What the answerer needs from the environment, resolved once.
@@ -25,6 +43,47 @@ pub struct ModelAnswerer {
 /// `ask` are the same configuration.
 pub fn endpoint_from_env() -> Option<String> {
     std::env::var("GE_DAYFLOW_ENDPOINT").ok().filter(|s| !s.trim().is_empty())
+}
+
+/// The one client every answerer shares.
+///
+/// One client, not one per question: the pool (and its TLS session state) is
+/// what makes the SECOND ask of the day skip the handshake the first one paid.
+/// The build result is cached including failure — a TLS backend that failed
+/// once will fail identically every time, and retrying the build per question
+/// would only repeat the same stated error more slowly.
+fn shared_client() -> Result<reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(READ_TIMEOUT)
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .clone()
+}
+
+/// The one runtime every blocking ask runs on.
+///
+/// SHARED rather than built per call: reqwest's pooled connections are driven
+/// by tasks living on the runtime that made the request, so a per-call runtime
+/// takes its pool down with it — the next question would find dead pooled
+/// connections and pay a fresh handshake (or worse, a spurious transport error
+/// that then consumes the one D014-12 retry).
+fn ask_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RT: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("dayflow-ask")
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+    })
+    .as_ref()
+    .map_err(Clone::clone)
 }
 
 impl ModelAnswerer {
@@ -44,16 +103,23 @@ impl ModelAnswerer {
 
     /// An answerer against `endpoint`, asking `model`.
     pub fn new(endpoint: impl Into<String>, model: impl Into<String>) -> Self {
-        // SPLIT timeouts, per D014-12. A single flat budget cannot tell a dead
-        // endpoint from a legitimate cold load: measured 2026-08-29, the first
-        // ask after an idle period failed with a transport error while the
-        // governor spent 95 s loading the reasoning model. A short CONNECT
-        // fails a wrong URL in a second; a long READ lets a cold load finish.
+        Self { endpoint: endpoint.into(), model: model.into(), client: shared_client() }
+    }
+
+    /// An answerer with explicit budgets and its own client, for tests that
+    /// need a timeout to actually FIRE within a test's lifetime.
+    #[cfg(test)]
+    fn with_timeouts(
+        endpoint: impl Into<String>,
+        model: impl Into<String>,
+        connect: Duration,
+        read: Duration,
+    ) -> Self {
         let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(180))
+            .connect_timeout(connect)
+            .timeout(read)
             .build()
-            .unwrap_or_default();
+            .map_err(|e| e.to_string());
         Self { endpoint: endpoint.into(), model: model.into(), client }
     }
 
@@ -64,6 +130,10 @@ impl ModelAnswerer {
     /// failure here must READ as a failure rather than vanish into an empty
     /// answer that looks like a confident "nothing happened".
     pub async fn answer(&self, prompt: &str) -> String {
+        let client = match &self.client {
+            Ok(c) => c,
+            Err(e) => return format!("[ask failed: could not build an HTTP client: {e}]"),
+        };
         let url = format!("{}/api/generate", self.endpoint.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": self.model,
@@ -73,15 +143,28 @@ impl ModelAnswerer {
 
         // ONE retry on a TRANSPORT error, per D014-12. The first question after
         // an idle period is precisely when the model is cold and the lane drops
-        // the connection — the common case, not the edge. A retry after a
-        // REJECTED request would be wrong (the model answered, it just said
-        // something we could not use), so only transport failures retry.
+        // the connection — the common case, not the edge. Two things do NOT
+        // retry, deliberately:
+        // - a REJECTED request (the model answered; asking again would double
+        //   the cost of every refusal), and
+        // - a TIMEOUT: the read budget already waited out the whole cold-load
+        //   window, so a second identical wait cannot succeed where the first
+        //   ran out — it would turn one bounded 3-minute failure into six
+        //   unbounded minutes of silence. D014-12 retries the transport
+        //   failure, not the timeout.
         let mut last = String::new();
         for attempt in 1..=2 {
-            match self.client.post(&url).json(&body).send().await {
+            match client.post(&url).json(&body).send().await {
                 Ok(resp) => {
                     let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
+                    let text = match resp.text().await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            return format!(
+                                "[ask failed: reading the model's reply from {url} failed: {e}]"
+                            )
+                        }
+                    };
                     if !status.is_success() {
                         return format!("[ask failed: the model returned {status}: {text}]");
                     }
@@ -101,6 +184,12 @@ impl ModelAnswerer {
                         Err(e) => format!("[ask failed: the model's reply was not JSON: {e}]"),
                     };
                 }
+                Err(e) if e.is_timeout() => {
+                    return format!(
+                        "[ask failed: no answer from {url} within the {}s read budget: {e}]",
+                        READ_TIMEOUT.as_secs()
+                    );
+                }
                 Err(e) => {
                     last = e.to_string();
                     if attempt == 1 {
@@ -119,23 +208,20 @@ impl ModelAnswerer {
     /// `ask_day`'s answerer is `FnOnce(&str) -> String`, and the three surfaces
     /// that call it are a mix of sync (the HTTP server's request loop) and
     /// async (the CLI, MCP). `block_on` inside an async context panics, so the
-    /// call runs on its own thread with its own current-thread runtime and this
-    /// one blocks on the join.
+    /// call blocks on a plain thread that drives the SHARED runtime — the
+    /// thread is a per-question cost of microseconds against a multi-second
+    /// model call, but the runtime and client are not rebuilt: the connection
+    /// pool survives between questions (see [`ask_runtime`]).
     ///
     /// Blocking an interactive `ask` is the intended cost: the caller asked a
     /// question and is waiting for the answer. It is NOT used on the capture
     /// path, where blocking would stall recording.
     pub fn answer_blocking(&self, prompt: &str) -> String {
-        let endpoint = self.endpoint.clone();
-        let model = self.model.clone();
+        let answerer = self.clone();
         let prompt = prompt.to_string();
-        let handle = std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(e) => return format!("[ask failed: no runtime for the model call: {e}]"),
-            };
-            let answerer = ModelAnswerer::new(endpoint, model);
-            rt.block_on(answerer.answer(&prompt))
+        let handle = std::thread::spawn(move || match ask_runtime() {
+            Ok(rt) => rt.block_on(answerer.answer(&prompt)),
+            Err(e) => format!("[ask failed: no runtime for the model call: {e}]"),
         });
         handle.join().unwrap_or_else(|_| {
             // A panicked answer thread must not take the surface with it: the
@@ -166,9 +252,27 @@ pub fn answer_or_explain(cfg: &DayflowConfig, prompt: &str) -> String {
     }
 }
 
+/// Serialises every test (in this crate's test binary) that reads or writes
+/// `GE_DAYFLOW_ENDPOINT` / `GE_DAYFLOW_REASON_MODEL`.
+///
+/// Tests run as parallel THREADS of one process and the environment is process
+/// GLOBAL: without this lock, one test's `remove_var` races another's
+/// `set_var`, and whichever reads in between sees the other test's state — a
+/// flaky pass/fail that depends on scheduler order. Poisoning is deliberately
+/// forgiven: a panicked env test must not cascade into every other env test
+/// failing on `lock().unwrap()`.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     /// An unconfigured install says so, and does NOT echo the prompt back.
     ///
@@ -177,6 +281,7 @@ mod tests {
     /// enough to look like an answer.
     #[test]
     fn an_unconfigured_install_says_so_without_echoing_the_prompt() {
+        let _env = test_env_lock();
         let cfg = DayflowConfig::default();
         // Ensure the env is genuinely absent for this assertion.
         let prior = std::env::var("GE_DAYFLOW_ENDPOINT").ok();
@@ -185,15 +290,15 @@ mod tests {
         let prompt = "SECRET-PROMPT-MARKER what did I do today?";
         let out = answer_or_explain(&cfg, prompt);
 
+        if let Some(v) = prior {
+            std::env::set_var("GE_DAYFLOW_ENDPOINT", v);
+        }
+
         assert_eq!(out, NO_MODEL);
         assert!(
             !out.contains("SECRET-PROMPT-MARKER"),
             "the prompt was echoed back as if it were an answer: {out}"
         );
-
-        if let Some(v) = prior {
-            std::env::set_var("GE_DAYFLOW_ENDPOINT", v);
-        }
     }
 
     /// An unreachable endpoint produces a STATED failure, not an empty answer
@@ -217,13 +322,118 @@ mod tests {
         );
     }
 
+    /// A server that accepts connections and hands each accepted socket to
+    /// `on_accept`, counting accepts. The COUNT is the observable: it is the
+    /// number of HTTP attempts the client actually made.
+    fn counting_server(
+        on_accept: fn(std::net::TcpStream, &mut Vec<std::net::TcpStream>),
+    ) -> (std::net::SocketAddr, Arc<AtomicUsize>, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let (accepts_t, done_t) = (accepts.clone(), done.clone());
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).expect("nonblocking");
+            // Sockets a behaviour wants HELD (open but silent) live here so
+            // they are not dropped — dropping would turn a timeout fixture
+            // into a transport-error fixture.
+            let mut held = Vec::new();
+            while !done_t.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        accepts_t.fetch_add(1, Ordering::SeqCst);
+                        on_accept(stream, &mut held);
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        (addr, accepts, done)
+    }
+
+    /// A READ TIMEOUT is a stated failure and is NOT retried (D014-12 retries
+    /// the transport failure, not the timeout). The fixture genuinely produces
+    /// the condition: the server accepts and then never answers, so the
+    /// client's read budget expires. One accept = one attempt; a second accept
+    /// would mean the old behaviour (retry-on-any-error) is back, doubling a
+    /// 3-minute wait into 6 in production.
+    #[test]
+    fn a_read_timeout_is_stated_and_not_retried() {
+        let (addr, accepts, done) = counting_server(|stream, held| {
+            // Hold the socket open and say nothing: the request is sent, no
+            // byte of response ever arrives, and only the READ budget can end
+            // the wait.
+            held.push(stream);
+        });
+
+        let a = ModelAnswerer::with_timeouts(
+            format!("http://{addr}"),
+            "m",
+            Duration::from_millis(500),
+            Duration::from_millis(700),
+        );
+        let started = std::time::Instant::now();
+        let out = a.answer_blocking("q");
+        done.store(true, Ordering::SeqCst);
+
+        assert!(
+            out.starts_with("[ask failed: no answer"),
+            "a timeout must be stated as one: {out}"
+        );
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "a timed-out request was RETRIED — that spends the whole read budget twice: {out}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the timeout did not bound the wait: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A DROPPED connection — the measured cold-load failure of D014-12 — is
+    /// retried exactly once. The fixture produces the condition: the server
+    /// accepts and immediately closes, which is a transport error, not a
+    /// timeout. Two accepts = the original attempt plus its one retry.
+    #[test]
+    fn a_dropped_connection_is_retried_exactly_once() {
+        let (addr, accepts, done) = counting_server(|stream, _held| {
+            // Close immediately: the client sees the connection die with no
+            // response — reqwest reports a transport error.
+            drop(stream);
+        });
+
+        let a = ModelAnswerer::with_timeouts(
+            format!("http://{addr}"),
+            "m",
+            Duration::from_millis(500),
+            Duration::from_secs(5),
+        );
+        let out = a.answer_blocking("q");
+        // The retry needs a moment to complete both attempts before we stop
+        // counting; answer_blocking already joined, so both are done here.
+        done.store(true, Ordering::SeqCst);
+
+        assert!(out.starts_with("[ask failed"), "both attempts failed, stated: {out}");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "a transport error must be retried exactly once (D014-12): {out}"
+        );
+    }
+
     /// The retry is on TRANSPORT failure only. A model that answered — even
     /// with a rejection — has spoken, and asking again would double the cost of
     /// every refusal.
     #[test]
     fn the_endpoint_and_model_are_taken_from_the_environment() {
+        let _env = test_env_lock();
         let mut cfg = DayflowConfig::default();
         cfg.perception.reason_model = "from-config".into();
+        let prior_endpoint = std::env::var("GE_DAYFLOW_ENDPOINT").ok();
+        let prior_model = std::env::var("GE_DAYFLOW_REASON_MODEL").ok();
 
         std::env::set_var("GE_DAYFLOW_ENDPOINT", "http://example.invalid:8799/llm/ollama");
         std::env::remove_var("GE_DAYFLOW_REASON_MODEL");
@@ -237,8 +447,18 @@ mod tests {
 
         std::env::remove_var("GE_DAYFLOW_ENDPOINT");
         std::env::remove_var("GE_DAYFLOW_REASON_MODEL");
+        let unconfigured = ModelAnswerer::from_env(&cfg);
+
+        // Restore whatever the process started with before asserting, so a
+        // failure here cannot leave the environment mangled for later tests.
+        if let Some(v) = prior_endpoint {
+            std::env::set_var("GE_DAYFLOW_ENDPOINT", v);
+        }
+        if let Some(v) = prior_model {
+            std::env::set_var("GE_DAYFLOW_REASON_MODEL", v);
+        }
         assert!(
-            ModelAnswerer::from_env(&cfg).is_none(),
+            unconfigured.is_none(),
             "no endpoint means no answerer — an unconfigured install must still READ its timeline"
         );
     }

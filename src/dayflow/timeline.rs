@@ -576,6 +576,25 @@ where
 
 #[cfg(test)]
 mod ask_tests {
+
+    /// The serde contract every surface depends on: a serialized answer
+    /// carries BOTH its prose and its grounding entries. All three surfaces
+    /// serialize this one struct whole, so a `#[serde(skip)]`-shaped
+    /// regression here would silently strip the evidence from every payload
+    /// at once — this is the single place that failure is cheapest to pin.
+    #[test]
+    fn a_serialized_answer_carries_its_grounding() {
+        let a = DayAnswer {
+            answer: "you were modelling a lamp".into(),
+            grounding: vec![entry(0, 60, "modelling a lamp")],
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["answer"], "you were modelling a lamp");
+        let g = v["grounding"].as_array().expect("grounding survives serialization");
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0]["activity"], "modelling a lamp");
+    }
+
     use super::*;
     use crate::storage::database::init_in_memory;
     use std::sync::{Arc, Mutex};

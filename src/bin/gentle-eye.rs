@@ -1630,6 +1630,14 @@ mod dayflow_cli_tests {
         // No records, so the refusal — the point is that it did not error out
         // treating the timestamp as the question, and the range still applied.
         assert_eq!(out["answer"], gentle_eye::dayflow::timeline::NO_RECORD);
+        // And the CLI's JSON carries the grounding field: an answer whose
+        // evidence was dropped in serialization would make confident prose
+        // with empty grounding undetectable on this surface (T025).
+        assert_eq!(
+            out["grounding"].as_array().expect("the CLI JSON carries grounding").len(),
+            0,
+            "{out}"
+        );
 
         // and a question that IS missing is refused rather than invented
         let err = dayflow_command(&s, &argv(&["ask", "--from", "2026-08-26T09:00:00Z"]), now());

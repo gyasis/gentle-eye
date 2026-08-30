@@ -1136,6 +1136,81 @@ mod tests {
     /// the service-level parity test cannot see an adapter that drops
     /// `window`/`input` on the floor and starts a whole-display session while
     /// reporting success.
+
+    #[test]
+    fn ask_day_with_no_record_refuses_in_the_payload_with_empty_grounding() {
+        // The refusal must arrive IN the serialized MCP payload — answer AND
+        // an (empty) grounding array. A payload that carried only the prose
+        // would make "confident prose with empty grounding" undetectable on
+        // this surface, which is the exact failure `DayAnswer` exists to expose.
+        let s = test_server();
+        let result = s.tool_ask_day_at(
+            AskDayInput { question: "what was I doing?".into(), from: None, to: None },
+            Utc::now(),
+        );
+        assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+        let body = body_of(&result);
+        assert!(
+            body.contains("No activity was recorded"),
+            "an empty range refuses without a model: {body}"
+        );
+        assert!(
+            body.contains("grounding"),
+            "the MCP payload dropped the grounding field: {body}"
+        );
+    }
+
+    #[test]
+    fn ask_day_with_records_carries_the_grounding_entries_in_the_payload() {
+        // T025's DONE line: "an answer carries its grounding, so confident
+        // prose with empty grounding stays detectable". That must hold in the
+        // SERIALIZED payload a client receives, not merely in the Rust struct.
+        let _env = crate::dayflow::answerer::test_env_lock();
+        let prior = std::env::var("GE_DAYFLOW_ENDPOINT").ok();
+        // Unset, so the answerer path resolves to NO_MODEL without a network
+        // call — the serialization contract is what is under test here.
+        std::env::remove_var("GE_DAYFLOW_ENDPOINT");
+
+        let s = test_server();
+        let now = Utc::now();
+        s.dayflow
+            .insert_entry(&crate::dayflow::models::TimelineEntry {
+                id: uuid::Uuid::new_v4(),
+                recording_id: uuid::Uuid::new_v4(),
+                start_time: now - chrono::Duration::minutes(30),
+                end_time: now - chrono::Duration::minutes(20),
+                category: crate::dayflow::models::ActivityCategory::Coding,
+                app: "editor".into(),
+                activity: "auditing wave ten".into(),
+                summary: "WAVE-TEN-GROUNDING-MARKER".into(),
+                provenance: None,
+            })
+            .unwrap();
+
+        let result = s.tool_ask_day_at(
+            AskDayInput {
+                question: "what was I doing?".into(),
+                from: Some((now - chrono::Duration::hours(1)).to_rfc3339()),
+                to: Some(now.to_rfc3339()),
+            },
+            now,
+        );
+        if let Some(v) = prior {
+            std::env::set_var("GE_DAYFLOW_ENDPOINT", v);
+        }
+
+        assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+        let body = body_of(&result);
+        assert!(
+            body.contains("WAVE-TEN-GROUNDING-MARKER"),
+            "the MCP payload must carry the entries the answer was grounded on: {body}"
+        );
+        assert!(
+            body.contains("no model configured"),
+            "an unconfigured install states so rather than inventing prose: {body}"
+        );
+    }
+
     #[test]
     fn the_mcp_start_tool_delivers_its_source_fields() {
         let s = test_server();
