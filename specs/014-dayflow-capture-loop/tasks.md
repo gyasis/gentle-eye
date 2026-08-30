@@ -65,9 +65,9 @@ line says so.
 
 ## Phase 6: User Story 2 — an input taken, not a display consumed (P1)
 
-- [ ] T016 [US2] `InputSource` in `src/dayflow/source/input.rs`: a stream or capture-device URL, using the existing stream path.
+- [x] T016 [US2] `InputSource` in `src/dayflow/source/input.rs`: a stream or capture-device URL, using the existing stream path.
       `> DONE:` a session records frames from an input; `regions_for` returns `None` HONESTLY — it must not synthesise a whole-frame region, which would be indistinguishable from a real detection and hide the whole-frame read (contract, D014-3).
-- [ ] T017 [S] [US2] Source selection on all three surfaces: `--displays` / `--window` / `--target` / `--input`, and the equivalent MCP and HTTP parameters.
+- [x] T017 [S] [US2] Source selection on all three surfaces: `--displays` / `--window` / `--target` / `--input`, and the equivalent MCP and HTTP parameters.
       `> DONE:` each surface starts each source kind and `status` names it; the three agree. `cargo check` + clippy = 0.
 
 ## Phase 7: User Story 1 — the loop's remaining duties (P1)
