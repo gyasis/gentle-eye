@@ -215,25 +215,15 @@ pub fn entry_from(
 /// region to attribute to, and inventing one would make a whole-frame read look
 /// like a measured layout.
 pub fn provenance_from_regions(regions: &[crate::regions::Region]) -> Option<EntryProvenance> {
-    let order = crate::regions::reading_order(regions);
-    let first = *order.first()?;
-    let r = regions.get(first)?;
-    Some(EntryProvenance {
-        region_id: r.identity(),
-        bbox_x: r.bbox.x,
-        bbox_y: r.bbox.y,
-        bbox_w: r.bbox.w,
-        bbox_h: r.bbox.h,
-        parent_region_id: r
-            .parent
-            .and_then(|i| regions.get(i as usize))
-            .map(crate::regions::Region::identity),
-        display_id: r.display_id,
-        // Rank within THIS capture's reading order. Zero by construction here;
-        // carried explicitly so a reader of the stored row does not have to
-        // know that, and so the field means the same thing everywhere.
-        reading_order: 0,
-    })
+    // Delegates to the ONE region->provenance mapping (T035's
+    // `provenance_in_reading_order`) and takes its first element — which is
+    // rank 0 by that function's own enumeration, so `reading_order: 0` is
+    // carried because it is TRUE there, not asserted here. The W8 gate found
+    // this function re-implementing that mapping field by field (identity,
+    // bbox, parent-index resolution); a second copy of a mapping is the
+    // duplicate-drift class D014-5 forbids (R37/R40) — the copies pass today
+    // and diverge the day one of them is fixed.
+    crate::dayflow::models::provenance_in_reading_order(regions).into_iter().next()
 }
 
 #[cfg(test)]

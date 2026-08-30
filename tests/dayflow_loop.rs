@@ -2338,3 +2338,68 @@ async fn a_whole_frame_window_stores_null_provenance() {
         "a whole-frame read must store NULL provenance, not an invented region"
     );
 }
+
+
+/// The capture THREAD drives retention, not only the loop method a test can
+/// call. Until the W8 gate wired it, `sweep_retention` had no production
+/// caller and `config::RetentionConfig` had no reader — a retention policy the
+/// user could set and nothing would ever consult, the same "expressible but
+/// inert" shape T020 names (defect class: the orphan, 013/R29).
+///
+/// Budget pressure rather than age, because age needs a 24 h wait and budget
+/// does not: with a 1-byte budget every SUMMARISED window's raw samples are
+/// over budget the moment its entry lands, so files a poll has already seen
+/// must start disappearing while the session still runs.
+#[test]
+fn the_capture_thread_sweeps_retention_on_a_schedule() {
+    let store = Arc::new(SqliteTimelineStore::new(Arc::new(std::sync::Mutex::new(
+        gentle_eye::storage::database::init_in_memory().expect("db"),
+    ))));
+    let mut cfg = DayflowConfig::default();
+    cfg.retention.disk_budget_bytes = 1;
+    let svc = DayflowService::new(store, cfg);
+    let t0 = Utc::now();
+    svc.start(DayflowMode::Session, vec![0], t0).expect("session starts");
+    svc.with_run(|r| r.set_interval(std::time::Duration::from_secs(1), t0))
+        .expect("interval set");
+
+    let dir = tempfile::tempdir().unwrap();
+    svc.start_capture(
+        scripted_sources(),
+        ok_summarizer(),
+        dir.path().to_path_buf(),
+        std::time::Duration::from_millis(50),
+    )
+    .expect("capture starts");
+
+    // Success = a sample the poll has SEEN is later gone while the session
+    // runs. Nothing but the retention sweep deletes samples, so a vanished
+    // file is the sweep executing a Shrink decision — not an inference from
+    // counts, which capture's own writes would confound.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut reclaimed = false;
+    while std::time::Instant::now() < deadline {
+        if seen.iter().any(|p| !p.exists()) {
+            reclaimed = true;
+            break;
+        }
+        if let Ok(rd) = std::fs::read_dir(dir.path()) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "png") {
+                    seen.insert(p);
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let still = svc.status(Utc::now()).expect("status");
+    assert!(still.running, "the session must still be running when retention reclaims");
+    svc.stop_capture().expect("capture stops");
+    assert!(
+        reclaimed,
+        "no sample was ever reclaimed: the capture thread never ran retention — \
+         `sweep_retention` is an orphan the running system cannot reach"
+    );
+}

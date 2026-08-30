@@ -279,6 +279,8 @@ impl DayflowService {
         }
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let delta = self.config.delta.clone();
+        let retention =
+            crate::dayflow::retention::RetentionConfig::from_policy(&self.config.retention);
         let run = Arc::clone(&self.run);
         let read_whole = Arc::clone(&self.read_whole);
         let sources_pub = Arc::clone(&self.sources);
@@ -304,6 +306,15 @@ impl DayflowService {
                     return;
                 }
             };
+            // T018: retention runs on a schedule DURING the session. Two
+            // triggers, because a segment's eligibility changes at exactly two
+            // moments: when its summary lands (the gate opens), and when its
+            // age crosses a tier boundary (which no event announces). The
+            // first is handled by sweeping after any settle that produced
+            // entries; the second by this timer. A sweep is a metadata scan of
+            // the retained samples — cheap at this period, wasteful every tick.
+            const SWEEP_PERIOD: chrono::Duration = chrono::Duration::seconds(60);
+            let mut next_sweep = Utc::now() + SWEEP_PERIOD;
             loop {
                 // `Utc::now()` appears HERE and nowhere below it. This is the
                 // edge that supplies the clock; every decision downstream takes
@@ -392,6 +403,23 @@ impl DayflowService {
                     if let Some(active) = guard.as_mut() {
                         active.note_summarized(now);
                     }
+                }
+
+                // T018: execute retention's decisions on the session's own
+                // segments. `sweep_retention` holds no policy — `plan` decides,
+                // gated on `summarized` — so this call is sequencing only,
+                // which is all the loop is allowed to own (D014-5).
+                if !entries.is_empty() || now >= next_sweep {
+                    let decisions = lp.sweep_retention(&retention, now);
+                    let shrunk = decisions
+                        .iter()
+                        .filter(|d| d.action == crate::dayflow::retention::Action::Shrink)
+                        .count();
+                    if shrunk > 0 {
+                        tracing::info!(session = %sid, shrunk,
+                            "retention reclaimed raw samples for shrunk windows");
+                    }
+                    next_sweep = now + SWEEP_PERIOD;
                 }
 
                 // Wait for the next tick OR a stop signal, whichever first.

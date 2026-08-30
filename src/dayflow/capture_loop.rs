@@ -396,6 +396,18 @@ impl CaptureLoop {
                             if let Err(e) = crate::dayflow::retention::reclaim_file(f, &validator) {
                                 tracing::warn!(error = %e, "could not reclaim a sample");
                             }
+                            // The region sidecar the loop wrote BESIDE this
+                            // sample (T010). It describes pixels that no longer
+                            // exist once the sample is gone, and nothing else
+                            // ever deletes it — leaving it would grow one
+                            // orphan JSON per reclaimed sample for the life of
+                            // the directory. `reclaim_file` treats
+                            // already-absent as success, so samples that never
+                            // had a sidecar (whole-frame reads) cost nothing.
+                            let side = crate::dayflow::perception::regions_path(f);
+                            if let Err(e) = crate::dayflow::retention::reclaim_file(&side, &validator) {
+                                tracing::warn!(error = %e, "could not reclaim a region sidecar");
+                            }
                         }
                         self.samples.remove(&key);
                     }
@@ -408,7 +420,7 @@ impl CaptureLoop {
         decisions
     }
 
-    /// Take one frame from every live source and advance the pipeline.    /// Take one frame from every live source and advance the pipeline.
+    /// Take one frame from every live source and advance the pipeline.
     ///
     /// Failure of one source never ends the tick: the others are still asked,
     /// and the failure is recorded as a per-source drop. A drop is not a gap —

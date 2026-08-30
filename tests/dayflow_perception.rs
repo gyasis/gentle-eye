@@ -730,10 +730,23 @@ fn the_three_residency_policies_reach_the_provider_differently() {
 /// Residency measurably WORKS: a `Resident` run pays the cold load once across
 /// segments, an `OnDemand` run pays it every segment.
 ///
-/// The provider models the only thing that matters — a model that is warm when
-/// it was told to stay warm — and `SegmentLatency::first_call` is where the
-/// difference shows, because the cold load is deterministically the first call
-/// of a burst and a mean cannot see it (013/R5).
+/// # What this proves, and what it deliberately does not (W8 gate)
+///
+/// The provider's warm/cold behaviour is a FIXTURE: `ColdLoadProvider` unloads
+/// itself when handed `keep_alive: None`, so "OnDemand pays per segment" is
+/// arranged by this file, not observed from a server. Read as a claim about
+/// ollama it would be circular. What the test actually establishes is the
+/// three links this side of the wire: (1) the loop re-applies the policy at
+/// every segment boundary and the RESOLVED value (asserted against
+/// `ResidencyPolicy::keep_alive` below, not restated) reaches the provider
+/// each time; (2) `SegmentLatency::first_call` isolates a cold load — it is
+/// deterministically the first call of a burst, and a mean cannot see it
+/// (013/R5); (3) given a provider that honours keep_alive semantics, the three
+/// policies produce measurably different runs. That a REAL server honours the
+/// value is 013/R27's live measurement, not this test's — and the fixture's
+/// unload-on-None models that server only while the segment cadence exceeds
+/// the server's own default window (900 s vs ollama's 5 min default; a 60 s
+/// cadence would stay warm under OnDemand and this fixture would not).
 #[tokio::test]
 async fn a_resident_run_pays_the_cold_load_once_and_an_ondemand_run_pays_it_per_segment() {
     /// Warm only if it was asked to stay warm. Records each call's cost.
@@ -850,6 +863,14 @@ async fn a_resident_run_pays_the_cold_load_once_and_an_ondemand_run_pays_it_per_
                     .expect("ladder runs");
             firsts.push(latency.first_call);
         }
+        // The tie that keeps the fixture honest: the value it acted on is the
+        // one the REAL resolver produced for this policy — not a value this
+        // test invented to make its own arrangement come out.
+        assert_eq!(
+            *keep.lock().unwrap(),
+            policy.keep_alive(cadence),
+            "the provider acted on a keep_alive the resolver never produced"
+        );
         firsts
     }
 

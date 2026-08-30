@@ -48,6 +48,24 @@ impl Default for RetentionConfig {
     }
 }
 
+impl RetentionConfig {
+    /// Build the planner's config from the user-facing policy
+    /// (`config::RetentionConfig`).
+    ///
+    /// This is the ONE join between the two structs. Until the W8 gate wired
+    /// it, `config::RetentionConfig` had zero readers outside the config
+    /// module — a retention policy the user could set and nothing would ever
+    /// consult, the same "expressible but inert" shape T020 fixed for
+    /// residency.
+    pub fn from_policy(p: &crate::config::RetentionConfig) -> Self {
+        Self {
+            hot: Duration::from_secs(u64::from(p.hot_grace_hours) * 60 * 60),
+            warm: Duration::from_secs(u64::from(p.warm_days) * 24 * 60 * 60),
+            budget_bytes: p.disk_budget_bytes,
+        }
+    }
+}
+
 /// Which tier a window's artifacts currently belong in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
