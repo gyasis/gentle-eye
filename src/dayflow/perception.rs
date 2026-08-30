@@ -129,6 +129,29 @@ impl PerceptionRouter {
         }
     }
 
+    /// The text tier, for a caller that must address it directly.
+    pub fn text_provider(&self) -> &Arc<dyn VisionProvider> {
+        &self.text
+    }
+
+    /// Apply a residency policy to the TEXT tier.
+    ///
+    /// Text only, deliberately. The text tier is called once per region per
+    /// sample and is the one that pays a reload on every segment; the reasoning
+    /// tier fires ONCE per segment, so pinning it would hold a second model's
+    /// memory to save a cost that is already amortised.
+    ///
+    /// A provider that ignores the hint still behaves correctly — this is a
+    /// call, not a contract (`VisionProvider::set_keep_alive` defaults to a
+    /// no-op).
+    pub fn apply_residency(
+        &self,
+        policy: crate::config::ResidencyPolicy,
+        segment_cadence: std::time::Duration,
+    ) {
+        self.text.set_keep_alive(policy.keep_alive(segment_cadence));
+    }
+
     /// Perceive one image at the tier the caller asked for.
     ///
     /// `reason` is required for [`PerceptionKind::Reason`] and is what lands in

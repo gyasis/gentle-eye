@@ -611,3 +611,259 @@ fn a_region_exactly_touching_the_frame_edge_yields_no_crop() {
             .unwrap();
     assert_eq!(crops.len(), 1, "edge-kissing regions produce no crop, and no error");
 }
+
+// ── T020/T021: residency is expressible end to end ───────────────────────────
+
+/// A provider that records every keep_alive it was handed.
+struct ResidencyRecorder {
+    tier: Tier,
+    seen: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+#[async_trait]
+impl VisionProvider for ResidencyRecorder {
+    async fn analyze_video(
+        &self,
+        _: &Path,
+        _: &str,
+        _: Option<TimeRange>,
+    ) -> Result<AnalysisResult, VisionError> {
+        unreachable!("dayflow samples frames")
+    }
+    async fn analyze_image(&self, _: &Path, _: &str) -> Result<AnalysisResult, VisionError> {
+        let text = match self.tier {
+            Tier::Text => "screen text".to_string(),
+            Tier::Reason => {
+                r#"{"category":"coding","app":"editor","activity":"a","detail":"d"}"#.to_string()
+            }
+        };
+        Ok(AnalysisResult {
+            request_id: uuid::Uuid::new_v4(),
+            analysis_text: text,
+            provider: "residency".into(),
+            model_used: "residency".into(),
+            processing_time_ms: 1,
+            token_count: None,
+            completed_at: Utc::now(),
+        })
+    }
+    async fn health_check(&self) -> Result<(), VisionError> {
+        Ok(())
+    }
+    fn name(&self) -> &'static str {
+        "residency"
+    }
+    fn max_video_size(&self) -> u64 {
+        0
+    }
+    fn supports_native_video(&self) -> bool {
+        false
+    }
+    fn model(&self) -> &str {
+        "residency"
+    }
+    fn set_keep_alive(&self, keep_alive: Option<String>) {
+        self.seen.lock().unwrap().push(keep_alive);
+    }
+}
+
+/// `Resident` reaches the PROVIDER — the value, not just the config. Before
+/// T020 nothing sent keep_alive, so `Resident` was a policy the running system
+/// could not express, and no test failed to say so.
+#[test]
+fn a_resident_policy_reaches_the_text_provider_and_not_the_reason_tier() {
+    use gentle_eye::dayflow::summarizer::RoutedChunkSummarizer;
+
+    let text_seen = Arc::new(Mutex::new(Vec::new()));
+    let reason_seen = Arc::new(Mutex::new(Vec::new()));
+    let router = Arc::new(PerceptionRouter::new(
+        Arc::new(ResidencyRecorder { tier: Tier::Text, seen: Arc::clone(&text_seen) }),
+        Arc::new(ResidencyRecorder { tier: Tier::Reason, seen: Arc::clone(&reason_seen) }),
+        dayflow_budget(60, 1, 12),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let cadence = std::time::Duration::from_secs(900);
+
+    let _s = RoutedChunkSummarizer::new(Arc::clone(&router), dir.path())
+        .with_residency(ResidencyPolicy::Resident, cadence);
+
+    let text = text_seen.lock().unwrap().clone();
+    assert_eq!(
+        text,
+        vec![Some("1860s".to_string())],
+        "the text tier must receive the RESOLVED keep_alive (2x cadence + 60s margin)"
+    );
+    assert!(
+        reason_seen.lock().unwrap().is_empty(),
+        "the reasoning tier fires once per segment — pinning it holds a second model's \
+         memory to save a cost that is already amortised"
+    );
+}
+
+/// The three policies are distinguishable at the provider. Collapsing them
+/// would make `Resident` and `OnDemand` the same request while status still
+/// reported a residency policy.
+#[test]
+fn the_three_residency_policies_reach_the_provider_differently() {
+    use gentle_eye::dayflow::summarizer::RoutedChunkSummarizer;
+
+    let cadence = std::time::Duration::from_secs(900);
+    let mut got = Vec::new();
+    for policy in [ResidencyPolicy::Resident, ResidencyPolicy::OnDemand, ResidencyPolicy::Off] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let router = Arc::new(PerceptionRouter::new(
+            Arc::new(ResidencyRecorder { tier: Tier::Text, seen: Arc::clone(&seen) }),
+            Arc::new(ResidencyRecorder { tier: Tier::Reason, seen: Arc::new(Mutex::new(Vec::new())) }),
+            dayflow_budget(60, 1, 12),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let _s = RoutedChunkSummarizer::new(router, dir.path()).with_residency(policy, cadence);
+        got.push(seen.lock().unwrap().clone());
+    }
+    assert_eq!(got[0], vec![Some("1860s".to_string())], "Resident holds the model");
+    assert_eq!(got[1], vec![None], "OnDemand says nothing — it accepts the reload");
+    assert_eq!(got[2], vec![Some("0".to_string())], "Off releases immediately");
+    assert_ne!(got[0], got[1]);
+    assert_ne!(got[1], got[2]);
+}
+
+/// Residency measurably WORKS: a `Resident` run pays the cold load once across
+/// segments, an `OnDemand` run pays it every segment.
+///
+/// The provider models the only thing that matters — a model that is warm when
+/// it was told to stay warm — and `SegmentLatency::first_call` is where the
+/// difference shows, because the cold load is deterministically the first call
+/// of a burst and a mean cannot see it (013/R5).
+#[tokio::test]
+async fn a_resident_run_pays_the_cold_load_once_and_an_ondemand_run_pays_it_per_segment() {
+    /// Warm only if it was asked to stay warm. Records each call's cost.
+    struct ColdLoadProvider {
+        tier: Tier,
+        warm: Arc<Mutex<bool>>,
+        keep: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl VisionProvider for ColdLoadProvider {
+        async fn analyze_video(
+            &self,
+            _: &Path,
+            _: &str,
+            _: Option<TimeRange>,
+        ) -> Result<AnalysisResult, VisionError> {
+            unreachable!()
+        }
+        async fn analyze_image(&self, _: &Path, _: &str) -> Result<AnalysisResult, VisionError> {
+            // The guard must NOT be held across the await: a std Mutex guard
+            // is not Send, and holding it would also serialise the very thing
+            // being measured.
+            let was_cold = {
+                let mut warm = self.warm.lock().unwrap();
+                let cold = !*warm;
+                *warm = true;
+                cold
+            };
+            if was_cold {
+                // The cold load. Small but real, so first_call can see it.
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            }
+            let text = match self.tier {
+                Tier::Text => "screen text".to_string(),
+                Tier::Reason => {
+                    r#"{"category":"coding","app":"e","activity":"a","detail":"d"}"#.to_string()
+                }
+            };
+            Ok(AnalysisResult {
+                request_id: uuid::Uuid::new_v4(),
+                analysis_text: text,
+                provider: "cold".into(),
+                model_used: "cold".into(),
+                processing_time_ms: 1,
+                token_count: None,
+                completed_at: Utc::now(),
+            })
+        }
+        async fn health_check(&self) -> Result<(), VisionError> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "cold"
+        }
+        fn max_video_size(&self) -> u64 {
+            0
+        }
+        fn supports_native_video(&self) -> bool {
+            false
+        }
+        fn model(&self) -> &str {
+            "cold"
+        }
+        fn set_keep_alive(&self, keep_alive: Option<String>) {
+            *self.keep.lock().unwrap() = keep_alive.clone();
+            // Between segments the model unloads UNLESS residency asked it to
+            // stay. That is the whole behaviour residency buys.
+            if keep_alive.is_none() {
+                *self.warm.lock().unwrap() = false;
+            }
+        }
+    }
+
+    async fn run(policy: ResidencyPolicy) -> Vec<std::time::Duration> {
+        let dir = tempfile::tempdir().unwrap();
+        let sample = dir.path().join("d0_w000000_x.png");
+        // A real 8x8 PNG so crop/read paths behave.
+        let img = image::RgbaImage::from_fn(8, 8, |x, y| {
+            image::Rgba([(x * 30) as u8, (y * 30) as u8, 128, 255])
+        });
+        img.save(&sample).unwrap();
+
+        let warm = Arc::new(Mutex::new(false));
+        let keep = Arc::new(Mutex::new(None));
+        let router = PerceptionRouter::new(
+            Arc::new(ColdLoadProvider {
+                tier: Tier::Text,
+                warm: Arc::clone(&warm),
+                keep: Arc::clone(&keep),
+            }),
+            Arc::new(ColdLoadProvider {
+                tier: Tier::Reason,
+                warm: Arc::new(Mutex::new(true)),
+                keep: Arc::new(Mutex::new(None)),
+            }),
+            dayflow_budget(60, 1, 12),
+        );
+        let cadence = std::time::Duration::from_secs(900);
+        let mut firsts = Vec::new();
+        for _ in 0..3 {
+            // Each segment begins by applying the policy — which, for a policy
+            // that does not hold the model, drops it.
+            router.text_provider().set_keep_alive(policy.keep_alive(cadence));
+            let (_s, latency) =
+                gentle_eye::dayflow::perception::summarize_segment_via_ladder(
+                    &router,
+                    &[sample.clone()],
+                    "what?",
+                    0,
+                    1,
+                )
+                    .await
+                    .expect("ladder runs");
+            firsts.push(latency.first_call);
+        }
+        firsts
+    }
+
+    let resident = run(ResidencyPolicy::Resident).await;
+    let on_demand = run(ResidencyPolicy::OnDemand).await;
+
+    let cold = std::time::Duration::from_millis(30);
+    assert!(resident[0] >= cold, "the first segment always pays the load: {:?}", resident[0]);
+    assert!(
+        resident[1] < cold && resident[2] < cold,
+        "a Resident run paid the cold load again: {resident:?}"
+    );
+    assert!(
+        on_demand.iter().all(|d| *d >= cold),
+        "an OnDemand run should pay the load every segment: {on_demand:?}"
+    );
+}

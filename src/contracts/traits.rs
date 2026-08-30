@@ -311,6 +311,34 @@ pub trait VisionProvider: Send + Sync {
     /// Whether provider supports native video input (vs frame extraction)
     fn supports_native_video(&self) -> bool;
 
+    /// Ask this provider to hold its model resident, as a provider-native
+    /// `keep_alive` value. `None` means "say nothing; leave the server default".
+    ///
+    /// # Why a resolved VALUE and not a `ResidencyPolicy` (T020, D014-4)
+    ///
+    /// `ResidencyPolicy::keep_alive(segment_cadence)` already resolves the
+    /// policy, and it needs the SEGMENT cadence to do it — a fact a provider
+    /// does not have and should not learn. 013 measured that sizing this window
+    /// from the sample interval expired it before the next burst, so `Resident`
+    /// held memory AND paid every cold load. Taking a policy here would force a
+    /// second mapping inside each provider, and a second mapping is a second
+    /// thing to get wrong.
+    ///
+    /// # Why a DEFAULTED method and not a new parameter
+    ///
+    /// Residency is a local-model concept — ollama's `keep_alive`. A cloud
+    /// provider has nothing to keep warm, and four of the five implementors of
+    /// this trait have no use for it. The alternative was a dayflow-local
+    /// wrapper, rejected because a wrapper cannot reach into the provider's
+    /// request body: it would re-implement the transport to add one field,
+    /// creating a second call path that must stay in step with the first — and
+    /// the first is the one that gets fixed when the API changes.
+    ///
+    /// A default of "do nothing" is what makes this safe here: residency is an
+    /// OPTIMISATION, never a correctness requirement, so a provider that
+    /// ignores it still behaves correctly — and by ignoring it, does.
+    fn set_keep_alive(&self, _keep_alive: Option<String>) {}
+
     /// Get the model identifier being used
     fn model(&self) -> &str;
 }

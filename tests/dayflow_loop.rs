@@ -2174,3 +2174,167 @@ fn start_with_source_records_a_real_input_end_to_end() {
         "after a real grab the tick republishes what it OBSERVED"
     );
 }
+
+// ── T018: retention runs on a schedule, and the rule still holds ─────────────
+
+use gentle_eye::dayflow::retention::{Action, RetentionConfig};
+
+/// Disk falls, and NO unsummarised segment is reclaimed. The rule is unchanged
+/// from 013 — this re-proves it where the loop actually drives it, because a
+/// rule that holds in a unit test and not in the loop is a rule the product
+/// does not have.
+#[tokio::test]
+async fn a_retention_sweep_frees_disk_but_never_touches_an_unsummarised_segment() {
+    let (mut run, cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..200).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    let sources: Vec<Box<dyn CaptureSource>> = vec![Box::new(FakeSource::new(0, script))];
+    let mut lp = CaptureLoop::new(sources, Sampler::new(DeltaConfig::default()), dir.path());
+
+    // Close several windows.
+    let segment = cfg.segment_seconds as i64;
+    let mut t = 0i64;
+    for _ in 0..30 {
+        t += segment / 3;
+        lp.tick(&mut run, at(t));
+    }
+    let closed = lp.segments();
+    assert!(closed.len() >= 2, "expected several closed windows, got {}", closed.len());
+
+    // Summarise only SOME of them. `settle_due` drains every DUE window, so a
+    // summariser that always succeeds leaves nothing unsummarised and the
+    // safety assertion below becomes vacuous — it would pass against a
+    // retention pass that reclaimed everything indiscriminately.
+    let summarizer = FlakySummarizer {
+        calls: AtomicUsize::new(0),
+        fail_first: 1,
+    };
+    let entries = lp.settle_due(&summarizer, uuid::Uuid::new_v4(), at(t)).await;
+    assert!(!entries.is_empty(), "nothing settled — the fixture cannot discriminate");
+
+    let before: u64 = lp.segments().iter().map(|s| s.raw_bytes).sum();
+    assert!(before > 0, "no bytes on disk to reclaim");
+    let unsummarised: Vec<(u32, u64)> = lp
+        .segments()
+        .iter()
+        .filter(|s| !s.summarized)
+        .map(|s| s.key())
+        .collect();
+
+    // Sweep far enough in the future that the hot tier has expired.
+    let retention = RetentionConfig::default();
+    let later = at(t) + chrono::Duration::from_std(retention.hot).unwrap() + Duration::hours(1);
+    let decisions = lp.sweep_retention(&retention, later);
+
+    assert!(!decisions.is_empty(), "the sweep decided nothing");
+    let shrunk: Vec<(u32, u64)> = decisions
+        .iter()
+        .filter(|d| d.action == Action::Shrink)
+        .map(|d| (d.display_id, d.sequence))
+        .collect();
+    assert!(!shrunk.is_empty(), "the sweep freed nothing — disk did not fall");
+
+    // Keep this: without at least one unsummarised segment the rule assertion
+    // below passes against a sweep that reclaims everything.
+    assert!(
+        !unsummarised.is_empty(),
+        "the fixture produced no unsummarised segment — the safety assertion is vacuous"
+    );
+    for key in &unsummarised {
+        assert!(
+            !shrunk.contains(key),
+            "an UNSUMMARISED segment {key:?} was reclaimed — eviction is gated on a summary \
+             existing, never on age or budget pressure"
+        );
+    }
+
+    let after: u64 = lp.segments().iter().map(|s| s.raw_bytes).sum();
+    assert!(after < before, "disk did not fall: {before} -> {after}");
+}
+
+// ── T019: entries carry where their text came from ───────────────────────────
+
+/// Entries written by the loop have NON-NULL provenance whose region id matches
+/// the sidecar the loop wrote. Before this, every entry stored NULL: the
+/// cascade ran, the crops were read, and where the text came from was discarded
+/// at the last step.
+#[tokio::test]
+async fn entries_carry_provenance_matching_the_sidecar() {
+    let (mut run, cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..200).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    let mut src = FakeSource::new(0, script);
+    src.regions = Some(boxes(3));
+    let mut lp = CaptureLoop::new(vec![Box::new(src)], Sampler::new(DeltaConfig::default()), dir.path());
+
+    let segment = cfg.segment_seconds as i64;
+    let mut t = 0i64;
+    for _ in 0..12 {
+        t += segment / 3;
+        if !lp.tick(&mut run, at(t)).closed.is_empty() {
+            break;
+        }
+    }
+
+    let summarizer = FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 };
+    let entries = lp.settle_due(&summarizer, uuid::Uuid::new_v4(), at(t)).await;
+    assert!(!entries.is_empty(), "no entry to check");
+
+    let p = entries[0]
+        .provenance
+        .as_ref()
+        .expect("the entry has NULL provenance — the regions were discarded at the last step");
+
+    // The id must match a region actually in the sidecar, not a plausible one.
+    let key_dir = std::fs::read_dir(dir.path()).unwrap();
+    let sidecar = key_dir
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with(".regions.json"))
+        .expect("no sidecar on disk");
+    let stored: Vec<Region> =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+    let ids: Vec<u64> = stored.iter().map(|r| r.identity()).collect();
+    assert!(
+        ids.contains(&p.region_id),
+        "provenance region_id {} is in no sidecar region {ids:?}",
+        p.region_id
+    );
+
+    // It is the region a reader reaches FIRST, not an arbitrary one.
+    let order = gentle_eye::regions::reading_order(&stored);
+    let first = stored[order[0]].identity();
+    assert_eq!(p.region_id, first, "provenance must name the region at reading-order rank 0");
+    assert_eq!(p.reading_order, 0);
+    assert_eq!(p.display_id, 0);
+    assert_eq!((p.bbox_w, p.bbox_h), (32, 8), "the stored box is not the region's box");
+}
+
+/// A window read WHOLE has no region to attribute to, and must store NULL —
+/// inventing one would make a whole-frame read indistinguishable from a
+/// measured layout.
+#[tokio::test]
+async fn a_whole_frame_window_stores_null_provenance() {
+    let (mut run, cfg) = run_for(vec![0]);
+    let dir = tempfile::tempdir().unwrap();
+    let script: Vec<Option<u8>> = (0..200).map(|i| Some((i as u8).wrapping_mul(90))).collect();
+    let sources: Vec<Box<dyn CaptureSource>> =
+        vec![Box::new(FakeSource::new(0, script).with_no_cascade())];
+    let mut lp = CaptureLoop::new(sources, Sampler::new(DeltaConfig::default()), dir.path());
+
+    let segment = cfg.segment_seconds as i64;
+    let mut t = 0i64;
+    for _ in 0..12 {
+        t += segment / 3;
+        if !lp.tick(&mut run, at(t)).closed.is_empty() {
+            break;
+        }
+    }
+    let summarizer = FlakySummarizer { calls: AtomicUsize::new(0), fail_first: 0 };
+    let entries = lp.settle_due(&summarizer, uuid::Uuid::new_v4(), at(t)).await;
+    assert!(!entries.is_empty());
+    assert!(
+        entries[0].provenance.is_none(),
+        "a whole-frame read must store NULL provenance, not an invented region"
+    );
+}

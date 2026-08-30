@@ -105,6 +105,19 @@ pub struct CaptureLoop {
     ///
     /// Shared so the service can report it while the thread owns the loop.
     read_whole: Arc<AtomicU64>,
+    /// Samples written per window, keyed by the DURABLE identity
+    /// `(ordinal, sequence)` — never the filename (013/R34).
+    ///
+    /// Retention needs to know what a window's bytes actually are, and only the
+    /// loop sees a sample at the moment it is written. Rebuilding this by
+    /// listing the directory later would guess at which window a file belonged
+    /// to from its name, which is the identity mistake this key exists to
+    /// prevent.
+    samples: std::collections::HashMap<(u32, u64), Vec<PathBuf>>,
+    /// Windows whose summary landed, so retention may touch them.
+    summarized: HashSet<(u32, u64)>,
+    /// Closed windows awaiting or past summarisation.
+    closed: Vec<ClosedWindow>,
 }
 
 impl CaptureLoop {
@@ -122,6 +135,9 @@ impl CaptureLoop {
             max_attempts: 2,
             retired: HashSet::new(),
             read_whole: Arc::new(AtomicU64::new(0)),
+            samples: std::collections::HashMap::new(),
+            summarized: HashSet::new(),
+            closed: Vec::new(),
         }
     }
 
@@ -212,6 +228,7 @@ impl CaptureLoop {
     ) -> Vec<TimelineEntry> {
         let mut entries = Vec::new();
         while let Some(pending) = self.scheduler.next_due(now) {
+            let key = (pending.window.display_id, pending.window.sequence);
             let chunk = ChunkRef {
                 index: pending.window.sequence as usize,
                 // The sample DIRECTORY, not a per-window artifact — samples are
@@ -233,11 +250,19 @@ impl CaptureLoop {
             let prior = self.scheduler.context().clone();
             match summarizer.summarize_chunk(&chunk, &prior).await {
                 Ok(summary) => {
-                    entries.push(crate::dayflow::scheduler::entry_from(
+                    let mut entry = crate::dayflow::scheduler::entry_from(
                         recording_id,
                         &pending.window,
                         &summary,
-                    ));
+                    );
+                    // T019: the regions this window's text actually came from,
+                    // read back from the sidecars the loop wrote beside its
+                    // samples. Before this, every entry stored `provenance:
+                    // NULL` — the cascade ran, the crops were read, and where
+                    // the text came from was thrown away at the last step.
+                    entry.provenance = self.provenance_for(&key);
+                    entries.push(entry);
+                    self.summarized.insert(key);
                     self.scheduler.succeeded(&summary);
                 }
                 Err(_) => self.scheduler.failed(pending, now),
@@ -291,7 +316,99 @@ impl CaptureLoop {
         }
     }
 
-    /// Take one frame from every live source and advance the pipeline.
+    /// The provenance for a window: the regions beside its samples.
+    ///
+    /// Reads the sidecars the loop wrote at capture time rather than
+    /// re-detecting. Re-detecting at summarise time would describe a DIFFERENT
+    /// moment than the pixels do — the screen has moved on — which is the same
+    /// reason the sidecar exists at all.
+    fn provenance_for(&self, key: &(u32, u64)) -> Option<crate::dayflow::models::EntryProvenance> {
+        let samples = self.samples.get(key)?;
+        // The FIRST sample of the window. Its regions are the arrangement the
+        // window opened with; a later sample may describe a layout the summary
+        // does not lead with.
+        let first = samples.first()?;
+        let side = crate::dayflow::perception::regions_path(first);
+        let raw = std::fs::read_to_string(side).ok()?;
+        let regions: Vec<crate::regions::Region> = serde_json::from_str(&raw).ok()?;
+        crate::dayflow::scheduler::provenance_from_regions(&regions)
+    }
+
+    /// The retention view of every window this loop has closed.
+    ///
+    /// `summarized` is taken from what actually SETTLED, never from age or
+    /// from the window merely having closed — eviction is gated on a summary
+    /// existing, and that gate is the whole of retention's safety.
+    pub fn segments(&self) -> Vec<crate::dayflow::retention::SegmentRecord> {
+        self.closed
+            .iter()
+            .map(|w| {
+                let key = (w.display_id, w.sequence);
+                let raw: Vec<PathBuf> = self.samples.get(&key).cloned().unwrap_or_default();
+                let raw_bytes = raw
+                    .iter()
+                    .filter_map(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len())
+                    .sum();
+                crate::dayflow::retention::SegmentRecord {
+                    sequence: w.sequence,
+                    display_id: w.display_id,
+                    closed_at: w.end_wall,
+                    summarized: self.summarized.contains(&key),
+                    raw,
+                    warm_artifact: None,
+                    raw_bytes,
+                    warm_bytes: 0,
+                }
+            })
+            .collect()
+    }
+
+    /// Run retention on the session's own segments and execute the plan.
+    ///
+    /// Returns the decisions, INCLUDING the ones that left a segment alone and
+    /// why: a sweep that reported only its actions would make "nothing needed
+    /// reclaiming" and "everything was refused" look identical, which is
+    /// exactly the question asked when the disk fills up anyway.
+    pub fn sweep_retention(
+        &mut self,
+        cfg: &crate::dayflow::retention::RetentionConfig,
+        now: DateTime<Utc>,
+    ) -> Vec<crate::dayflow::retention::Decision> {
+        use crate::dayflow::retention::Action;
+        let segments = self.segments();
+        let decisions = crate::dayflow::retention::plan(&segments, now, cfg);
+        // Scoped to the sample directory, deliberately. `reclaim_file` refuses
+        // any path outside its roots, so a corrupted or hostile record cannot
+        // turn a retention sweep into deleting arbitrary files.
+        let validator =
+            crate::security::path_validator::PathValidator::new(self.sample_dir.clone());
+        for d in &decisions {
+            let key = (d.display_id, d.sequence);
+            match d.action {
+                Action::Shrink => {
+                    if let Some(seg) = segments.iter().find(|s| s.key() == key) {
+                        for f in &seg.raw {
+                            // Best-effort: a file that cannot be reclaimed is
+                            // logged, never fatal. Losing the session because
+                            // one sample would not delete would trade a full
+                            // disk for no recording at all.
+                            if let Err(e) = crate::dayflow::retention::reclaim_file(f, &validator) {
+                                tracing::warn!(error = %e, "could not reclaim a sample");
+                            }
+                        }
+                        self.samples.remove(&key);
+                    }
+                }
+                // The warm artifact is produced by `shrink`, which this loop
+                // does not run yet — nothing to drop.
+                Action::DropWarm | Action::Keep(_) => {}
+            }
+        }
+        decisions
+    }
+
+    /// Take one frame from every live source and advance the pipeline.    /// Take one frame from every live source and advance the pipeline.
     ///
     /// Failure of one source never ends the tick: the others are still asked,
     /// and the failure is recorded as a per-source drop. A drop is not a gap —
@@ -300,6 +417,7 @@ impl CaptureLoop {
     pub fn tick(&mut self, run: &mut DayflowRun, now: DateTime<Utc>) -> TickOutcome {
         let mut outcome = TickOutcome::default();
         let read_whole = Arc::clone(&self.read_whole);
+        let mut kept_samples: Vec<((u32, u64), PathBuf)> = Vec::new();
 
         for source in &mut self.sources {
             let ordinal = source.ordinal();
@@ -344,6 +462,9 @@ impl CaptureLoop {
                             // invisible: whole-frame reads, every test green,
                             // crop-before-extract entirely absent.
                             Self::write_sidecar(&read_whole, &record, regions.as_deref());
+                            if let Some(path) = record.path.clone() {
+                                kept_samples.push(((ordinal, sequence), path));
+                            }
                             if let Some(closed) = run.on_sample(ordinal, now) {
                                 outcome.closed.push(closed);
                             }
@@ -435,6 +556,11 @@ impl CaptureLoop {
                 outcome.closed.extend(run.sources_unavailable(cause, now));
             }
         }
+
+        for (key, path) in kept_samples {
+            self.samples.entry(key).or_default().push(path);
+        }
+        self.closed.extend(outcome.closed.iter().cloned());
 
         // Closed windows enter the queue as they close, so summarisation runs
         // DURING the session rather than only at stop (FR-025).

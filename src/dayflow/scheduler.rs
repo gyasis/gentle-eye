@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
+use crate::dayflow::models::EntryProvenance;
 use crate::dayflow::models::{ChunkSummary, RollingContext, TimelineEntry};
 use crate::dayflow::window::ClosedWindow;
 
@@ -194,6 +195,45 @@ pub fn entry_from(
         // guessed: an invented layout is indistinguishable from a measured one.
         provenance: None,
     }
+}
+
+/// The provenance of a window's text: the region it principally came from.
+///
+/// # Why ONE region and not all of them
+///
+/// `TimelineEntry::provenance` is a single `Option<EntryProvenance>` and the
+/// timeline's columns are single-valued, so an entry carries one region's
+/// identity — not the whole layout. The one chosen is **rank 0 in the
+/// deterministic reading order**, which is the region a reader's eye reaches
+/// first and the one the summary leads with.
+///
+/// The layout is not lost: `parent_region_id` carries the cascade edge, so a
+/// stored row can be walked back up to the window it sat in, and
+/// `reading_order` says where it sat among its siblings.
+///
+/// Returns `None` for an empty region set — a window that was read whole has no
+/// region to attribute to, and inventing one would make a whole-frame read look
+/// like a measured layout.
+pub fn provenance_from_regions(regions: &[crate::regions::Region]) -> Option<EntryProvenance> {
+    let order = crate::regions::reading_order(regions);
+    let first = *order.first()?;
+    let r = regions.get(first)?;
+    Some(EntryProvenance {
+        region_id: r.identity(),
+        bbox_x: r.bbox.x,
+        bbox_y: r.bbox.y,
+        bbox_w: r.bbox.w,
+        bbox_h: r.bbox.h,
+        parent_region_id: r
+            .parent
+            .and_then(|i| regions.get(i as usize))
+            .map(crate::regions::Region::identity),
+        display_id: r.display_id,
+        // Rank within THIS capture's reading order. Zero by construction here;
+        // carried explicitly so a reader of the stored row does not have to
+        // know that, and so the field means the same thing everywhere.
+        reading_order: 0,
+    })
 }
 
 #[cfg(test)]

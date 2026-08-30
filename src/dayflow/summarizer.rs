@@ -102,6 +102,26 @@ impl RoutedChunkSummarizer {
         }
     }
 
+    /// Apply a residency policy to the router's text tier, ON CONSTRUCTION.
+    ///
+    /// Deliberately part of building the summariser rather than a separate call
+    /// the caller must remember: a residency that is configured but never
+    /// applied is exactly the state `ResidencyPolicy::Resident` was in before
+    /// T020 — a policy the running system could not express, with nothing
+    /// failing to say so.
+    ///
+    /// Takes the SEGMENT cadence because that is the gap the model must survive
+    /// to stay warm; 013 measured that sizing it from the sample interval
+    /// expired the window before the next burst.
+    pub fn with_residency(
+        self,
+        policy: crate::config::ResidencyPolicy,
+        segment_cadence: std::time::Duration,
+    ) -> Self {
+        self.router.apply_residency(policy, segment_cadence);
+        self
+    }
+
     /// Bound the crops taken per sample. This is the same number the perception
     /// budget is derived from, so the two must be configured together.
     pub fn with_max_regions(mut self, n: usize) -> Self {
