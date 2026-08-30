@@ -97,11 +97,11 @@ line says so.
 
 ## Phase 10: Polish
 
-- [ ] T026 [P] Extend `tests/dayflow_live.rs` with an INPUT source.
+- [x] T026 [P] Extend `tests/dayflow_live.rs` with an INPUT source.
       `> DONE:` the live run records content that was never rendered on this machine's screen (SC-103a), proving the abstraction is real rather than a filter over screen capture. `#[ignore]`d; fails loudly and specifically when the environment is absent.
-- [ ] T027 [P] Update `docs/DAYFLOW.md`, `docs/DAYFLOW_OPERATIONS.md` and `docs/DAYFLOW_LIMITATIONS.md`: the source model, the new commands, and which limitations this feature closed.
+- [x] T027 [P] Update `docs/DAYFLOW.md`, `docs/DAYFLOW_OPERATIONS.md` and `docs/DAYFLOW_LIMITATIONS.md`: the source model, the new commands, and which limitations this feature closed.
       `> DONE:` every limitation this feature closes is REMOVED from the ledger rather than left standing, and `display_id`'s redefinition (D014-2) is documented — in a stored row it means "which source", not "which monitor".
-- [ ] T028 [S] Full green: `cargo test` and `cargo clippy --all-targets -- -D warnings` = 0.
+- [x] T028 [S] Full green: `cargo test` and `cargo clippy --all-targets -- -D warnings` = 0.
       `> DONE:` both clean on a fresh checkout of the branch.
 
 ---
