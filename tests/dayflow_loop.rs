@@ -3267,3 +3267,29 @@ fn a_fresh_daemon_does_not_adopt_another_sessions_samples() {
     );
     d.stop(Utc::now()).unwrap();
 }
+
+/// `route_daemon_at` REIMPLEMENTS the POST gate for the two routes it
+/// intercepts, and `route_at`'s 405 test does not reach the duplicate — an
+/// untested twin is exactly how two route tables drift (R37/R40). Found by a
+/// surviving mutation: with the gate removed, a GET started a session.
+#[test]
+fn the_daemon_routes_refuse_a_safe_method_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(gentle_eye::dayflow::timeline::SqliteTimelineStore::new(Arc::new(
+        std::sync::Mutex::new(gentle_eye::storage::database::init_in_memory().unwrap()),
+    )));
+    let d = Daemon::new(dir.path().join("daemon.json"), svc_for(&db));
+
+    let (code, _) =
+        gentle_eye::dayflow::http::route_daemon_at("GET", "/dayflow/start", "window=w", &d, at(0));
+    assert_eq!(code, "405 Method Not Allowed", "a GET must not start a session");
+    assert!(
+        d.store().load().unwrap().is_none(),
+        "a refused start must leave no state behind"
+    );
+    assert!(!d.service().status(at(0)).unwrap().running, "and no running session");
+
+    let (code, _) =
+        gentle_eye::dayflow::http::route_daemon_at("GET", "/dayflow/stop", "", &d, at(0));
+    assert_eq!(code, "405 Method Not Allowed", "a GET must not stop a session");
+}
