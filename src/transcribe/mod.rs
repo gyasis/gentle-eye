@@ -16,7 +16,7 @@
 //! keeps 285, 138 or 2 frames depending on one deduplication threshold, because
 //! scrolling text genuinely changes every frame while slides do not. A judgement
 //! that must vary with the content cannot be a constant in a binary
-//! (`specs/015-screen-transcription/research.md`, M1 and D015-1).
+//! (`specs/015-screen-transcription/research.md`, M1 and D015-7).
 //!
 //! The merge primitive is deliberately absent from this module: it already
 //! exists as [`crate::dayflow::perception::merge_scroll`] and is made reachable
