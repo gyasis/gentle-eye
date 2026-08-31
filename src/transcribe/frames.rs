@@ -163,3 +163,159 @@ mod tests {
         assert_eq!(sharpness(&[1, 2, 3], 10, 10), 0.0);
     }
 }
+
+/// One frame kept from a recording.
+///
+/// "Kept" means it survived near-duplicate suppression at the CALLER's
+/// threshold. The rows deliberately do not describe what was dropped: the
+/// caller set the threshold and can re-run to see more, and a list of
+/// near-duplicates nobody asked for is noise (D015-7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameRow {
+    /// Position in the kept sequence, from 0.
+    pub index: usize,
+    /// Where the frame was written.
+    pub path: std::path::PathBuf,
+    /// Focus measure. **Comparable within this recording only** — see
+    /// [`sharpness`].
+    pub sharpness: f64,
+}
+
+/// How aggressively to drop near-duplicate frames before anything is paid for.
+///
+/// A knob, never a constant. Measured on one 15-second recording (research.md
+/// M1): the same clip keeps 285, 138 or 2 frames across these settings, because
+/// scrolling text genuinely changes every frame while slides do not. How much of
+/// a recording is new is a property of the MATERIAL, so the tool must not choose
+/// (D015-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dedup {
+    /// Keep every frame at the requested rate. For material where any loss
+    /// matters more than the cost of reading it.
+    None,
+    /// Drop only near-identical frames. Suits scrolling text, where most frames
+    /// carry new material.
+    Gentle,
+    /// The default. Suits mixed material.
+    #[default]
+    Medium,
+    /// Collapse hard. Suits slides and static documents, where hundreds of
+    /// frames show a handful of screens.
+    Aggressive,
+}
+
+impl Dedup {
+    /// The ffmpeg `mpdecimate` argument, or `None` to skip the filter.
+    ///
+    /// The thresholds are the ones measured in M1, not invented here.
+    fn filter(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Gentle => Some("mpdecimate=hi=64*12:lo=64*5:frac=0.33"),
+            Self::Medium => Some("mpdecimate=hi=64*48:lo=64*24:frac=0.5"),
+            Self::Aggressive => Some("mpdecimate=hi=64*200:lo=64*100:frac=0.7"),
+        }
+    }
+
+    /// Parse a caller's spelling. Unknown values are an ERROR, never a silent
+    /// fallback to the default — a caller who typed `agressive` asked for
+    /// aggression and must not quietly get `medium`.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "gentle" => Ok(Self::Gentle),
+            "medium" => Ok(Self::Medium),
+            "aggressive" => Ok(Self::Aggressive),
+            other => Err(format!(
+                "unknown dedup {other:?} — use none, gentle, medium or aggressive"
+            )),
+        }
+    }
+}
+
+/// Extract a recording's frames, scoring each for sharpness.
+///
+/// # No cap, deliberately
+///
+/// `analysis::ocr::ocr_video` caps extraction at 20 frames, which silently
+/// truncates any material longer than that — the actual blocker for a
+/// lesson-length recording. Nothing here caps: a caller who wants fewer frames
+/// lowers the rate or raises the dedup, both of which are honest choices they
+/// made, rather than a limit they never saw.
+///
+/// # Errors
+///
+/// A missing or failing `ffmpeg` is an error naming what happened. It is NEVER
+/// an empty frame list — "the recording has no frames" and "I could not look"
+/// are different facts, and a caller that cannot tell them apart will report the
+/// wrong one.
+pub fn extract_frames(
+    video: &std::path::Path,
+    fps: f64,
+    dedup: Dedup,
+    out_dir: &std::path::Path,
+) -> Result<Vec<FrameRow>, String> {
+    if fps <= 0.0 || !fps.is_finite() {
+        return Err(format!("fps must be positive and finite, got {fps}"));
+    }
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
+
+    // Dedup runs BEFORE anything downstream is paid for. The existing
+    // ocr_video dedups only after reading every frame, which is the expensive
+    // order (D015-7).
+    // ORDER MATTERS, and getting it wrong is silent. `mpdecimate,fps=N` drops
+    // duplicates and then the `fps` filter RESAMPLES them back up to hit the
+    // requested rate — undoing the deduplication that was just performed, with
+    // no error and an unchanged frame count. Sample first, then drop duplicates
+    // from what was sampled.
+    let mut vf = format!("fps={fps}");
+    if let Some(f) = dedup.filter() {
+        vf.push(',');
+        vf.push_str(f);
+    }
+
+    let pattern = out_dir.join("f_%05d.png");
+    let out = std::process::Command::new("ffmpeg")
+        .args([
+            "-v", "error",
+            "-i", &video.to_string_lossy(),
+            "-vf", &vf,
+            // vsync vfr: mpdecimate DROPS frames, and without this ffmpeg
+            // duplicates them back to hit a constant rate — silently undoing
+            // the deduplication that was just paid for.
+            "-vsync", "vfr",
+            &pattern.to_string_lossy(),
+            "-y",
+        ])
+        .output()
+        .map_err(|e| {
+            format!(
+                "ffmpeg could not be run ({e}) — it is required for frame extraction. \
+                 Install it (e.g. `apt install ffmpeg`) and retry."
+            )
+        })?;
+    if !out.status.success() {
+        return Err(format!(
+            "ffmpeg failed on {}: {}",
+            video.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(out_dir)
+        .map_err(|e| format!("cannot read {}: {e}", out_dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "png"))
+        .collect();
+    paths.sort();
+
+    paths
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let sharpness = sharpness_of_file(&path)?;
+            Ok(FrameRow { index, path, sharpness })
+        })
+        .collect()
+}

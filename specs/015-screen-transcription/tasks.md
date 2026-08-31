@@ -27,7 +27,7 @@
       `> DONE:` `cargo check --all-targets` green with the modules declared and nothing else changed.
 - [x] T003 [US1] `sharpness(image) -> f64` in `src/transcribe/frames.rs` — variance of Laplacian over greyscale.
       `> DONE:` **AMENDED (W2)** — the original asked for the REAL M4 frames. Those frames are captures of a DIFFERENT machine (hostname, network address, terminal contents) and this repository is PUBLIC, so committing them would leak all of it. The intent — "a synthetic blur cannot fail the way motion blur does" — is preserved by GENERATING real motion and capturing it at a rate that cannot freeze it: the blur is motion blur, of generated content. Verified before being relied on: 2.5x sharp:blurred separation against M4's measured 3.6x, same direction, same mechanism. A decode failure errors rather than scoring zero.
-- [ ] T004 [US1] `extract_frames(video, rate, dedup, out_dir) -> Vec<FrameRow>` — ffmpeg extraction with per-frame sharpness, NO fixed cap.
+- [x] T004 [US1] `extract_frames(video, rate, dedup, out_dir) -> Vec<FrameRow>` — ffmpeg extraction with per-frame sharpness, NO fixed cap.
       `> DONE:` a recording longer than 20 frames yields more than 20 rows — the `-frames:v 20` cap in `analysis::ocr::ocr_video` is the actual blocker and a test pins that it is gone. ffmpeg absent produces a stated error naming it, never an empty row list.
 - [ ] T005 [US1] The dedup threshold is the CALLER's: `dedup` is a parameter, and different values yield different frame counts.
       `> DONE:` the same recording at two thresholds returns two different counts (M1 measured 285 vs 138 vs 2 on one clip). A test asserts the parameter CHANGES the result — a threshold that is accepted and ignored is the orphan pattern in miniature.
