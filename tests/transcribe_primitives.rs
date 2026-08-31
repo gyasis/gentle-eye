@@ -80,7 +80,9 @@ fn motion_blur_lowers_sharpness_as_measured() {
 
     let still = render(dir.path(), false, 3);
     let moving = render(dir.path(), true, 24);
-    assert!(!still.is_empty() && moving.len() > 12, "the fixture rendered no frames");
+    // The window below is moving[10..20]; anything short of 20 frames would
+    // panic on the slice with a message that blames the wrong thing.
+    assert!(!still.is_empty() && moving.len() >= 20, "the fixture rendered too few frames");
 
     let s: f64 = still.iter().map(|p| sharpness_of_file(p).unwrap()).sum::<f64>() / still.len() as f64;
     // Skip the first frames: motion has not built up until the text is moving.

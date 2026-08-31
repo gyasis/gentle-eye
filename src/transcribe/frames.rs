@@ -22,8 +22,10 @@
 /// It is a focus measure, not a calibrated scale: it moves with resolution,
 /// contrast and content. A caller compares frames of the same source and picks
 /// the best of them. Treating it as an absolute threshold across different
-/// material is a misreading, which is why no threshold lives in this module
-/// (D015-1 — the judgement belongs to the caller).
+/// material is a misreading, which is why no threshold lives in this module:
+/// D015-3 consumes the score but leaves the floor to the caller, per the
+/// D015-7 principle that a judgement varying with the content cannot be a
+/// constant in a binary.
 ///
 /// Returns `0.0` for an image too small to have an interior pixel; a 1×1 or 2×2
 /// image has no 3×3 neighbourhood, and zero is the honest answer for "no detail
@@ -128,6 +130,28 @@ mod tests {
              sharp={a}, blurred={b}"
         );
         assert!(a / b > 2.0, "the separation must be substantial, got {:.1}x", a / b);
+    }
+
+    /// VARIANCE of the Laplacian, not its mean square — the subtraction of
+    /// E[x]² is load-bearing. A parabolic ramp has a CONSTANT Laplacian (here
+    /// exactly -2 at every interior pixel): smooth shading, no detail. Variance
+    /// scores it 0; E[x²] would score it 4. A mutation that drops the mean
+    /// subtraction survives every other test in this module — this one kills it.
+    #[test]
+    fn smooth_curvature_is_not_detail() {
+        let (w, h) = (16, 3);
+        let mut parabola = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                parabola[y * w + x] = (x * x) as u8; // 0..=225, no overflow
+            }
+        }
+        assert_eq!(
+            sharpness(&parabola, w, h),
+            0.0,
+            "a constant second derivative has zero variance; a nonzero score \
+             here means the mean subtraction has been dropped"
+        );
     }
 
     /// An image with no interior pixel scores zero rather than panicking.
