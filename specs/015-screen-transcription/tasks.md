@@ -25,8 +25,8 @@
 
 - [x] T002 [P] Module skeleton: `src/transcribe/{mod.rs,frames.rs,quality.rs,reader.rs}`, re-exported from `src/lib.rs`; empty `tests/transcribe_primitives.rs`.
       `> DONE:` `cargo check --all-targets` green with the modules declared and nothing else changed.
-- [ ] T003 [US1] `sharpness(image) -> f64` in `src/transcribe/frames.rs` — variance of Laplacian over greyscale.
-      `> DONE:` scoring the M4 fixtures reproduces the measured separation: the sharp frames score ~3x the blurred ones. Uses REAL frames from the research clip, not synthetic gradients — a synthetic blur cannot fail the way motion blur does.
+- [x] T003 [US1] `sharpness(image) -> f64` in `src/transcribe/frames.rs` — variance of Laplacian over greyscale.
+      `> DONE:` **AMENDED (W2)** — the original asked for the REAL M4 frames. Those frames are captures of a DIFFERENT machine (hostname, network address, terminal contents) and this repository is PUBLIC, so committing them would leak all of it. The intent — "a synthetic blur cannot fail the way motion blur does" — is preserved by GENERATING real motion and capturing it at a rate that cannot freeze it: the blur is motion blur, of generated content. Verified before being relied on: 2.5x sharp:blurred separation against M4's measured 3.6x, same direction, same mechanism. A decode failure errors rather than scoring zero.
 - [ ] T004 [US1] `extract_frames(video, rate, dedup, out_dir) -> Vec<FrameRow>` — ffmpeg extraction with per-frame sharpness, NO fixed cap.
       `> DONE:` a recording longer than 20 frames yields more than 20 rows — the `-frames:v 20` cap in `analysis::ocr::ocr_video` is the actual blocker and a test pins that it is gone. ffmpeg absent produces a stated error naming it, never an empty row list.
 - [ ] T005 [US1] The dedup threshold is the CALLER's: `dedup` is a parameter, and different values yield different frame counts.
