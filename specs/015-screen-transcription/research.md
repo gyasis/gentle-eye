@@ -186,3 +186,64 @@ text merging beside three unused ones would be the same mistake with a new name.
 actual blocker for long material), deduplication happening *after* the cost has
 been paid rather than before, and a reading path that bypasses the shared vision
 seam.
+
+## D015-9 — Readers are swappable, and each owns its own output normalisation
+
+**Decision.** A **reader adapter** layer sits between the primitives and the
+`VisionProvider` seam. One adapter per reading model. Each owns three things:
+
+1. the **prompt** that model responds best to,
+2. the **normalisation** of that model's raw response down to plain text,
+3. a declaration of its **quirks**, so a caller can tell readers apart.
+
+Selecting a different reader is a configuration choice, not a code change.
+
+**Why this is not optional.** No two reading models return the same shape. Some
+emit plain text; some wrap it in markdown fences; some return JSON; some emit a
+chain-of-thought preamble first. This repo already measured the last case —
+`strip_reasoning`'s own doc records, from 2026-08-23 against `ornith-1.5-9b`:
+
+> *"roughly 60% of `analysis_text` was reasoning noise ('Let me carefully
+> transcribe… Actually, let me re-read…') ahead of the real transcription."*
+
+That fix was written ad-hoc, for one quirk, in one provider. Feature 015 makes
+the problem structural rather than incidental, because **two of its three
+primitives silently depend on output shape**:
+
+| Primitive | What un-normalised output does to it |
+|---|---|
+| Information content (D015-4) | A thinking preamble is high-entropy PROSE. It **masks a degenerate reading** — the guard scores the deliberation, not the transcription, and a broken reading passes as healthy. |
+| Fuzzy merge (D015-6) | Matching is per LINE. Markdown fences, JSON wrapping or a `<think>` block break line alignment, so genuine overlaps stop being recognised and material repeats. |
+
+So a reader that is not normalised does not merely produce untidy output — it
+**defeats both guards this feature is built on**.
+
+**Why an adapter, and not a method on `VisionProvider`.** T020 faced the mirror
+of this question for `keep_alive` and answered it the other way, for a reason
+that inverts cleanly:
+
+- `keep_alive` had to modify the **request body**, which a wrapper cannot reach
+  without re-implementing the provider's transport — so it went ON the shared
+  trait as a defaulted method.
+- Normalisation operates on the **response**, which a wrapper reaches trivially.
+
+A wrapper is therefore correct here, and it keeps a reading-specific concern out
+of a trait with five implementors, four of which have no use for it. Same
+principle, opposite conclusion, because the direction of the data differs.
+
+**What a reader must guarantee:**
+
+- **Never return empty when the model said something.** A response that is
+  entirely preamble is passed through rather than normalised to nothing — the
+  existing `strip_reasoning` already takes this care, and it is the same rule as
+  "a failed read must never look like an empty result".
+- **Normalisation is reported, not hidden.** A caller can see that 60% of a
+  response was stripped. A silent 60% reduction is indistinguishable from a model
+  that simply said less.
+- **Idempotent.** Normalising twice changes nothing, so a caller cannot corrupt
+  text by handling it carefully.
+
+**Consequence for comparing runs.** Scores and merges are only comparable across
+frames read by the **same** reader. A transcript records which reader produced
+it; mixing readers within one document is a caller decision, and the record makes
+it visible rather than assumed.

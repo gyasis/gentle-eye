@@ -178,6 +178,14 @@ obtain a transcript.
   framing).
 - **FR-106**: Every model call MUST go through the project's single vision seam.
   No component may hold a private path to a model.
+- **FR-106a**: The reading model MUST be selectable, and each reading model MUST
+  have an adapter that owns its prompt and normalises its response to plain text.
+  Selecting a different reader MUST be a configuration choice, not a code change.
+- **FR-106b**: Normalisation MUST be reported, not hidden — a caller MUST be able
+  to see how much of a response was stripped. A silent reduction is
+  indistinguishable from a model that said less.
+- **FR-106c**: A transcript MUST record which reader produced it. Quality scores
+  and merges are only comparable within one reader.
 - **FR-107**: Each primitive MUST be usable independently, from the command line,
   returning machine-readable output — so an agent on ANY harness can chain them
   without an integration.

@@ -106,6 +106,22 @@ exact-equality version cannot merge real readings, which is recorded in
 `DAYFLOW_LIMITATIONS.md` as untestable "without real OCR pairs". The pairs exist
 now.
 
+### Reader adapters (D015-9)
+
+A **reader adapter** per reading model, wrapping the `VisionProvider` seam: it
+owns that model's prompt, normalises its response to plain text, and declares its
+quirks. Swapping readers is configuration.
+
+This is not tidiness. Un-normalised output **defeats both guards**: a thinking
+preamble is high-entropy prose that masks a degenerate reading from the entropy
+score, and fences/JSON/preambles break the per-line matching the merge depends
+on. `strip_reasoning` already handles one such quirk ad-hoc — measured at ~60% of
+a response on `ornith-1.5-9b` — and this generalises it.
+
+Wrapper rather than a trait method, unlike T020's `keep_alive`: that had to reach
+the request body, which a wrapper cannot do without re-implementing transport;
+this operates on the response, which a wrapper reaches trivially.
+
 ### Reading path
 
 `analysis::ocr::ocr_video` is repaired rather than replaced: cap removed, dedup
@@ -146,7 +162,8 @@ src/
 ├── transcribe/                # NEW — the primitives
 │   ├── mod.rs
 │   ├── frames.rs              # extraction + sharpness
-│   └── quality.rs             # information content
+│   ├── quality.rs             # information content
+│   └── reader.rs              # reader adapters: prompt + response normalisation
 ├── dayflow/
 │   └── perception.rs          # merge_scroll/coverage made reachable + fuzzy
 ├── bin/gentle-eye.rs          # CLI subcommands
@@ -174,7 +191,7 @@ because moving it would create the second copy this feature exists to avoid.
 | W1 | frames + sharpness, cap removed |
 | W2 | information content |
 | W3 | fuzzy merge — the orphans made reachable |
-| W4 | reading through the VisionProvider seam; rejected readings counted |
+| W4 | reader adapters (D015-9) + reading through the VisionProvider seam; rejected readings counted; normalisation reported |
 | W5 | CLI + MCP parity |
 | W6 | the playbook |
 | W7 | live test, docs, full green |
