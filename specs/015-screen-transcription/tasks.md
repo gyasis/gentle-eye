@@ -23,7 +23,7 @@
 
 ## Phase 2: Frames and sharpness (US1)
 
-- [ ] T002 [P] Module skeleton: `src/transcribe/{mod.rs,frames.rs,quality.rs,reader.rs}`, re-exported from `src/lib.rs`; empty `tests/transcribe_primitives.rs`.
+- [x] T002 [P] Module skeleton: `src/transcribe/{mod.rs,frames.rs,quality.rs,reader.rs}`, re-exported from `src/lib.rs`; empty `tests/transcribe_primitives.rs`.
       `> DONE:` `cargo check --all-targets` green with the modules declared and nothing else changed.
 - [ ] T003 [US1] `sharpness(image) -> f64` in `src/transcribe/frames.rs` — variance of Laplacian over greyscale.
       `> DONE:` scoring the M4 fixtures reproduces the measured separation: the sharp frames score ~3x the blurred ones. Uses REAL frames from the research clip, not synthetic gradients — a synthetic blur cannot fail the way motion blur does.
