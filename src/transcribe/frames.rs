@@ -184,30 +184,46 @@ pub struct FrameRow {
 /// How aggressively to drop near-duplicate frames before anything is paid for.
 ///
 /// A knob, never a constant. Measured on one 15-second recording (research.md
-/// M1): the same clip keeps 285, 138 or 2 frames across these settings, because
-/// scrolling text genuinely changes every frame while slides do not. How much of
-/// a recording is new is a property of the MATERIAL, so the tool must not choose
-/// (D015-7).
+/// M1): the same clip kept 285, 138 or 2 frames across these knob positions,
+/// because scrolling text genuinely changes every frame while slides do not.
+/// How much of a recording is new is a property of the MATERIAL, so the tool
+/// must not choose (D015-7). M1's counts were measured against the full frame
+/// rate; here the filter sees the sampled stream — see `Dedup::filter` for
+/// why the knob's ordering transfers and the exact counts do not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Dedup {
     /// Keep every frame at the requested rate. For material where any loss
     /// matters more than the cost of reading it.
     None,
-    /// Drop only near-identical frames. Suits scrolling text, where most frames
-    /// carry new material.
+    /// Drop only near-identical frames — any visible change is kept. Suits
+    /// slides and scrolling text alike: measured on a four-slide fixture,
+    /// this keeps exactly one frame per distinct screen.
     Gentle,
-    /// The default. Suits mixed material.
+    /// The default. Suits mixed material. On the same four-slide fixture it
+    /// also keeps one frame per distinct screen.
     #[default]
     Medium,
-    /// Collapse hard. Suits slides and static documents, where hundreds of
-    /// frames show a handful of screens.
+    /// Collapse to almost nothing. A transition that changes only PART of the
+    /// screen — a slide's title line, a changed figure — still counts as a
+    /// near-duplicate at these thresholds and is DROPPED. Measured: a fixture
+    /// with four distinct slides collapses to ONE frame, and M1's clip kept
+    /// 2 of 325. Suits material where only wholesale screen changes matter;
+    /// it does NOT suit slides you want one frame of each.
     Aggressive,
 }
 
 impl Dedup {
     /// The ffmpeg `mpdecimate` argument, or `None` to skip the filter.
     ///
-    /// The thresholds are the ones measured in M1, not invented here.
+    /// The thresholds are the knob positions measured in M1, not invented
+    /// here (`Gentle` is mpdecimate's own default — M1's "285 of 325" row).
+    /// One caveat travels with the citation: M1 ran mpdecimate on the
+    /// FULL-RATE stream, while this chain feeds it the `fps`-sampled one, so
+    /// consecutive frames are farther apart in time and differ MORE. Static
+    /// content is unaffected (identical frames are identical at any rate);
+    /// moving content is dropped the same or less (measured: medium kept 71%
+    /// of a scrolling clip at full rate, 75% of the same clip sampled at
+    /// 4 fps). The ORDERING of the knob transfers; M1's exact counts do not.
     fn filter(self) -> Option<&'static str> {
         match self {
             Self::None => None,
@@ -243,12 +259,45 @@ impl Dedup {
 /// lowers the rate or raises the dedup, both of which are honest choices they
 /// made, rather than a limit they never saw.
 ///
+/// # The rows describe THIS run
+///
+/// Frames land in `out_dir` as `f_NNNNN.png`. That exact pattern is cleared
+/// before extraction and is the only pattern read back afterwards, so a
+/// re-run into the same directory — at a different threshold, say — reports
+/// what IT kept, not what a previous run left behind, and a caller's
+/// unrelated images in `out_dir` are never scored as frames.
+///
 /// # Errors
 ///
 /// A missing or failing `ffmpeg` is an error naming what happened. It is NEVER
 /// an empty frame list — "the recording has no frames" and "I could not look"
 /// are different facts, and a caller that cannot tell them apart will report the
 /// wrong one.
+/// The files this module's ffmpeg invocation writes: `f_NNNNN.png`, sorted.
+///
+/// Matching OUR exact pattern — not "any .png" — is what keeps a caller's
+/// unrelated image in the output directory from being scored and returned as
+/// if it were a frame of the recording.
+fn read_frame_files(out_dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let is_ours = |p: &std::path::Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| {
+                // At least 5 digits: ffmpeg widens %05d past 99999 frames.
+                n.strip_prefix("f_")
+                    .and_then(|n| n.strip_suffix(".png"))
+                    .is_some_and(|d| d.len() >= 5 && d.bytes().all(|b| b.is_ascii_digit()))
+            })
+    };
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(out_dir)
+        .map_err(|e| format!("cannot read {}: {e}", out_dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| is_ours(p))
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
 pub fn extract_frames(
     video: &std::path::Path,
     fps: f64,
@@ -261,9 +310,19 @@ pub fn extract_frames(
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
 
+    // The rows must describe THIS run. The frames are collected by reading the
+    // directory back, so a leftover f_NNNNN.png from a previous run — say, a
+    // re-run at a harder threshold into the same directory — would be reported
+    // as if this run had kept it, silently inflating the count. Clear our own
+    // pattern first; anything else in the directory is not ours to touch.
+    for stale in read_frame_files(out_dir)? {
+        std::fs::remove_file(&stale)
+            .map_err(|e| format!("cannot clear stale frame {}: {e}", stale.display()))?;
+    }
+
     // Dedup runs BEFORE anything downstream is paid for. The existing
-    // ocr_video dedups only after reading every frame, which is the expensive
-    // order (D015-7).
+    // ocr_video dedups only after reading every frame — the expensive order
+    // that T018 repairs. The threshold itself is the caller's (D015-7).
     // ORDER MATTERS, and getting it wrong is silent. `mpdecimate,fps=N` drops
     // duplicates and then the `fps` filter RESAMPLES them back up to hit the
     // requested rate — undoing the deduplication that was just performed, with
@@ -281,9 +340,12 @@ pub fn extract_frames(
             "-v", "error",
             "-i", &video.to_string_lossy(),
             "-vf", &vf,
-            // vsync vfr: mpdecimate DROPS frames, and without this ffmpeg
-            // duplicates them back to hit a constant rate — silently undoing
-            // the deduplication that was just paid for.
+            // mpdecimate is now LAST in the chain, so its output is a
+            // variable-rate stream. vfr pins the muxer to pass that through
+            // unresampled. Measured on ffmpeg 4.4: the image-sequence muxer
+            // already defaults to this, so the flag changes nothing today —
+            // it makes the intent explicit instead of leaning on a muxer
+            // default that is not ours to rely on.
             "-vsync", "vfr",
             &pattern.to_string_lossy(),
             "-y",
@@ -303,12 +365,7 @@ pub fn extract_frames(
         ));
     }
 
-    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(out_dir)
-        .map_err(|e| format!("cannot read {}: {e}", out_dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "png"))
-        .collect();
-    paths.sort();
+    let paths = read_frame_files(out_dir)?;
 
     paths
         .into_iter()

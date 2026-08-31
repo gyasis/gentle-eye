@@ -164,6 +164,11 @@ fn extraction_is_not_capped_at_twenty_frames() {
     for (i, r) in rows.iter().enumerate() {
         assert_eq!(r.index, i, "indices must be dense and in order");
         assert!(r.path.exists(), "row {i} names a file that is not there");
+        // Every fixture frame draws text, so every frame has detail. A row
+        // whose sharpness is 0.0 means the scoring was skipped or stubbed —
+        // T004 is "extraction WITH per-frame sharpness", and without this
+        // assertion a `sharpness: 0.0` stub passes every test in this file.
+        assert!(r.sharpness > 0.0, "row {i} scored 0.0 — frames are not being scored");
     }
 }
 
@@ -191,9 +196,15 @@ fn the_dedup_threshold_changes_what_is_kept() {
     assert!(ok, "could not render the static fixture");
 
     let none = extract_frames(&video, 4.0, Dedup::None, &dir.path().join("a")).unwrap();
+    let gentle = extract_frames(&video, 4.0, Dedup::Gentle, &dir.path().join("g")).unwrap();
     let aggressive = extract_frames(&video, 4.0, Dedup::Aggressive, &dir.path().join("b")).unwrap();
 
-    eprintln!("[t004] none={} aggressive={}", none.len(), aggressive.len());
+    eprintln!(
+        "[t004] none={} gentle={} aggressive={}",
+        none.len(),
+        gentle.len(),
+        aggressive.len()
+    );
     assert!(
         aggressive.len() < none.len(),
         "the dedup parameter changed nothing: none={} aggressive={}. A threshold that \
@@ -202,12 +213,117 @@ fn the_dedup_threshold_changes_what_is_kept() {
         none.len(),
         aggressive.len()
     );
+    // The economic argument done RIGHT: gentle collapses the duplicates while
+    // keeping one frame of each DISTINCT screen — the fixture has four
+    // (`SLIDE 0..3`), and gentle keeps exactly 4 of the 40 (verified by
+    // hashing the kept frames' text regions: all four slides survive).
+    // Aggressive keeps 1 — a transition that changes only part of the screen
+    // is under its thresholds — which is why its doc must not claim it
+    // "suits slides". Bounds are loose against boundary jitter, tight enough
+    // that dropping distinct screens (< 4) or failing to collapse (> 10) fails.
+    assert!(
+        (4..=10).contains(&gentle.len()),
+        "gentle must keep every distinct screen and collapse the duplicates: \
+         4 distinct slides, 40 sampled frames, kept {}",
+        gentle.len()
+    );
 }
 
-/// ffmpeg absent is an ERROR NAMING IT — never an empty frame list.
+/// A re-run into the same directory reports what IT kept — never a previous
+/// run's leftovers.
+///
+/// The rows are collected by reading the directory back, so without the
+/// pattern-clearing this is the stale-state trap: extract at `None` (40
+/// frames), re-run at `Aggressive` into the same directory (1 frame written),
+/// and 39 stale files are reported as if the aggressive run had kept them.
+/// The caller believes a threshold is in force whose effect they cannot see.
+#[test]
+#[ignore = "live: needs ffmpeg"]
+fn a_rerun_reports_its_own_frames_not_a_previous_runs() {
+    assert!(ffmpeg_available(), "\n\nffmpeg is not on PATH.\n");
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path().join("static.mp4");
+    let ok = std::process::Command::new("ffmpeg")
+        .args([
+            "-v", "error", "-f", "lavfi",
+            "-i", "color=c=black:s=640x360:r=24:d=10",
+            "-vf",
+            "drawtext=text='SLIDE %{eif\\:floor(t/3)\\:d}':fontcolor=white:fontsize=48:x=40:y=180:box=1:boxcolor=black",
+            "-pix_fmt", "yuv420p", &video.to_string_lossy(), "-y",
+        ])
+        .output().map(|o| o.status.success()).unwrap_or(false);
+    assert!(ok, "could not render the static fixture");
+
+    let out = dir.path().join("same");
+    let first = extract_frames(&video, 4.0, Dedup::None, &out).unwrap();
+    let second = extract_frames(&video, 4.0, Dedup::Aggressive, &out).unwrap();
+
+    eprintln!("[t004] same dir: none={} then aggressive={}", first.len(), second.len());
+    assert!(
+        second.len() < first.len(),
+        "the second run reported {} rows into a directory holding {} from the first — \
+         it is reporting the previous run's leftovers as its own",
+        second.len(),
+        first.len()
+    );
+    // And an unrelated image a caller left in out_dir is not a frame.
+    let foreign = out.join("cover.png");
+    std::fs::copy(&second[0].path, &foreign).unwrap();
+    let third = extract_frames(&video, 4.0, Dedup::Aggressive, &out).unwrap();
+    assert!(
+        third.iter().all(|r| r.path != foreign),
+        "a caller's unrelated .png was scored and returned as a frame"
+    );
+    // ...and it must still be there. The clearing step removes OUR f_NNNNN.png
+    // pattern only; a matcher loosened to "any .png" deletes the caller's file
+    // instead of reporting it, which trades one defect for a worse one.
+    assert!(
+        foreign.exists(),
+        "the caller's unrelated .png was DELETED by the run — the directory's \
+         other contents are not ours to touch"
+    );
+}
+
+/// The same recording produces the same rows, twice — count, order, scores.
+///
+/// FR/SC require re-processing to be a real operation (D015-2: the recording
+/// is the durable artifact precisely so it can be re-run); nondeterministic
+/// extraction would make every downstream comparison meaningless.
+#[test]
+#[ignore = "live: needs ffmpeg"]
+fn extraction_is_deterministic() {
+    assert!(ffmpeg_available(), "\n\nffmpeg is not on PATH.\n");
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path().join("det.mp4");
+    assert!(render_video(&video, 8), "could not render the fixture");
+
+    let a = extract_frames(&video, 2.0, Dedup::Medium, &dir.path().join("a")).unwrap();
+    let b = extract_frames(&video, 2.0, Dedup::Medium, &dir.path().join("b")).unwrap();
+
+    eprintln!("[t004] deterministic: run1={} run2={} rows", a.len(), b.len());
+    assert_eq!(a.len(), b.len(), "two runs over the same recording kept different counts");
+    for (x, y) in a.iter().zip(&b) {
+        assert_eq!(x.index, y.index, "row order differs between identical runs");
+        assert_eq!(
+            x.sharpness.to_bits(),
+            y.sharpness.to_bits(),
+            "sharpness differs between identical runs at row {}: {} vs {}",
+            x.index,
+            x.sharpness,
+            y.sharpness
+        );
+    }
+}
+
+/// A missing RECORDING is an error naming it — never an empty frame list.
 ///
 /// "The recording has no frames" and "I could not look" are different facts. A
-/// caller that cannot tell them apart reports the wrong one.
+/// caller that cannot tell them apart reports the wrong one. There is no
+/// early existence guard: ffmpeg itself fails on the missing input, and the
+/// error carries both ffmpeg's name and the recording's path — asserting the
+/// path is what pins that the ffmpeg-ran-and-failed branch fired rather than
+/// some earlier check. (ffmpeg ABSENT takes the other branch, the spawn
+/// failure, which cannot be exercised on a machine that has it.)
 #[test]
 fn a_missing_video_errors_rather_than_returning_no_frames() {
     let dir = tempfile::tempdir().unwrap();
@@ -218,6 +334,14 @@ fn a_missing_video_errors_rather_than_returning_no_frames() {
         err.contains("ffmpeg"),
         "the error must say what failed, got: {err}"
     );
+    // Only a machine with ffmpeg can reach the ran-and-failed branch; without
+    // it the spawn-failure branch fires, which names ffmpeg but not the file.
+    if ffmpeg_available() {
+        assert!(
+            err.contains("does_not_exist.mp4"),
+            "the error must name the recording that could not be read, got: {err}"
+        );
+    }
 }
 
 /// A nonsensical rate is refused before ffmpeg is invoked.
