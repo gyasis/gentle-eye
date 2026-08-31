@@ -92,19 +92,47 @@
 
 ## Dependencies
 
+Written as `X requires Y` — the unambiguous form. An arrow (`A -> B`) is read by
+the orchestrator as "A depends on B", which is the reverse of how it reads as
+prose; that ambiguity produced a wrong wave order on the first orchestration.
+
 ```
-T001 (setup) blocks everything
-T002 blocks T003..T005 (module must exist)
-T003 -> T004 -> T005 -> T006
-T007 -> T008 -> T009
-T010 -> T011 -> T012
-T013 -> T014, T015 -> T016
-T013 blocks T017 (the reading path needs an adapter)
-T017 -> T018 -> T019
-T006, T009, T012, T016, T019 block T020 (parity needs the commands)
-T020 -> T021 -> T022
-everything blocks T023, T024
+T002 requires T001
+T003 requires T002
+T004 requires T003
+T005 requires T004
+T006 requires T005
+
+T007 requires T002
+T008 requires T007
+T009 requires T008
+
+T010 requires T002
+T011 requires T010
+T012 requires T011
+
+T013 requires T002
+T014 requires T013
+T015 requires T013
+T016 requires T014, T015
+
+T017 requires T013
+T018 requires T017
+T019 requires T018
+
+T020 requires T006, T009, T012, T016, T019
+T021 requires T020
+T022 requires T021
+
+T023 requires T020
+T024 requires T022, T023
 ```
+
+**Why the frames chain is strictly serial:** T003 (`sharpness`), T004
+(`extract_frames`) and T005 (the dedup parameter) all write
+`src/transcribe/frames.rs`, and each needs the one before it — `extract_frames`
+scores each frame with `sharpness`, and the dedup threshold is a parameter of
+`extract_frames`. They cannot be parallel and they cannot be reordered.
 
 ## MVP
 
