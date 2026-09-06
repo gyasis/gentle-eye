@@ -65,10 +65,20 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Phase 3 (DEFERRED) region tracking only. OPTIONAL + behind the `tracking`
+# Region tracking + screen-recovery CV. OPTIONAL + behind the `tracking`
 # feature so the default build needs NO system libraries (opencv requires
 # libopencv-dev + C++ linkage). See `docs/TARGET.md` and PRD §3.
-opencv = { version = "0.94", optional = true }
+#
+# 0.100 (was 0.94) for the OpenCV 5.x line. opencv-rust supports 4.x OR 5.x;
+# 5.x is what the screen-recovery work needs, because the useful modules for
+# recovering text off a filmed screen live in CONTRIB, not core:
+#   ximgproc      guided/edge-preserving filter (keeps glyph edges through a stack)
+#   dnn_superres  learned upscaling -- AVAILABLE but deliberately NOT a default:
+#                 it INVENTS detail and on text yields confident wrong glyphs.
+#   quality       measurable before/after, so an "enhancement" must prove itself
+# Core pieces used by the stacker: findTransformECC, phaseCorrelate,
+# warpPerspective/warpAffine, getPerspectiveTransform.
+opencv = { version = "0.100", optional = true }
 
 # Opt-in "richwindow" preview backend ONLY (optional; behind the feature). A
 # pure-Rust window for the live preview — NOT built by default (75-crate tree
