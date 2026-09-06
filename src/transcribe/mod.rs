@@ -1,10 +1,12 @@
 //! Screen-text transcription primitives.
 //!
-//! Three deterministic pieces an agent chains into a transcript:
+//! Four deterministic pieces an agent chains into a transcript:
 //!
 //! - [`frames`] — the frames of a recording, each with a **sharpness** score.
 //! - [`quality`] — the **information content** of a piece of text.
 //! - [`reader`] — per-model adapters that own a prompt and normalise a response.
+//! - [`stack`] — the best single image from N frames of ONE screen, with scores
+//!   (feature-gated on `tracking`; the default build states that, never guesses).
 //!
 //! # What lives here, and what deliberately does not
 //!
@@ -26,3 +28,4 @@
 pub mod frames;
 pub mod quality;
 pub mod reader;
+pub mod stack;
