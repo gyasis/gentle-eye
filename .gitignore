@@ -55,3 +55,6 @@ ralph-tiers.full-13.bak.json
 # NOT tracked: a stale plan for a different feature was committed once and would
 # have silently executed the wrong waves (task ids collide across features).
 execution_plan.json
+
+# repo-local python venv (scripts/setup-venv.sh)
+/.venv/
