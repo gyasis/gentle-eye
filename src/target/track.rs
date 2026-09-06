@@ -37,11 +37,11 @@ impl RegionTracker for NoopTracker {
 }
 
 /// opencv-backed tracker — present only with `--features tracking`.
+///
+/// Requires `libopencv-dev`. Deferred per PRD §3 — left as the seam where a
+/// CSRT/KCF tracker would be wired when real motion-tracking is needed.
 #[cfg(feature = "tracking")]
-mod opencv_impl {
-    //! Requires `libopencv-dev`. Deferred per PRD §3 — left as the seam where a
-    //! CSRT/KCF tracker would be wired when real motion-tracking is needed.
-}
+mod opencv_impl {}
 
 #[cfg(test)]
 mod tests {
