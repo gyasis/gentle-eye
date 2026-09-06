@@ -2058,10 +2058,10 @@ mod tests {
     /// One to three edits in a 40–60 character line — similarity ≥ 0.93.
     fn flubbed(i: usize) -> String {
         let mut l = para(i).replacen('o', "0", 1);
-        if i % 3 == 0 {
+        if i.is_multiple_of(3) {
             l = l.replacen('l', "1", 1);
         }
-        if i % 5 == 0 {
+        if i.is_multiple_of(5) {
             l = l.replacen("e", "c", 1);
         }
         assert!(

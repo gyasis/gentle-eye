@@ -276,9 +276,9 @@ laptop during a working call) with an out-of-tree pipeline. Both exclusions fail
 against real material.
 
 **Super-resolution is not cosmetic — it decides whether text resolves at all.**
-On recording 1, `))=CONCAT('HCC', G.hcc_gap)`, the surrounding table names, an error
-banner and an open autocomplete list were all UNREADABLE in any single frame and
-READABLE after a coherent multi-frame stack. Nothing else in the pipeline produced
+On recording 1, a nested `CONCAT(...)` expression, the surrounding table names, an
+error banner and an open autocomplete list were all UNREADABLE in any single frame
+and READABLE after a coherent multi-frame stack. Nothing else in the pipeline produced
 them.
 
 **Audio is not a companion to screen text — it is the fallback when the screen
@@ -289,10 +289,10 @@ here", "that one", "go back down" — which only the frames disambiguate. Each c
 covers the other's blind spot, so a screen-text-only tool is undefined on exactly the
 material this feature exists for.
 
-**And the pairing carries information neither channel holds.** "Concat. I'm going to
-do HCC. I think that'll work" is a plan; an autocomplete list open on `concat` with a
-red squiggle on `G.hcc_gap` is a state; together they timestamp the moment a fix was
-written. That correlation produced every substantive finding in both recordings.
+**And the pairing carries information neither channel holds.** "I'm going to concat
+these. I think that'll work" is a plan; an autocomplete list open on `concat` with a
+red squiggle under that same expression is a state; together they timestamp the
+moment a fix was written. That correlation produced every substantive finding in both recordings.
 
 ### What this adds — three primitives, in the existing shape
 

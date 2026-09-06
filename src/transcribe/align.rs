@@ -9,10 +9,10 @@
 //!
 //! Measured on the two reference recordings (spec.md, Scope Amendment
 //! 2026-09-06): every substantive finding came from the CORRELATION of speech
-//! and screen, not from either alone. "Concat. I'm going to do HCC. I think
+//! and screen, not from either alone. "I'm going to concat these. I think
 //! that'll work" is a plan; an autocomplete list open on `concat` with a red
-//! squiggle on `G.hcc_gap` is a state; together they timestamp the moment a
-//! fix was written. Each channel also covers the other's blind spot — speech
+//! squiggle under that same expression is a state; together they timestamp the
+//! moment a fix was written. Each channel also covers the other's blind spot — speech
 //! is full of deixis ("this table here") that only the frames resolve, and a
 //! screen filmed from too far back never resolves and only the speech does.
 //!
