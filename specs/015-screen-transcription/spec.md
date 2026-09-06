@@ -294,7 +294,7 @@ do HCC. I think that'll work" is a plan; an autocomplete list open on `concat` w
 red squiggle on `G.hcc_gap` is a state; together they timestamp the moment a fix was
 written. That correlation produced every substantive finding in both recordings.
 
-### What this adds — two primitives, in the existing shape
+### What this adds — three primitives, in the existing shape
 
 Each still answers ONE question and decides nothing. The caller owns every threshold.
 
@@ -357,6 +357,39 @@ producing the text (a reader) is a subsystem — and the same split applies to a
 So: simple audio understanding MAY live in the engine; anything specific about
 transcripts goes to VoxStruct, and its output arrives here as input.
 
+**6. Locate** — *"Where is the screen in this frame, and are its corners actually
+visible?"*
+
+**Takes**: a frame; an area floor; a detection tolerance.
+**Gives**: the quadrilateral; **which of its corners sit on the frame boundary**; and
+how it was found — a clean convex 4-gon, or a bounding-box fallback.
+
+- **Never rectifies on its own.** It reports; the caller decides whether to warp. A
+  prior implementation both detected AND applied, and silently accepted a quad with a
+  DUPLICATE corner — returning a flat grey slab as success. Splitting the question
+  from the action is what makes that failure impossible to repeat.
+- **Clipping is reported, not hidden.** A corner on the frame boundary means the
+  screen extends past the frame and only a PARTIAL correction is possible. The caller
+  must be able to see that rather than receive a confidently wrong warp.
+- **A fallback detection is flagged as such.** A minimum-area bounding box is not the
+  screen; it is what you get when no convex 4-gon was findable, and it must not be
+  returned as though it were a real detection.
+- **Not finding a screen is a stated answer**, never an empty one.
+- **Brightness does not find a dark screen.** Otsu on a dark-themed editor filmed in a
+  dark room locks onto the white laptop body and reflections. Text is dense
+  high-frequency energy while a desk and bezel are smooth, so the measurement is
+  texture, not luminance.
+
+**Corner visibility is a RECORDING decision, and the spec should say so.** Measured on
+the two reference recordings: **4 of 4 corners clipped on both**, and both fell back to
+a bounding box. Filling the frame with the screen maximises pixel density — which is
+what actually made small code readable — and destroys the corners rectification needs.
+Backing up to include the bezel inverts that trade. Neither is wrong; the tool cannot
+choose, and a caller who knows which one they made can skip `locate` entirely. This is
+the same judgement/perception split as everywhere else: *skewed phone footage framed
+wide* is worth locating; *a screen recording* never needs it; *phone footage that fills
+the frame* cannot benefit no matter how good the detector is.
+
 ### Where every piece lives — the whole workflow, placed
 
 `AGENTS.md` states the test: *"Would another IDE/tool want this?"* -> gentle-eye.
@@ -370,6 +403,7 @@ The workflow that produced the evidence above, run through that test:
 | fuzzy merge | perception | **015** (stubbed) |
 | **stacking / super-resolution** | perception | **015** <- this amendment |
 | **align: what was on screen when this was said** | perception | **015** <- this amendment |
+| **locate: where is the screen, are its corners visible** | perception | **015** <- this amendment |
 | pull off the phone over MTP | orchestration | the consumer |
 | transcript-driven span selection | orchestration | the consumer |
 | clip cutting, contact sheets | orchestration | the consumer |
