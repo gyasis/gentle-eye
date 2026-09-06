@@ -1,6 +1,6 @@
 //! Screen-text transcription primitives.
 //!
-//! Five deterministic pieces an agent chains into a transcript:
+//! Six deterministic pieces an agent chains into a transcript:
 //!
 //! - [`frames`] — the frames of a recording, each with a **sharpness** score.
 //! - [`quality`] — the **information content** of a piece of text.
@@ -9,6 +9,9 @@
 //!   (feature-gated on `tracking`; the default build states that, never guesses).
 //! - [`locate`] — where the screen is in a frame, which of its corners are
 //!   clipped, and how it was found (feature-gated the same way).
+//! - [`align`] — what was on screen when each utterance of a transcript was
+//!   said: the frames in a caller-owned window, with their sharpness. Pure
+//!   interval arithmetic, so it lives in the default build like `frames`.
 //!
 //! # What lives here, and what deliberately does not
 //!
@@ -27,6 +30,7 @@
 //! there rather than reimplemented here. A second copy beside an unused first is
 //! the defect this feature exists to close (D015-8).
 
+pub mod align;
 pub mod frames;
 pub mod locate;
 pub mod quality;
