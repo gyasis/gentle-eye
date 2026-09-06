@@ -278,15 +278,132 @@ const STABLE_SCREEN: f64 = 0.90;
 // behaviour depends on. Deleted rather than wrapped in a test that would only
 // have asserted the optimization was taken.
 
+// ─── T010: how alike two lines must be is the CALLER's declaration (D015-6) ─
+
+/// How alike two lines must be to count as the SAME line, in `(0, 1]`.
+///
+/// Two readings of one imperfect line differ by a character or two, so exact
+/// equality finds zero overlap and the paragraph is emitted once per frame that
+/// showed it (research M5). The tool cannot tell an OCR flub from a genuine
+/// difference — `HCC182` misread as `HCC183`, and a second patient who really
+/// has HCC183, are the same one-character edit — so the tolerance is the
+/// caller's declaration, and a value that is not a threshold is refused rather
+/// than defaulted.
+///
+/// **The measure is normalised Levenshtein**: `1 − edits / longer_length`, on
+/// trimmed lines, no dependency. Chosen over token-set overlap because OCR noise
+/// lands INSIDE tokens (`qu1ck`, `br0wn`), which token matching scores as wholly
+/// different words; and over trigram Jaccard because one edit costs up to three
+/// trigrams, which leaves short lines unmatchable at any sane tolerance.
+///
+/// **The trade-off accepted: the threshold is really a length.** At `0.9` one
+/// edit is tolerated per ten characters — a six-character identifier gets
+/// exactness for free, a thirty-character sentence may drift by three, and a
+/// long line that genuinely differs by one digit merges. No measure fixes that
+/// last case without also refusing the flubs it exists for; it is what the
+/// caller's threshold MEANS, and why the caller owns it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Similarity(f64);
+
+impl Similarity {
+    /// Exact trimmed-line equality — no tolerance at all. The behaviour every
+    /// pre-existing caller had, and what [`TextAggregator::new`] still uses.
+    pub const EXACT: Similarity = Similarity(1.0);
+
+    /// A threshold in `(0, 1]`; anything else is refused with the reason.
+    ///
+    /// `0.0` is refused on purpose: at zero every line is every other line, so
+    /// a merge consumes the whole incoming reading as "already held". That is
+    /// an off switch for the merge, not a tolerance for it, and a caller who
+    /// reached it by arithmetic accident would lose every reading silently.
+    pub fn new(threshold: f64) -> Result<Self, String> {
+        if threshold.is_nan() || threshold <= 0.0 || threshold > 1.0 {
+            return Err(format!(
+                "similarity must be in (0, 1], got {threshold}; 1.0 is exact equality"
+            ));
+        }
+        Ok(Self(threshold))
+    }
+
+    /// Parse a CLI/JSON value with the same refusal.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let v: f64 = s
+            .trim()
+            .parse()
+            .map_err(|e| format!("similarity {s:?} is not a number: {e}"))?;
+        Self::new(v)
+    }
+
+    /// The threshold this was built with.
+    pub fn threshold(self) -> f64 {
+        self.0
+    }
+
+    /// Whether `x` and `y` are the same line under this tolerance.
+    fn matches(self, x: &str, y: &str) -> bool {
+        let (x, y) = (x.trim(), y.trim());
+        if x == y {
+            return true;
+        }
+        if self.0 >= 1.0 {
+            return false;
+        }
+        // Edits can never be fewer than the length difference, so a pair whose
+        // lengths alone put it under the bar is decided without the DP. That
+        // is the common case inside `longest_common_run`, which compares every
+        // line of one capture against every line of the other.
+        let (la, lb) = (x.chars().count(), y.chars().count());
+        let longest = la.max(lb) as f64;
+        if 1.0 - la.abs_diff(lb) as f64 / longest < self.0 {
+            return false;
+        }
+        line_similarity(x, y) >= self.0
+    }
+}
+
+impl Default for Similarity {
+    /// Exact. The identity tolerance is the only one the tool may pick.
+    fn default() -> Self {
+        Self::EXACT
+    }
+}
+
+/// Normalised Levenshtein similarity of two (already trimmed) lines, in `[0, 1]`.
+fn line_similarity(x: &str, y: &str) -> f64 {
+    let a: Vec<char> = x.chars().collect();
+    let b: Vec<char> = y.chars().collect();
+    let longest = a.len().max(b.len());
+    if longest == 0 {
+        return 1.0;
+    }
+    1.0 - levenshtein(&a, &b) as f64 / longest as f64
+}
+
+/// Edit distance, two-row DP. Over Unicode scalars, so a misread accented
+/// letter costs one edit rather than two or three bytes' worth.
+fn levenshtein(a: &[char], b: &[char]) -> usize {
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(substitute);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 /// The longest run of consecutive lines common to `a` and `b`, as
-/// `(start index in b, length)`. Comparison is on trimmed lines.
-fn longest_common_run(a: &[&str], b: &[&str]) -> (usize, usize) {
+/// `(start index in b, length)`. Comparison is on trimmed lines, under `sim`.
+fn longest_common_run(a: &[&str], b: &[&str], sim: Similarity) -> (usize, usize) {
     let (mut best_b, mut best_len) = (0usize, 0usize);
     let mut prev = vec![0usize; b.len() + 1];
     let mut cur = vec![0usize; b.len() + 1];
     for x in a {
         for (bi, y) in b.iter().enumerate() {
-            cur[bi + 1] = if x.trim() == y.trim() { prev[bi] + 1 } else { 0 };
+            cur[bi + 1] = if sim.matches(x, y) { prev[bi] + 1 } else { 0 };
             if cur[bi + 1] > best_len {
                 best_len = cur[bi + 1];
                 best_b = bi + 1 - best_len;
@@ -317,13 +434,18 @@ fn longest_common_run(a: &[&str], b: &[&str]) -> (usize, usize) {
 fn frame_split<'a>(
     a: &'a [&'a str],
     b: &'a [&'a str],
+    sim: Similarity,
 ) -> (usize, &'a [&'a str], &'a [&'a str], usize) {
-    let p = a.iter().zip(b).take_while(|(x, y)| x.trim() == y.trim()).count();
+    let p = a
+        .iter()
+        .zip(b)
+        .take_while(|(x, y)| sim.matches(x, y))
+        .count();
     let s = a[p..]
         .iter()
         .rev()
         .zip(b[p..].iter().rev())
-        .take_while(|(x, y)| x.trim() == y.trim())
+        .take_while(|(x, y)| sim.matches(x, y))
         .count();
     (p, &a[p..a.len() - s], &b[p..b.len() - s], s)
 }
@@ -337,15 +459,23 @@ fn frame_split<'a>(
 /// which stays stable however large the block gets.
 ///
 /// Line-based because OCR of a scrolling pane re-reads whole lines: drift within
-/// a line is noise, a new line is signal. It is therefore brittle to an OCR
-/// misread MID-RUN, which splits the run — see research.md R25.
+/// a line is noise, a new line is signal. Under [`Similarity::EXACT`] it is
+/// therefore brittle to an OCR misread MID-RUN, which splits the run (research
+/// R25); [`coverage_with`] is the same function with that drift tolerated to
+/// the caller's declared degree.
 pub fn coverage(block: &str, incoming: &str) -> f64 {
+    coverage_with(block, incoming, Similarity::EXACT)
+}
+
+/// [`coverage`], with lines that differ by less than `sim` counted as the same
+/// line. Same function, one more argument — NOT a second implementation.
+pub fn coverage_with(block: &str, incoming: &str, sim: Similarity) -> f64 {
     let lb: Vec<&str> = block.lines().collect();
     let li: Vec<&str> = incoming.lines().collect();
     if li.is_empty() {
         return 0.0;
     }
-    let (prefix, content_b, content_i, suffix) = frame_split(&lb, &li);
+    let (prefix, content_b, content_i, suffix) = frame_split(&lb, &li, sim);
     if content_i.is_empty() {
         // Everything in the capture is already held: the same screen, or one
         // scrolled back to material we have.
@@ -392,7 +522,7 @@ pub fn coverage(block: &str, incoming: &str) -> f64 {
     if unchanged >= STABLE_SCREEN {
         return unchanged;
     }
-    let (_, len) = longest_common_run(content_b, content_i);
+    let (_, len) = longest_common_run(content_b, content_i, sim);
     len as f64 / content_i.len() as f64
 }
 
@@ -404,17 +534,36 @@ pub fn coverage(block: &str, incoming: &str) -> f64 {
 /// are appended EXACTLY as captured: comparison trims, but a merge that trimmed
 /// would strip the indentation from every appended line, which in Python is not
 /// a cosmetic loss.
+///
+/// Exact-equality form of [`merge_scroll_with`].
 pub fn merge_scroll(block: &str, incoming: &str) -> String {
+    merge_scroll_with(block, incoming, Similarity::EXACT)
+}
+
+/// [`merge_scroll`], with lines that differ by less than `sim` treated as the
+/// same line. Same function, one more argument — NOT a second implementation.
+///
+/// Three guarantees survive the tolerance, and each has a test:
+/// - **Containment is not growth.** A reading whose every line the block
+///   already holds (to within `sim`) returns the block unchanged.
+/// - **No overlap loses nothing.** Two readings sharing no line survive in
+///   full, the incoming appended after the block's content.
+/// - **Nothing is dropped to make a join look clean.** Only the shared run
+///   is elided, and of that run the BLOCK's reading is the one kept — the
+///   first reading wins, deterministically. Lines before and after the run,
+///   and any new line that interrupts it, are appended verbatim even when
+///   that leaves a near-duplicate beside the original (fail-open, R13).
+pub fn merge_scroll_with(block: &str, incoming: &str, sim: Similarity) -> String {
     let lb: Vec<&str> = block.lines().collect();
     let li: Vec<&str> = incoming.lines().collect();
     if li.is_empty() {
         return block.to_string();
     }
-    let (_, content_b, content_i, suffix) = frame_split(&lb, &li);
+    let (_, content_b, content_i, suffix) = frame_split(&lb, &li, sim);
     if content_i.is_empty() {
         return block.to_string();
     }
-    let (run_start, run_len) = longest_common_run(content_b, content_i);
+    let (run_start, run_len) = longest_common_run(content_b, content_i, sim);
 
     // Rebuild as everything up to the frame suffix, then the incoming content
     // that is not the shared run, then the frame suffix back on — so a status
@@ -438,12 +587,31 @@ pub fn merge_scroll(block: &str, incoming: &str) -> String {
 #[derive(Debug, Default)]
 pub struct TextAggregator {
     blocks: Vec<String>,
+    similarity: Similarity,
 }
 
 impl TextAggregator {
-    /// An empty aggregator.
+    /// An empty aggregator under exact line equality — the pre-existing
+    /// behaviour, unchanged. A caller with imperfect readings declares its
+    /// tolerance through [`TextAggregator::with_similarity`] instead.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty aggregator that treats lines within `similarity` as the same
+    /// line, so two readings of one imperfect screen fold into one document
+    /// (D015-6). The threshold is the caller's; see [`Similarity`] for what it
+    /// buys and what it costs.
+    pub fn with_similarity(similarity: Similarity) -> Self {
+        Self {
+            blocks: Vec::new(),
+            similarity,
+        }
+    }
+
+    /// The tolerance this aggregator merges under.
+    pub fn similarity(&self) -> Similarity {
+        self.similarity
     }
 
     /// Absorb one capture, returning the index of the block it landed in.
@@ -462,13 +630,13 @@ impl TextAggregator {
         let best = self.blocks[start..]
             .iter()
             .enumerate()
-            .map(|(i, b)| (start + i, coverage(b, text)))
+            .map(|(i, b)| (start + i, coverage_with(b, text, self.similarity)))
             .max_by(|a, b| a.1.total_cmp(&b.1));
 
         match best {
             // The same material seen again as the pane scrolled: grow it.
             Some((i, score)) if score >= SAME_BLOCK => {
-                self.blocks[i] = merge_scroll(&self.blocks[i], text);
+                self.blocks[i] = merge_scroll_with(&self.blocks[i], text, self.similarity);
                 i
             }
             _ => {
@@ -490,6 +658,17 @@ impl TextAggregator {
 /// invoked by accident: absence is a stronger guarantee than a disabled flag.
 pub fn aggregator_for(intent: DayflowIntent) -> Option<TextAggregator> {
     intent.aggregates_text().then(TextAggregator::new)
+}
+
+/// [`aggregator_for`], with the caller's line tolerance — the form the
+/// transcribe path uses, since its readings are never exact (D015-6).
+pub fn aggregator_for_with(
+    intent: DayflowIntent,
+    similarity: Similarity,
+) -> Option<TextAggregator> {
+    intent
+        .aggregates_text()
+        .then(|| TextAggregator::with_similarity(similarity))
 }
 
 // ─── T027: crop before extract (FR-011) ───────────────────────────────────
@@ -1832,6 +2011,341 @@ mod tests {
         assert!(
             score >= STABLE_SCREEN,
             "12 of 13 lines identical is the same screen, not a new document: {score}"
+        );
+    }
+
+    // ─── T010/T011: tolerance is the caller's; three guarantees survive it ──
+
+    fn tol(t: f64) -> Similarity {
+        Similarity::new(t).unwrap()
+    }
+
+    /// Twenty DISTINCT lines of prose, each tagged so it can be found after
+    /// being flubbed. Distinct matters: a first draft of this fixture used one
+    /// sentence under twenty tags, and under tolerance line `10` matched line
+    /// `00` (two edits in fifty characters), so the whole second reading was
+    /// "already held" and vanished. Real prose does not repeat itself like
+    /// that; real TABLES do — see the near-miss test for that hazard, stated.
+    const PROSE: [&str; 20] = [
+        "the patient was admitted late on tuesday evening",
+        "blood pressure remained elevated despite the diuretic",
+        "an echo was ordered to look for valvular disease",
+        "she reported no chest pain but some breathlessness",
+        "the family history includes early coronary disease",
+        "renal function had declined over the previous month",
+        "potassium was replaced orally and rechecked at noon",
+        "the consultant reviewed the plan on the morning round",
+        "discharge planning began once the fluid balance settled",
+        "follow up in clinic was arranged for six weeks later",
+        "the cardiology registrar suggested stopping the beta blocker",
+        "a repeat chest film showed the effusion had resolved",
+        "oxygen was weaned to room air by the third day",
+        "her mobility improved with the physiotherapy sessions",
+        "the pharmacist reconciled the medication list on discharge",
+        "no adverse reactions were documented during the stay",
+        "the community nurse will visit twice in the first week",
+        "a letter was dictated to the general practitioner",
+        "the patient understood the warning signs to look for",
+        "all bloods were within normal limits at the final check",
+    ];
+
+    fn para(i: usize) -> String {
+        format!("{i:02}  {}", PROSE[i])
+    }
+
+    /// The same line as a second, imperfect reading: the flubs OCR actually
+    /// makes (o→0, l→1, e→c, rn→m), landing INSIDE tokens, never on the tag.
+    /// One to three edits in a 40–60 character line — similarity ≥ 0.93.
+    fn flubbed(i: usize) -> String {
+        let mut l = para(i).replacen('o', "0", 1);
+        if i % 3 == 0 {
+            l = l.replacen('l', "1", 1);
+        }
+        if i % 5 == 0 {
+            l = l.replacen("e", "c", 1);
+        }
+        assert!(
+            tol(0.9).matches(&para(i), &l),
+            "fixture must be a flub, not a new line"
+        );
+        assert_ne!(para(i), l, "fixture must actually differ");
+        l
+    }
+
+    fn reading(range: std::ops::Range<usize>, f: fn(usize) -> String) -> String {
+        range.map(f).collect::<Vec<_>>().join("\n")
+    }
+
+    fn tagged(doc: &str, i: usize) -> usize {
+        doc.lines()
+            .filter(|l| l.starts_with(&format!("{i:02}  ")))
+            .count()
+    }
+
+    #[test]
+    fn two_imperfect_readings_of_one_scroll_merge_the_shared_portion_once() {
+        // M5: two readings of the same imperfect lines differ, so EXACT
+        // matching finds zero overlap and emits the shared paragraph once per
+        // frame. First prove the fixture produces that condition, then that
+        // the tolerance closes it — through the aggregator, since that is the
+        // path the transcribe caller takes.
+        let first = reading(0..10, para);
+        let second = reading(3..13, flubbed); // 7 of 10 lines shared, all flubbed
+
+        // The condition, on the exact form: every shared line twice.
+        let exact = merge_scroll(&first, &second);
+        assert_eq!(
+            exact.lines().count(),
+            20,
+            "exact equality finds no overlap: {exact}"
+        );
+        assert_eq!(
+            tagged(&exact, 5),
+            2,
+            "the shared paragraph is emitted per frame"
+        );
+        let mut agg = TextAggregator::new();
+        agg.absorb(&first);
+        agg.absorb(&second);
+        assert_eq!(
+            agg.blocks().len(),
+            2,
+            "and the exact aggregator forks the document"
+        );
+
+        // Under the caller's tolerance: one document, shared portion once.
+        let mut agg =
+            aggregator_for_with(DayflowIntent::Content, tol(0.9)).expect("Content aggregates");
+        agg.absorb(&first);
+        agg.absorb(&second);
+        assert_eq!(
+            agg.blocks().len(),
+            1,
+            "one scroll is one document: {:#?}",
+            agg.blocks()
+        );
+        let doc = &agg.blocks()[0];
+        assert_eq!(
+            doc.lines().count(),
+            13,
+            "10 lines + 3 new, nothing twice: {doc}"
+        );
+        for i in 0..13 {
+            assert_eq!(tagged(doc, i), 1, "line {i} exactly once in {doc}");
+        }
+        // Of a shared line the FIRST reading is the one kept — deterministic,
+        // and stated, so a caller who wants the sharper reading orders its
+        // inputs rather than discovering this by diffing.
+        assert!(doc.contains(&para(5)) && !doc.contains(&flubbed(5)));
+        // The three genuinely new lines arrive as read, flubs and all: the
+        // merge repairs nothing, it only stops repeating.
+        assert!(doc.contains(&flubbed(12)));
+    }
+
+    #[test]
+    fn containment_is_not_growth_under_tolerance() {
+        // A reading wholly present in what came before — here a noisy re-read
+        // of the middle of a document — must not extend it. Not by a line.
+        let block = reading(0..20, para);
+        let inside = reading(5..12, flubbed);
+
+        assert_eq!(coverage_with(&block, &inside, tol(0.9)), 1.0);
+        assert_eq!(
+            merge_scroll_with(&block, &inside, tol(0.9)),
+            block,
+            "already-held material must not grow the document"
+        );
+        // Mutation check: it is the tolerance doing the work. Under EXACT the
+        // same reading is seven "new" lines.
+        assert_eq!(merge_scroll(&block, &inside).lines().count(), 27);
+    }
+
+    #[test]
+    fn no_overlap_loses_nothing_under_tolerance() {
+        // Two unrelated readings both survive, whole and in order. This is the
+        // guarantee a loose threshold is most likely to break — unrelated
+        // lines start to "match" and one reading eats the other — so it is
+        // asserted at a looser tolerance than the tests above use.
+        let doc = reading(0..8, para);
+        let terminal = "$ cargo test --lib\nrunning 380 tests\ntest result: ok. 380 passed\n$ ";
+
+        assert_eq!(coverage_with(&doc, terminal, tol(0.8)), 0.0);
+        assert_eq!(
+            merge_scroll_with(&doc, terminal, tol(0.8)),
+            format!("{doc}\n{terminal}"),
+            "no shared line: the incoming reading is appended in full"
+        );
+
+        let mut agg = TextAggregator::with_similarity(tol(0.8));
+        agg.absorb(&doc);
+        agg.absorb(terminal);
+        assert_eq!(
+            agg.blocks().len(),
+            2,
+            "unrelated material stays its own block"
+        );
+        assert_eq!(agg.blocks()[0], doc);
+        assert_eq!(agg.blocks()[1], terminal);
+    }
+
+    #[test]
+    fn nothing_is_dropped_to_make_a_join_look_clean() {
+        // The overlap is INTERRUPTED: a line the block never had sits between
+        // two lines it did. A merge that wanted a clean join would extend the
+        // run across the gap and lose the interruption. This one keeps it, and
+        // everything after it — accepting a near-duplicate of `para(3)` rather
+        // than deciding which reading of it was right (fail-open, R13).
+        let block = reading(0..4, para);
+        let inserted = "    // NEW: a line the earlier reading never showed";
+        let incoming = [flubbed(1), inserted.to_string(), flubbed(3), para(4)].join("\n");
+
+        let merged = merge_scroll_with(&block, &incoming, tol(0.9));
+        assert!(merged.starts_with(&block), "the block is never rewritten");
+        for must_survive in [inserted, &flubbed(3), &para(4)] {
+            assert!(
+                merged.contains(must_survive),
+                "dropped {must_survive:?} from {merged}"
+            );
+        }
+        assert_eq!(
+            merged.lines().count(),
+            7,
+            "4 held + 3 not in the shared run: {merged}"
+        );
+        assert_eq!(tagged(&merged, 1), 1, "only the shared run is elided");
+    }
+
+    #[test]
+    fn a_near_miss_is_not_merged_at_the_callers_threshold() {
+        // Two readings that are similar and genuinely DIFFERENT. The tool
+        // cannot know that — a misread digit and a different digit are the
+        // same edit — so the only honest promise is arithmetic: at the
+        // caller's threshold, a line this short cannot absorb one edit.
+        let sim = tol(0.9);
+        assert!(!sim.matches("HCC182", "HCC183"), "1 of 6 chars: 0.83 < 0.9");
+
+        let block = "Patient A\nHCC182\nconfirmed";
+        let incoming = "Patient A\nHCC183\nconfirmed";
+        let merged = merge_scroll_with(block, incoming, sim);
+        assert!(
+            merged.contains("HCC182") && merged.contains("HCC183"),
+            "both codes must survive: {merged}"
+        );
+        assert!(coverage_with(block, incoming, sim) < STABLE_SCREEN);
+
+        // The flub this tolerance exists for DOES match at the same setting —
+        // a longer line, one edit.
+        assert!(
+            sim.matches("def parse(self, x):", "def parse(seIf, x):"),
+            "1 of 19: 0.947"
+        );
+
+        // And the trade-off, stated rather than hidden: the threshold is a
+        // LENGTH. A one-digit difference in a 17-character line is 0.94, which
+        // 0.9 accepts and 0.95 refuses. The measure cannot separate this from
+        // the flub above; only the caller's threshold can, and that is why
+        // the caller owns it. If a future change special-cases digits, this
+        // assertion is the one to revisit — deliberately, not by accident.
+        assert!(sim.matches("total: 1,204 rows", "total: 1,205 rows"));
+        assert!(!tol(0.95).matches("total: 1,204 rows", "total: 1,205 rows"));
+        assert!(
+            tol(0.8).matches("HCC182", "HCC183"),
+            "at 0.8 the caller declared these equal"
+        );
+
+        // The same arithmetic, at document scale — the hazard to know about.
+        // Rows of a table differ from EACH OTHER by about as much as two
+        // readings of one row differ, so under a prose-grade tolerance a
+        // second reading of the table is "already held" and the rows it
+        // added are gone. Tabular material wants 0.95 or EXACT; that is a
+        // caller's judgement, stated here so nobody discovers it by loss.
+        let row = |n: usize, v: usize| format!("{n:03}  2026-09-06 12:00  claim paid  {v:>6}  ok");
+        let table = [row(1, 1204), row(2, 1305), row(3, 1406)].join("\n");
+        let more = [row(3, 1406), row(4, 1507), row(5, 1608)].join("\n");
+        assert!(
+            sim.matches(&row(4, 1507), &row(1, 1204)),
+            "two rows, three digits apart: 0.93"
+        );
+        assert_eq!(
+            merge_scroll_with(&table, &more, sim),
+            table,
+            "at 0.9 the new rows are swallowed as already held"
+        );
+        assert_eq!(
+            merge_scroll_with(&table, &more, tol(0.95)).lines().count(),
+            5,
+            "at 0.95 the shared row is elided once and the two new rows survive"
+        );
+    }
+
+    #[test]
+    fn a_tolerance_that_is_not_a_threshold_is_refused() {
+        for bad in [0.0, -0.1, 1.5, f64::NAN] {
+            let err = Similarity::new(bad).unwrap_err();
+            assert!(err.contains("(0, 1]"), "{bad}: {err}");
+        }
+        assert_eq!(Similarity::new(1.0).unwrap(), Similarity::EXACT);
+        assert_eq!(Similarity::default(), Similarity::EXACT);
+        assert_eq!(Similarity::parse(" 0.8 ").unwrap().threshold(), 0.8);
+        assert!(Similarity::parse("abc")
+            .unwrap_err()
+            .contains("not a number"));
+        assert!(Similarity::parse("2").is_err());
+
+        // The measure itself: bounded, symmetric, over characters not bytes.
+        assert_eq!(line_similarity("abc", "abc"), 1.0);
+        assert_eq!(line_similarity("", ""), 1.0);
+        assert_eq!(line_similarity("abc", ""), 0.0);
+        assert_eq!(
+            line_similarity("kitten", "sitting"),
+            line_similarity("sitting", "kitten")
+        );
+        assert_eq!(
+            line_similarity("café", "cafe"),
+            0.75,
+            "one edit in four scalars, not five bytes"
+        );
+        // Exact never runs the DP: a one-edit pair is simply unequal.
+        assert!(!Similarity::EXACT.matches("abcd", "abce"));
+        assert!(Similarity::EXACT.matches("  x ", "x"), "exact still trims");
+    }
+
+    #[test]
+    fn under_tolerance_jittered_readings_of_one_line_collapse_to_the_first() {
+        // The pre-existing `ocr_jitter_on_a_static_screen_does_not_fork_a_block`
+        // fixture keeps all FIVE readings of the flubbed line under EXACT,
+        // because it cannot know which was right. Under a declared tolerance
+        // the five readings differ by one character in 23 (0.957) and are, by
+        // the caller's own declaration, the same line — so the first is kept
+        // and the rest are the repetition the tolerance exists to stop. Both
+        // are correct; they answer different declarations. This test pins the
+        // second so the change in behaviour is a stated fact, not a surprise.
+        let mut agg = TextAggregator::with_similarity(tol(0.9));
+        for sample in 0..5 {
+            let body: Vec<String> = (0..20)
+                .map(|i| {
+                    if i == 9 {
+                        format!("    the qu1ck br0wn f0x {sample}")
+                    } else {
+                        format!("    stable line {i}")
+                    }
+                })
+                .collect();
+            agg.absorb(&windowed(&body));
+        }
+        assert_eq!(agg.blocks().len(), 1);
+        assert_eq!(
+            agg.blocks()[0]
+                .lines()
+                .filter(|l| l.contains("qu1ck"))
+                .count(),
+            1,
+            "declared the same line, kept once: {}",
+            agg.blocks()[0]
+        );
+        assert!(
+            agg.blocks()[0].contains("f0x 0"),
+            "and it is the first reading"
         );
     }
 
