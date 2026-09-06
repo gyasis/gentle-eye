@@ -11,6 +11,16 @@
 //! spends its time. It also inverts the usual reason to raise a frame rate: a
 //! higher rate is not for capturing more CONTENT, it is for capturing a SHARP
 //! INSTANCE of the same content.
+//!
+//! # Every row carries WHEN it was taken
+//!
+//! A kept frame's `index` counts the frames that SURVIVED deduplication, so
+//! under any [`Dedup`] but `None` it says nothing about time — `index / fps` is
+//! plausible, wrong, and undetectable from the rows. The timestamp on each
+//! [`FrameRow`] is ffmpeg's own presentation time for that frame, read back
+//! from the extraction; see [`extract_frames`] for how it is tied to the file.
+
+use serde::Serialize;
 
 /// The sharpness of an 8-bit greyscale image, as the variance of its Laplacian.
 ///
@@ -170,10 +180,21 @@ mod tests {
 /// threshold. The rows deliberately do not describe what was dropped: the
 /// caller set the threshold and can re-run to see more, and a list of
 /// near-duplicates nobody asked for is noise (D015-7).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serialises flat — `{index, timestamp_s, path, sharpness}` — so an agent
+/// reading the rows from a shell sees the fields under these names.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FrameRow {
-    /// Position in the kept sequence, from 0.
+    /// Position in the kept sequence, from 0. **Not a clock**: after
+    /// deduplication it counts survivors, so `index / fps` is wrong for any
+    /// [`Dedup`] but `None`. Use `timestamp_s`.
     pub index: usize,
+    /// When the frame was taken, in seconds from the start of the recording:
+    /// the presentation timestamp ffmpeg reported for THIS frame as it wrote
+    /// it, not a value inferred from `index`. Finite, non-negative, strictly
+    /// increasing down the rows. Precision is ffmpeg's — six significant
+    /// figures, so millisecond-scale for anything shorter than a few hours.
+    pub timestamp_s: f64,
     /// Where the frame was written.
     pub path: std::path::PathBuf,
     /// Focus measure. **Comparable within this recording only** — see
@@ -267,12 +288,26 @@ impl Dedup {
 /// what IT kept, not what a previous run left behind, and a caller's
 /// unrelated images in `out_dir` are never scored as frames.
 ///
+/// # Where the timestamp comes from
+///
+/// ffmpeg is asked to report every frame that reaches the END of the filter
+/// chain — after `fps` and after dedup, so exactly the frames it then writes —
+/// into a small file beside the frames (the `metadata=print` filter; `showinfo`
+/// would do the same but logs at `info`, which `-v error` suppresses). Both the
+/// report and the written files are one entry per surviving frame, in stream
+/// order, so line *i* is file *i*. That pairing is only sound if the counts
+/// agree, so **a count mismatch is a stated error and returns no rows** — a
+/// truncating zip would silently drop the tail of a recording, which is the
+/// silent failure this module exists to refuse. The report is removed once
+/// read; only the frames stay in `out_dir`.
+///
 /// # Errors
 ///
 /// A missing or failing `ffmpeg` is an error naming what happened. It is NEVER
 /// an empty frame list — "the recording has no frames" and "I could not look"
 /// are different facts, and a caller that cannot tell them apart will report the
-/// wrong one.
+/// wrong one. A timestamp report that does not match the written frames is an
+/// error for the same reason.
 /// The files this module's ffmpeg invocation writes: `f_NNNNN.png`, sorted.
 ///
 /// Matching OUR exact pattern — not "any .png" — is what keeps a caller's
@@ -298,6 +333,64 @@ fn read_frame_files(out_dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>
     Ok(paths)
 }
 
+/// Where ffmpeg's per-frame timestamp report lands inside `out_dir`. Named so
+/// that [`read_frame_files`] can never mistake it for a frame.
+const TIMESTAMPS_FILE: &str = "timestamps.txt";
+
+/// The timestamps in ffmpeg's `metadata=print` report, one per surviving
+/// frame, checked against the number of files actually written.
+///
+/// The report is one header line per frame —
+/// `frame:N    pts:P       pts_time:T` — followed by that frame's metadata
+/// lines. `N` is ffmpeg's own count of frames through the filter, from 0, so
+/// it must equal the line's position; `T` is the presentation time in
+/// seconds. Anything else — a count that differs from `files`, a missing or
+/// unparsable time, a time that is negative or not finite, a time that does
+/// not increase — is refused with a message saying which. None of these may
+/// be smoothed over: each would put a plausible, wrong time on a row.
+fn parse_timestamps(report: &str, files: usize) -> Result<Vec<f64>, String> {
+    let mut out: Vec<f64> = Vec::new();
+    for line in report.lines().filter(|l| l.starts_with("frame:")) {
+        let position = out.len();
+        let mut fields = line.split_whitespace();
+        let n: usize = fields
+            .next()
+            .and_then(|f| f.strip_prefix("frame:"))
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| format!("ffmpeg timestamp report: unreadable frame number in {line:?}"))?;
+        if n != position {
+            return Err(format!(
+                "ffmpeg timestamp report: frame {n} reported at position {position} — \
+                 the report is not one line per frame in order, so it cannot be paired with the files"
+            ));
+        }
+        let t: f64 = fields
+            .find_map(|f| f.strip_prefix("pts_time:"))
+            .and_then(|t| t.parse().ok())
+            .ok_or_else(|| format!("ffmpeg timestamp report: no readable pts_time in {line:?}"))?;
+        if !t.is_finite() || t < 0.0 {
+            return Err(format!("ffmpeg timestamp report: frame {n} has an impossible time {t}"));
+        }
+        if let Some(&prev) = out.last() {
+            if t <= prev {
+                return Err(format!(
+                    "ffmpeg timestamp report: frame {n} at {t}s does not come after frame {} at {prev}s",
+                    n - 1
+                ));
+            }
+        }
+        out.push(t);
+    }
+    if out.len() != files {
+        return Err(format!(
+            "ffmpeg wrote {files} frame files but reported {} timestamps — they cannot be paired, \
+             so no rows are returned rather than rows with guessed times",
+            out.len()
+        ));
+    }
+    Ok(out)
+}
+
 pub fn extract_frames(
     video: &std::path::Path,
     fps: f64,
@@ -319,6 +412,11 @@ pub fn extract_frames(
         std::fs::remove_file(&stale)
             .map_err(|e| format!("cannot clear stale frame {}: {e}", stale.display()))?;
     }
+    let report_path = out_dir.join(TIMESTAMPS_FILE);
+    if report_path.exists() {
+        std::fs::remove_file(&report_path)
+            .map_err(|e| format!("cannot clear stale {}: {e}", report_path.display()))?;
+    }
 
     // Dedup runs BEFORE anything downstream is paid for. The existing
     // ocr_video dedups only after reading every frame — the expensive order
@@ -333,21 +431,38 @@ pub fn extract_frames(
         vf.push(',');
         vf.push_str(f);
     }
+    // LAST in the chain, so it sees exactly the frames that survived and are
+    // about to be written: `metadata=print` writes one `frame:N ... pts_time:T`
+    // line per frame to the report file. ffmpeg 4.4's `metadata` filter skips
+    // a frame that carries no metadata at all (a decoded video frame usually
+    // has none) — measured: 80 files, 0 lines — so a key is added just before
+    // the print and deleted just after, leaving the PNGs untouched.
+    vf.push_str(",metadata=mode=add:key=kept:value=1,metadata=mode=print:file=");
+    vf.push_str(TIMESTAMPS_FILE);
+    vf.push_str(",metadata=mode=delete:key=kept");
 
-    let pattern = out_dir.join("f_%05d.png");
+    // ffmpeg runs INSIDE out_dir so that the report file and the frame
+    // pattern are bare names: a path inside a filtergraph string has to be
+    // escaped at two levels (`:` `,` `\` `'`), and a caller's directory name
+    // is not ours to get that right for. The input path is made absolute so
+    // the change of directory cannot re-resolve a relative one.
+    let video = std::path::absolute(video)
+        .map_err(|e| format!("cannot resolve {}: {e}", video.display()))?;
     let out = std::process::Command::new("ffmpeg")
+        .current_dir(out_dir)
         .args([
             "-v", "error",
             "-i", &video.to_string_lossy(),
             "-vf", &vf,
-            // mpdecimate is now LAST in the chain, so its output is a
-            // variable-rate stream. vfr pins the muxer to pass that through
+            // mpdecimate is the last filter that touches timing (only the
+            // metadata bookkeeping follows it), so the stream reaching the
+            // muxer is variable-rate. vfr pins the muxer to pass that through
             // unresampled. Measured on ffmpeg 4.4: the image-sequence muxer
             // already defaults to this, so the flag changes nothing today —
             // it makes the intent explicit instead of leaning on a muxer
             // default that is not ours to rely on.
             "-vsync", "vfr",
-            &pattern.to_string_lossy(),
+            "f_%05d.png",
             "-y",
         ])
         .output()
@@ -366,13 +481,122 @@ pub fn extract_frames(
     }
 
     let paths = read_frame_files(out_dir)?;
+    let report = std::fs::read_to_string(&report_path).map_err(|e| {
+        format!(
+            "ffmpeg succeeded but left no timestamp report at {}: {e} — \
+             without it the frames cannot be timed, so no rows are returned",
+            report_path.display()
+        )
+    })?;
+    std::fs::remove_file(&report_path)
+        .map_err(|e| format!("cannot remove {}: {e}", report_path.display()))?;
+    // One timestamp per written file, or a stated error — never a zip that
+    // stops at the shorter side.
+    let timestamps = parse_timestamps(&report, paths.len())?;
 
     paths
         .into_iter()
+        .zip(timestamps)
         .enumerate()
-        .map(|(index, path)| {
+        .map(|(index, (path, timestamp_s))| {
             let sharpness = sharpness_of_file(&path)?;
-            Ok(FrameRow { index, path, sharpness })
+            Ok(FrameRow { index, timestamp_s, path, sharpness })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+
+    /// The report exactly as ffmpeg 4.4 writes it (measured on a real
+    /// recording): a header per frame, then the frame's metadata lines. After
+    /// dedup the `pts` column jumps — that gap is the whole point.
+    const REPORT: &str = "frame:0    pts:0       pts_time:0\nkept=1\n\
+                          frame:1    pts:1       pts_time:0.25\nkept=1\n\
+                          frame:2    pts:2       pts_time:0.5\nkept=1\n\
+                          frame:3    pts:117     pts_time:29.25\nkept=1\n\
+                          frame:4    pts:119     pts_time:29.75\nkept=1\n";
+
+    #[test]
+    fn one_timestamp_per_header_line_in_order() {
+        assert_eq!(parse_timestamps(REPORT, 5).unwrap(), vec![0.0, 0.25, 0.5, 29.25, 29.75]);
+        assert_eq!(parse_timestamps("", 0).unwrap(), Vec::<f64>::new(), "no frames, no report, no rows");
+    }
+
+    /// The guard the contract's "stated failure, never a silent one" rule
+    /// demands. Five timestamps against six files means a frame has no time;
+    /// against four, a time has no frame. Either way the pairing is unknown,
+    /// so the answer is an error naming both counts — never the first four
+    /// rows with the tail quietly gone.
+    #[test]
+    fn a_count_mismatch_is_a_stated_error_never_a_truncating_zip() {
+        for files in [4, 6] {
+            let err = parse_timestamps(REPORT, files).unwrap_err();
+            assert!(
+                err.contains(&format!("{files} frame files")) && err.contains("5 timestamps"),
+                "the error must name both counts, got: {err}"
+            );
+        }
+    }
+
+    /// A malformed report is refused rather than read around: a missing time,
+    /// an impossible time, a time that does not advance, or a frame counter
+    /// that does not match the line's position. Each would otherwise end as a
+    /// plausible wrong timestamp on a row.
+    #[test]
+    fn a_malformed_report_is_refused_not_repaired() {
+        let cases = [
+            ("frame:0    pts:0       pts_time:0\nframe:1    pts:4\n", "no readable pts_time"),
+            ("frame:0    pts:0       pts_time:nan\n", "impossible time"),
+            ("frame:0    pts:0       pts_time:-1\n", "impossible time"),
+            ("frame:0    pts:0       pts_time:1\nframe:1    pts:4       pts_time:1\n", "does not come after"),
+            ("frame:0    pts:0       pts_time:0\nframe:5    pts:4       pts_time:1\n", "reported at position 1"),
+            ("frame:x    pts:0       pts_time:0\n", "unreadable frame number"),
+        ];
+        for (report, expect) in cases {
+            let files = report.matches("frame:").count();
+            let err = parse_timestamps(report, files).unwrap_err();
+            assert!(err.contains(expect), "for {report:?} expected {expect:?}, got: {err}");
+        }
+    }
+
+    /// THE CRUX, against real ffmpeg: under dedup the timestamps are the
+    /// times the screen actually changed, not `index / fps`.
+    ///
+    /// The fixture's text changes at 1, 4, 5 and 9 seconds — deliberately
+    /// irregular. At 4 fps with medium dedup the kept frames must sit at those
+    /// moments (plus the first frame), so their spacing is 1, 3, 1, 4 — while
+    /// `index / fps` would say 0, 0.25, 0.5, 0.75, 1.0. Uniform spacing here
+    /// would mean the wrong thing is being measured.
+    #[test]
+    #[ignore = "live: needs ffmpeg"]
+    fn under_dedup_timestamps_are_when_the_screen_changed_not_index_over_fps() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("steps.mp4");
+        let rendered = std::process::Command::new("ffmpeg")
+            .args([
+                "-v", "error", "-f", "lavfi",
+                "-i", "color=c=black:s=640x360:r=24:d=12",
+                "-vf",
+                "drawtext=text='STEP %{eif\\:gte(t\\,1)+gte(t\\,4)+gte(t\\,5)+gte(t\\,9)\\:d}':\
+                 fontcolor=white:fontsize=48:x=40:y=180:box=1:boxcolor=black",
+                "-pix_fmt", "yuv420p",
+                &video.to_string_lossy(), "-y",
+            ])
+            .output()
+            .expect("run ffmpeg");
+        assert!(rendered.status.success(), "fixture: {}", String::from_utf8_lossy(&rendered.stderr));
+
+        let rows = extract_frames(&video, 4.0, Dedup::Medium, &dir.path().join("out")).unwrap();
+        let times: Vec<f64> = rows.iter().map(|r| r.timestamp_s).collect();
+        eprintln!("[timestamps] kept {} frames at {times:?}", rows.len());
+        assert_eq!(times, vec![0.0, 1.0, 4.0, 5.0, 9.0], "the kept frames are the moments the text changed");
+        let by_index: Vec<f64> = rows.iter().map(|r| r.index as f64 / 4.0).collect();
+        assert_ne!(times, by_index, "index / fps is exactly the wrong answer this field exists to replace");
+        assert!(
+            !dir.path().join("out").join(TIMESTAMPS_FILE).exists(),
+            "the report is read and removed; only frames stay in out_dir"
+        );
+    }
 }

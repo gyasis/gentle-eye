@@ -50,18 +50,17 @@
 //! exactly the [`Utterance`] shape — and a second speech-to-text path here
 //! would be the duplication primitive 3 exists to close.
 //!
-//! # Timestamps are also INPUT — a gap this module cannot close alone
+//! # The frames come straight from primitive 1
 //!
-//! [`super::frames::FrameRow`] carries an index, a path and a sharpness, but
-//! NOT a timestamp, and under any [`super::frames::Dedup`] other than `None`
-//! the index counts KEPT frames rather than encoding time. So a caller must
-//! attach the time to each row themselves ([`TimedFrame`]); for the one case
-//! where the index does encode time — extraction at a known rate with no
-//! dedup — [`TimedFrame::at_rate`] does it. Anything else needs the timestamp
-//! from the extraction (see that function's doc).
+//! [`FrameRow`] carries `timestamp_s` — ffmpeg's own presentation time for the
+//! frame, read back from the extraction — so the rows `extract_frames`
+//! returns are aligned as they are. There is deliberately NO helper that
+//! infers a time from `index` and a rate: under any [`super::frames::Dedup`]
+//! but `None` the index counts KEPT frames, so `index / fps` is plausible,
+//! wrong, and undetectable from the rows. A caller with frames from some
+//! other source builds `FrameRow`s with the times they actually know.
 
 use super::frames::FrameRow;
-use serde::ser::SerializeStruct;
 use serde::Serialize;
 
 /// One utterance of a transcript: what was said, and when.
@@ -78,65 +77,6 @@ pub struct Utterance {
     /// When it ends. Equal to `start_s` for a point timestamp.
     pub end_s: f64,
     pub text: String,
-}
-
-/// A frame with the one thing [`FrameRow`] does not carry: WHEN it was.
-///
-/// Reuses [`FrameRow`] rather than duplicating its fields; the timestamp is
-/// seconds from the start of the recording, finite and non-negative, refused
-/// otherwise by [`align`] with [`AlignError::BadFrame`].
-///
-/// Serialises FLAT — `{seconds, index, path, sharpness}` — so an agent reading
-/// the output from a shell sees one row per frame, not a nested object. The
-/// impl is by hand only because `FrameRow` does not derive `Serialize` and
-/// `frames.rs` is not this primitive's to change; it writes exactly
-/// `FrameRow`'s fields plus `seconds`, nothing renamed, nothing invented.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TimedFrame {
-    /// Seconds from the start of the recording.
-    pub seconds: f64,
-    pub frame: FrameRow,
-}
-
-impl Serialize for TimedFrame {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut st = s.serialize_struct("TimedFrame", 4)?;
-        st.serialize_field("seconds", &self.seconds)?;
-        st.serialize_field("index", &self.frame.index)?;
-        st.serialize_field("path", &self.frame.path)?;
-        st.serialize_field("sharpness", &self.frame.sharpness)?;
-        st.end()
-    }
-}
-
-impl TimedFrame {
-    /// Timestamp rows extracted at a fixed `fps` with **no deduplication**:
-    /// frame `index` was sampled at `index / fps` seconds.
-    ///
-    /// # Only correct for [`super::frames::Dedup::None`]
-    ///
-    /// `extract_frames` numbers its output files sequentially AFTER dedup, so
-    /// with any other setting `index` counts the frames that were kept and
-    /// says nothing about when they were taken — the third kept frame of a
-    /// static slide deck may be minutes in. Applying this to a deduplicated
-    /// run produces timestamps that are silently, plausibly wrong, which is
-    /// the one thing this module must not do; there is no way to detect it
-    /// from the rows, so the burden is on the caller to know how they were
-    /// extracted. For a deduplicated run, take the timestamps from the
-    /// extraction itself (ffmpeg's `showinfo` filter, or `-frame_pts`) and
-    /// build [`TimedFrame`]s directly.
-    ///
-    /// `fps` must be positive and finite, the same rule `extract_frames`
-    /// applies.
-    pub fn at_rate(rows: &[FrameRow], fps: f64) -> Result<Vec<TimedFrame>, AlignError> {
-        if !fps.is_finite() || fps <= 0.0 {
-            return Err(AlignError::BadOption(format!("fps must be positive and finite, got {fps}")));
-        }
-        Ok(rows
-            .iter()
-            .map(|r| TimedFrame { seconds: r.index as f64 / fps, frame: r.clone() })
-            .collect())
-    }
 }
 
 /// Default [`AlignOpts::lead_s`]: 3 s of screen before the utterance starts.
@@ -190,12 +130,14 @@ pub struct Alignment {
     pub window_start_s: f64,
     /// `utterance.end_s + lag_s`.
     pub window_end_s: f64,
-    /// Every frame with `window_start_s <= seconds <= window_end_s`, in time
-    /// order (ties by frame index, then path). **May be empty**, and an empty
-    /// list is a real answer: nothing was sampled while this was said. Not
-    /// ranked, not filtered — the sharpness on each row is for the CALLER to
-    /// pick by, and it is comparable within this recording only.
-    pub frames: Vec<TimedFrame>,
+    /// Every frame with `window_start_s <= timestamp_s <= window_end_s`, in
+    /// time order (ties by frame index, then path), each the row primitive 1
+    /// produced — `{index, timestamp_s, path, sharpness}`, flat. **May be
+    /// empty**, and an empty list is a real answer: nothing was sampled while
+    /// this was said. Not ranked, not filtered — the sharpness on each row is
+    /// for the CALLER to pick by, and it is comparable within this recording
+    /// only.
+    pub frames: Vec<FrameRow>,
 }
 
 /// Why an alignment could not be produced. Every variant is a STATED failure:
@@ -203,10 +145,9 @@ pub struct Alignment {
 #[derive(Debug, thiserror::Error)]
 pub enum AlignError {
     /// A tolerance that cannot be applied — a negative or non-finite
-    /// `lead_s`/`lag_s`, or a bad `fps` for [`TimedFrame::at_rate`]. Refused
-    /// up front, before any work: a NaN compares false against everything and
-    /// would make every window empty, which would then read as "nothing was
-    /// on screen".
+    /// `lead_s`/`lag_s`. Refused up front, before any work: a NaN compares
+    /// false against everything and would make every window empty, which
+    /// would then read as "nothing was on screen".
     #[error("bad option: {0}")]
     BadOption(String),
     /// The transcript has no utterances. An empty transcript aligns to
@@ -224,9 +165,9 @@ pub enum AlignError {
     /// negative, or `end_s < start_s`. `index` is its position in the input.
     #[error("bad utterance {index}: {reason}")]
     BadUtterance { index: usize, reason: String },
-    /// A frame whose timestamp is not a position in a recording: non-finite
-    /// or negative. `index` is its position in the input slice, not
-    /// `FrameRow::index`.
+    /// A frame whose `timestamp_s` is not a position in a recording:
+    /// non-finite or negative. `index` is its position in the input slice,
+    /// not `FrameRow::index`.
     #[error("bad frame {index}: {reason}")]
     BadFrame { index: usize, reason: String },
 }
@@ -267,8 +208,8 @@ fn check_seconds(v: f64) -> Result<(), String> {
 ///
 /// Same input, same output, regardless of input order. Utterances come back
 /// sorted by `start_s`, then `end_s`, then their position in the input;
-/// frames within a row by `seconds`, then `FrameRow::index`, then `path`. No
-/// step depends on hash-map iteration.
+/// frames within a row by `timestamp_s`, then `FrameRow::index`, then `path`.
+/// No step depends on hash-map iteration.
 ///
 /// # Errors
 ///
@@ -276,7 +217,7 @@ fn check_seconds(v: f64) -> Result<(), String> {
 /// transcript, an empty frame list, or a time that is not a position in a
 /// recording. All inputs are validated BEFORE any pairing, so a bad row late
 /// in the input is refused rather than half-aligned.
-pub fn align(transcript: &[Utterance], frames: &[TimedFrame], opts: AlignOpts) -> Result<Vec<Alignment>, AlignError> {
+pub fn align(transcript: &[Utterance], frames: &[FrameRow], opts: AlignOpts) -> Result<Vec<Alignment>, AlignError> {
     check_opts(opts)?;
     if transcript.is_empty() {
         return Err(AlignError::NoUtterances);
@@ -293,16 +234,16 @@ pub fn align(transcript: &[Utterance], frames: &[TimedFrame], opts: AlignOpts) -
         }
     }
     for (index, f) in frames.iter().enumerate() {
-        check_seconds(f.seconds).map_err(|reason| AlignError::BadFrame { index, reason })?;
+        check_seconds(f.timestamp_s).map_err(|reason| AlignError::BadFrame { index, reason })?;
     }
 
     // Every time is finite from here on, so total_cmp is a plain numeric order.
-    let mut frames: Vec<&TimedFrame> = frames.iter().collect();
+    let mut frames: Vec<&FrameRow> = frames.iter().collect();
     frames.sort_by(|a, b| {
-        a.seconds
-            .total_cmp(&b.seconds)
-            .then(a.frame.index.cmp(&b.frame.index))
-            .then_with(|| a.frame.path.cmp(&b.frame.path))
+        a.timestamp_s
+            .total_cmp(&b.timestamp_s)
+            .then(a.index.cmp(&b.index))
+            .then_with(|| a.path.cmp(&b.path))
     });
     let mut utterances: Vec<&Utterance> = transcript.iter().collect();
     // Stable, so equal (start, end) keep their input order.
@@ -315,8 +256,8 @@ pub fn align(transcript: &[Utterance], frames: &[TimedFrame], opts: AlignOpts) -
             let window_end_s = u.end_s + opts.lag_s;
             // Frames are sorted by time, so the window is one contiguous run:
             // first frame at or after the start, first frame past the end.
-            let lo = frames.partition_point(|f| f.seconds < window_start_s);
-            let hi = frames.partition_point(|f| f.seconds <= window_end_s);
+            let lo = frames.partition_point(|f| f.timestamp_s < window_start_s);
+            let hi = frames.partition_point(|f| f.timestamp_s <= window_end_s);
             Alignment {
                 utterance: u.clone(),
                 window_start_s,
@@ -335,15 +276,12 @@ mod tests {
         Utterance { start_s, end_s, text: text.to_string() }
     }
 
-    fn f(index: usize, seconds: f64, sharpness: f64) -> TimedFrame {
-        TimedFrame {
-            seconds,
-            frame: FrameRow { index, path: format!("f_{index:05}.png").into(), sharpness },
-        }
+    fn f(index: usize, timestamp_s: f64, sharpness: f64) -> FrameRow {
+        FrameRow { index, timestamp_s, path: format!("f_{index:05}.png").into(), sharpness }
     }
 
     fn indices(a: &Alignment) -> Vec<usize> {
-        a.frames.iter().map(|t| t.frame.index).collect()
+        a.frames.iter().map(|t| t.index).collect()
     }
 
     /// The realistic shape from the amendment's evidence: the "Concat. / I'm
@@ -352,14 +290,14 @@ mod tests {
     /// driven span selection cuts frames to the spans worth processing, while
     /// the transcript covers the whole call), sharpness from M4's measured
     /// range. A later utterance at 14:00 has no frames anywhere near it.
-    fn fixture() -> (Vec<Utterance>, Vec<TimedFrame>) {
+    fn fixture() -> (Vec<Utterance>, Vec<FrameRow>) {
         let transcript = vec![
             u(727.0, 727.8, "Concat."),
             u(729.0, 730.6, "I'm going to do HCC"),
             u(840.0, 842.2, "and that one's fine"),
         ];
         let sharp = [1443.0, 396.0, 1458.0, 507.0, 1450.0, 421.0, 1447.0, 1455.0];
-        let frames: Vec<TimedFrame> =
+        let frames: Vec<FrameRow> =
             (0..8).map(|k| f(144 + k, 720.0 + 5.0 * k as f64, sharp[k])).collect();
         (transcript, frames)
     }
@@ -395,7 +333,7 @@ mod tests {
         // Sharpness passes through untouched, unranked: idx 145 scored 396
         // (M4's "all failed" band) and sits BEFORE idx 146's 1458 because the
         // order is time, not legibility. The caller picks.
-        let s: Vec<f64> = rows[0].frames.iter().map(|t| t.frame.sharpness).collect();
+        let s: Vec<f64> = rows[0].frames.iter().map(|t| t.sharpness).collect();
         assert_eq!(s, vec![396.0, 1458.0]);
     }
 
@@ -550,28 +488,10 @@ mod tests {
         check_opts(o).unwrap();
     }
 
-    /// `at_rate` is the bridge from primitive 1 for the one case where the
-    /// index encodes time; it refuses a rate `extract_frames` would refuse.
-    #[test]
-    fn at_rate_stamps_index_over_fps_and_refuses_a_bad_rate() {
-        let rows = vec![
-            FrameRow { index: 0, path: "f_00000.png".into(), sharpness: 1.0 },
-            FrameRow { index: 1, path: "f_00001.png".into(), sharpness: 2.0 },
-            FrameRow { index: 4, path: "f_00004.png".into(), sharpness: 3.0 },
-        ];
-        let timed = TimedFrame::at_rate(&rows, 0.2).unwrap();
-        let secs: Vec<f64> = timed.iter().map(|t| t.seconds).collect();
-        assert_eq!(secs, vec![0.0, 5.0, 20.0]);
-        assert_eq!(timed[2].frame, rows[2], "the row rides along unchanged");
-        for fps in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert!(matches!(TimedFrame::at_rate(&rows, fps), Err(AlignError::BadOption(_))), "fps={fps}");
-        }
-        assert!(TimedFrame::at_rate(&[], 1.0).unwrap().is_empty());
-    }
-
     /// The contract's machine-readable requirement: rows serialise with their
-    /// field names, frames FLAT (not nested under `frame`), an empty `frames`
-    /// is an empty array, and there is no verdict field anywhere.
+    /// field names, frames FLAT — primitive 1's row as it is, not nested under
+    /// a `frame` key — an empty `frames` is an empty array, and there is no
+    /// verdict field anywhere.
     #[test]
     fn the_output_is_machine_readable_and_carries_no_verdict() {
         let (t, fr) = fixture();
@@ -588,11 +508,11 @@ mod tests {
         assert_eq!(row["utterance"]["start_s"], 727.0);
 
         let frame = row["frames"][0].as_object().unwrap();
-        for key in ["seconds", "index", "path", "sharpness"] {
+        for key in ["timestamp_s", "index", "path", "sharpness"] {
             assert!(frame.contains_key(key), "missing {key}: {v}");
         }
         assert!(!frame.contains_key("frame"), "frames serialise flat, not nested");
-        assert_eq!(frame["seconds"], 725.0);
+        assert_eq!(frame["timestamp_s"], 725.0);
         assert_eq!(frame["index"], 145);
         assert_eq!(frame["path"], "f_00145.png");
         assert_eq!(frame["sharpness"], 396.0);
