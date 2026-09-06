@@ -257,3 +257,163 @@ obtain a transcript.
 - Live, real-time transcription. The design deliberately records first.
 - Replacing dayflow. Dayflow answers *what was I doing*; this answers *what did
   it say*.
+
+---
+
+## Scope Amendment — 2026-09-06: stacking and audio alignment come IN
+
+**Status**: amendment. The Out of Scope section above is left unedited on purpose —
+the original decision and its reasoning stay readable, and this records what changed
+and on what evidence. Two bullets are reversed:
+
+> - Improving an illegible recording (upscaling, deblurring, super-resolution).
+> - Speech, audio, or subtitles — this is screen text.
+
+### The evidence that reversed them
+
+Two real recordings were processed end-to-end on 2026-09-04/05 (a phone filming a
+laptop during a working call) with an out-of-tree pipeline. Both exclusions failed
+against real material.
+
+**Super-resolution is not cosmetic — it decides whether text resolves at all.**
+On recording 1, `))=CONCAT('HCC', G.hcc_gap)`, the surrounding table names, an error
+banner and an open autocomplete list were all UNREADABLE in any single frame and
+READABLE after a coherent multi-frame stack. Nothing else in the pipeline produced
+them.
+
+**Audio is not a companion to screen text — it is the fallback when the screen
+fails, and screen text is the fallback when speech is vague.** Recording 2 was
+filmed further back; its code never resolved even at 3x. Every finding from it came
+from speech. Conversely, speech alone is full of unresolvable deixis — "this table
+here", "that one", "go back down" — which only the frames disambiguate. Each channel
+covers the other's blind spot, so a screen-text-only tool is undefined on exactly the
+material this feature exists for.
+
+**And the pairing carries information neither channel holds.** "Concat. I'm going to
+do HCC. I think that'll work" is a plan; an autocomplete list open on `concat` with a
+red squiggle on `G.hcc_gap` is a state; together they timestamp the moment a fix was
+written. That correlation produced every substantive finding in both recordings.
+
+### What this adds — two primitives, in the existing shape
+
+Each still answers ONE question and decides nothing. The caller owns every threshold.
+
+**4. Stack** — *"Given N frames of the same screen, what is the best single image?"*
+
+**Takes**: frames of one region; a scale; a combine mode; a coherence tolerance.
+**Gives**: the combined image, plus per-run scores — frames used, frames dropped for
+movement, which frames were kept, maximum drift, a residual spread.
+
+- **Never returns a verdict on its own output.** An earlier implementation returned
+  `improved: bool`, and it was measured to be unfalsifiable: it sharpened the result
+  and compared it against an unsharpened baseline, so 15 IDENTICAL frames — where
+  stacking can recover nothing — scored HIGHER than a real burst and still reported
+  success. Scores, not verdicts, per the contract.
+- **Sharpness cannot detect the characteristic failure.** A stack whose frames have
+  drifted ghosts, and a ghosted result scores WELL on any focus measure. A residual
+  spread across the registered frames does move (measured 1.83 clean / 3.87 ghosted /
+  6.76 for two frames 24px apart), so that is what the report carries.
+- **Frames that show different content must be dropped, not averaged.** A burst
+  spanning a scroll puts the same line at two heights. The naive check misses it:
+  consecutive-frame difference stays small through a slow scroll while total drift is
+  large. This is primitive 1's near-duplicate question asked for the opposite purpose
+  — dedup keeps one frame per distinct screen; stacking wants every frame of ONE.
+- **Refuses rather than degrades**: mixed frame sizes, non-8-bit-3-channel input, an
+  out-of-range scale, or a burst too large for a memory budget are all stated
+  failures. A 16-bit input previously saturated to an all-white image returned as
+  success.
+- **Cannot fix defocus.** Stacking recovers detail from sub-pixel jitter and rejects
+  noise; it cannot recover information absent from every frame. One recording had an
+  out-of-focus stretch that no processing made readable, and the tool must not imply
+  otherwise.
+
+**5. Align** — *"What was on screen when this was said?"*
+
+**Takes**: a timestamped transcript; timestamped frames; a window tolerance.
+**Gives**: one row per utterance — its text, the frames inside the window, their
+sharpness.
+
+- **The window is the caller's.** Speech leads action ("we're going to change this")
+  or trails it, by seconds that vary per speaker.
+- **Returns pairs, not conclusions.** Whether an utterance EXPLAINS a screen change is
+  judgement, and belongs to the agent.
+- **No pairing is not a failure.** Silence over a screen change, and speech over a
+  static screen, are both real and must survive.
+- **Alignment takes an existing transcript as INPUT — it does not produce one.**
+
+**Where the audio line actually falls.** The engine may carry *simple* audio
+perception, in the same sense it already carries a sharpness score: a deterministic
+measurement that answers one question and decides nothing. Speech-present vs silence,
+utterance boundaries, rough level — these are perception, they are cheap, and
+`align` can use them to place utterances even when no transcript exists yet.
+
+What does NOT belong here is **transcription**: turning speech into words, with
+punctuation, casing, structure and domain-primed vocabulary. **VoxStruct already does
+that**, it is the house tool for it, and a second ASR path in this repo would be
+exactly the duplication primitive 3 exists to close. The analogy the repo already
+lives by: measuring that a region contains dense text (a score) is perception;
+producing the text (a reader) is a subsystem — and the same split applies to audio.
+
+So: simple audio understanding MAY live in the engine; anything specific about
+transcripts goes to VoxStruct, and its output arrives here as input.
+
+### Where every piece lives — the whole workflow, placed
+
+`AGENTS.md` states the test: *"Would another IDE/tool want this?"* -> gentle-eye.
+*"Is it about the coding-overlay experience / talking to it?"* -> the consumer.
+The workflow that produced the evidence above, run through that test:
+
+| what we built | perception or orchestration? | home |
+|---|---|---|
+| frame extraction + sharpness | perception | **015** (done) |
+| information content | perception | **015** (stubbed) |
+| fuzzy merge | perception | **015** (stubbed) |
+| **stacking / super-resolution** | perception | **015** <- this amendment |
+| **align: what was on screen when this was said** | perception | **015** <- this amendment |
+| pull off the phone over MTP | orchestration | the consumer |
+| transcript-driven span selection | orchestration | the consumer |
+| clip cutting, contact sheets | orchestration | the consumer |
+| provenance-marked document assembly | orchestration | the consumer |
+| which threshold, is this readable, does this utterance explain that change | **judgement** | the playbook / agent |
+| ASR itself | neither — already solved | **VoxStruct** |
+
+Nothing on that list is discarded; it splits three ways along a line this repo
+already drew. The three-way split IS the architecture: perception is deterministic
+and belongs in the engine, orchestration is a sequence and belongs to the caller,
+judgement is content-dependent and belongs to whoever can see the content.
+
+### Orchestration still does NOT move here
+
+The scope decision at the top of this spec holds. Pulling a recording off a phone,
+selecting which spans are worth processing, cutting clips, and assembling a document
+are ORCHESTRATION and stay with the caller — that is also what gentle-eye's own
+`AGENTS.md` boundary requires ("would another IDE want this?" → engine; the
+coding-assistant loop → consumer). The out-of-tree pipeline that produced the evidence
+above becomes a CONSUMER of these primitives rather than a parallel implementation.
+
+Transcript-driven span selection deserves a specific mention because it is the step
+that made the work tractable — regexing domain vocabulary over the transcript and
+keeping only those spans cut a 26-minute recording to 9.7 minutes and 5.48 GB to
+108 MB, before any expensive processing. It is orchestration and it stays with the
+caller, but a playbook that omits it will be slow for no reason.
+
+### Findings the playbook must carry (measured, not assumed)
+
+- **Frontier VIDEO understanding FABRICATES on this material.** On oblique,
+  low-contrast footage it invented column names and patient IDs present nowhere on
+  screen, with no signal of uncertainty. Multi-image STILLS to the same model were
+  reliable and correctly answered "not legible" when they were. Video models for
+  orientation; frames for content; never quote a model's transcription of code nobody
+  has looked at.
+- **Ask a VLM for refusal explicitly** — "write [?] for unreadable text; an honest [?]
+  is more useful than a plausible guess" — or it fills gaps with fiction.
+- **A local 7B VLM (~12s/frame) is good for DESCRIPTION** (which panel is focused, is
+  there an error, is text selected) and unreliable for small code text. It is
+  scriptable, so it suits the bulk pass while a human or stronger model reads the
+  moments the transcript flags.
+- **Prime ASR with the domain vocabulary, and treat a near-miss as the term.**
+  `HF_CHR_LUNG` came back as "chronic HFCR lung"; searching the literal acronym
+  returned zero hits on a topic discussed for 26 minutes.
+- **Corroborate against source.** On-screen values are a hypothesis until something
+  independent agrees. The decisive reading in recording 1 was only a diagnosis once a
+  library's own source confirmed the same structure.
