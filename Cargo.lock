@@ -1767,6 +1767,7 @@ dependencies = [
 name = "gentle-eye"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "async-trait",
  "atspi 0.30.0",
