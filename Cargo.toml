@@ -29,6 +29,9 @@ x11rb = { version = "0.13", features = ["screensaver"] }
 # projection profiles / color masks. No system libraries (opencv stays deferred
 # behind the optional `tracking` feature). Pinned per the dep discipline.
 image = "0.25"
+# Pure-Rust font rasterisation for `annotate` label text. No system deps, so it
+# adds nothing to the build requirements on any platform.
+ab_glyph = "0.2"
 imageproc = "0.25"
 
 # Storage
