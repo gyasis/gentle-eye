@@ -26,3 +26,4 @@ capability, which is why they are the primary form and MCP is the convenience.
 | `read-a-human-markup.md` | the user drew on their screen — read what they meant |
 | `understand-this-screen.md` | one-shot: what is on screen, or in this region |
 | `watch-an-input.md` | record a stream/capture card that is not on this screen |
+| `transcribe-a-recording.md` | turn a recording into a transcript with the three primitives — you own the thresholds |

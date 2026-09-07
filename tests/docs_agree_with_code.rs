@@ -95,6 +95,31 @@ fn every_mcp_tool_appears_in_the_agent_reference() {
     );
 }
 
+/// Every dispatched CLI command must be listed in the agent reference too.
+///
+/// `every_mcp_tool_appears_in_the_agent_reference` guards the MCP surface and
+/// `every_dispatched_command_appears_in_the_cli_help` guards `--help`; nothing
+/// guarded the CLI against `docs/TOOLS.md`. A verb could therefore ship in the
+/// help text and still be absent from the one document AGENTS.md sends agents
+/// to — which is exactly how `frames`, `quality`, `merge-text`, `annotate`,
+/// `regions` and `segment` shipped with no agent-facing documentation while
+/// this suite stayed green.
+///
+/// The match is `gentle-eye <cmd>`, not the bare name: bare `list` or `record`
+/// match ordinary prose, and a guard that cannot fail is a formality.
+#[test]
+fn every_dispatched_command_appears_in_the_agent_reference() {
+    let doc = read("docs/TOOLS.md");
+    let missing: Vec<String> = dispatched_commands()
+        .into_iter()
+        .filter(|c| !doc.contains(&format!("gentle-eye {c}")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these commands are dispatched but absent from docs/TOOLS.md, the reference agents are sent to: {missing:?}"
+    );
+}
+
 /// The two documents must name the same source kinds.
 ///
 /// The user guide and the agent reference describe one system. If the guide

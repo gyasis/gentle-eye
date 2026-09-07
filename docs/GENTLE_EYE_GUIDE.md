@@ -35,6 +35,14 @@ Two cheaper tiers sit beside the models, on purpose: **tesseract** for plain OCR
 (`read-text`), and **geometry** for reading order — which is never a model, because
 the order boxes should be read in is a spatial fact, not an opinion.
 
+**Which provider:** ollama through the Atelier governor is *local, free and
+private* (default model `qwen2.5vl:7b`; point `OLLAMA_HOST` at the governed
+lane, never at raw ollama); Gemini is *cloud, paid and the sharpest on dense
+text* (default `gemini-flash-latest`, an alias on purpose — the pinned model it
+replaced no longer exists). OCR and geometry cost nothing and leave the box
+never. The full comparison, the models on the governed lane and how to configure
+each: `docs/VISION_METHODS.md`.
+
 ---
 
 ## Which tool, for what
@@ -48,6 +56,9 @@ the order boxes should be read in is a spatial fact, not an opinion.
 | Watch **one specific thing** repeatedly | `target` | a named, normalised crop that survives a resolution change |
 | Record **your whole day** and ask about it later | `dayflow` (`--displays 0,1` for every screen) | samples, summarises and answers — the only self-running one |
 | **Point at** something for an agent | `redpen` | you draw; the agent reads the markup |
+| Have the agent **point back** at something | `annotate` | headless boxes + labels on an image — the agent's half of the same loop |
+| Split a busy screen into its **panels** | `segment` | column-activity dividers; `--read` reads each one |
+| Turn a **recording into a transcript** | `frames` → `read-text` → `quality` → `merge-text` | three primitives that measure and decide nothing; you own the thresholds |
 | See a live stream / capture card | `capture-stream`, `dayflow --input` | content that was never on your screen |
 
 ---
@@ -81,7 +92,10 @@ gentle-eye redpen-analyze --prompt "what am I pointing at?"
 
 Your strokes arrive at the model **as text** — "green ARROW from (x,y) to (x,y)"
 — so direction is understood, not merely seen. This is the inbound half of the
-loop; `target` is the outbound half (the agent choosing a region to watch).
+loop; `target` is the outbound half (the agent choosing a region to watch), and
+`annotate` is how the agent answers in kind — `gentle-eye annotate --image shot.png
+--out marked.png --box x,y,w,h --label "this one"` draws its own boxes for you to
+look at. Both halves exist deliberately; neither replaces the other.
 
 ### 3. "Only this region matters"
 
@@ -105,6 +119,26 @@ A stream, a capture card, a video file. This is the case that proves the
 abstraction is real rather than a filter over screen capture — verified by a live
 test that reads a word back out of a video that was never rendered on this
 desktop.
+
+### 5. "Turn this recording into a transcript"
+
+A lecture, a screen-shared call, a long build. Three primitives, chained by you:
+
+```bash
+gentle-eye frames --video lesson.mkv --out ./frames --fps 2 --dedup medium   # which frames, how sharp
+gentle-eye read-text --image ./frames/f_00007.png                              # read the sharp ones
+gentle-eye quality reading.txt          # real content, or a reader that broke down? three ratios
+gentle-eye merge-text --similarity 0.85 doc.txt reading.txt                   # one document
+```
+
+Each **answers one question and decides nothing** — no primitive picks a
+threshold, judges a transcript good enough, or chains into the next. That is on
+purpose: how much of a recording is new is a property of the *material*
+(scrolling text changes every frame, slides do not), so the knobs are yours.
+Two things bite: a frame's `timestamp_s` is ffmpeg's clock, not `index/fps`
+(after dedup the index counts survivors); and `--dedup aggressive` drops a
+slide whose *title* changed as a near-duplicate. The runnable recipe, with what
+proves it worked: `docs/playbooks/transcribe-a-recording.md`.
 
 ---
 
