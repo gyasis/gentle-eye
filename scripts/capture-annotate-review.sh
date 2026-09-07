@@ -19,7 +19,10 @@
 #   PROVIDER  vision provider for review (default gemini; or ollama)
 set -uo pipefail
 
-ROOT="$HOME/dev/gentle-eye"
+# Resolve the repo from THIS script's own location, so the recipe works wherever the
+# checkout lives. It was written on a machine where the repo sat at ~/dev/gentle-eye;
+# hardcoding that made it fail on any other checkout. Override with GENTLE_EYE_ROOT.
+ROOT="${GENTLE_EYE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 GE="$ROOT/target/release/gentle-eye"
 REDPEN="$ROOT/target/release/redpen"
 WF="$ROOT/scripts/whitefrac.py"
