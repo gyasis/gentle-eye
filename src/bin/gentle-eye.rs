@@ -50,6 +50,10 @@ USAGE:
   gentle-eye provider-info [--provider gemini|ollama]
   gentle-eye regions [--depth window|pane|element|text] [--display IDX]   Structure the screen into boxes, in reading order
 
+  gentle-eye frames --video PATH --out DIR [--fps N] [--dedup none|gentle|medium|aggressive]   Frames of a recording: ffmpeg's timestamp + a sharpness score per row (primitive 1; default 1 fps, medium)
+  gentle-eye quality [FILE | -]                        Information content of text as three ratios, no verdict (primitive 2; stdin when no FILE)
+  gentle-eye merge-text --similarity T BLOCK_FILE INCOMING_FILE  Fuzzy-merge a new reading into a document under YOUR line similarity T in (0,1]; emits merged text + coverage (primitive 3)
+
   gentle-eye dayflow serve [--port N] [--displays 0,1 | --window LABEL | --target NAME | --input URL]   Run the all-day recorder as a daemon (owns the session)
   gentle-eye dayflow start [--displays 0,1 | --window LABEL | --target NAME | --input URL]   Start a session (attaches to a running daemon if there is one)
   gentle-eye dayflow status | stop                    Whether it is running and PRODUCING; stop it
@@ -91,6 +95,9 @@ async fn main() -> ExitCode {
         "segment" => run_segment(rest).await,
         "regions" => run_regions(rest).await,
         "annotate" => run_annotate(rest).await,
+        "frames" => run_frames(rest).await,
+        "quality" => run_quality(rest).await,
+        "merge-text" => run_merge_text(rest).await,
         "dayflow" => run_dayflow(rest).await,
         "redpen-list" => run_redpen_list(rest).await,
         "redpen-analyze" => run_redpen_analyze(rest).await,
@@ -1178,6 +1185,157 @@ fn resolve_display(selector: &str) -> Result<usize> {
         })
 }
 
+// ---- transcription primitives (spec 015) -----------------------------------
+//
+// Three of the six primitives are reachable from a shell here. Each is a thin
+// adapter — parse argv, call the library, print JSON — because the contract
+// (`specs/015-screen-transcription/contracts/primitives.md`) puts every
+// judgement with the CALLER: nothing below chooses a threshold, decides
+// whether a result is good enough, or chains one primitive into another.
+// Each returns the JSON rather than printing it, for the reason
+// `dayflow_command` gives: an adapter that writes to stdout is an adapter
+// nobody tests.
+
+/// The positional arguments: everything that is neither a `--flag` nor the
+/// value that follows one. A bare `-` is positional (it names stdin).
+///
+/// Skipping the VALUE matters as much as the flag: `--similarity 0.9 a b`
+/// otherwise yields three positionals, and `0.9` becomes a file to open.
+fn positionals(args: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a.starts_with("--") {
+            skip_next = true;
+            continue;
+        }
+        out.push(a.as_str());
+    }
+    out
+}
+
+/// A reading named on the command line: a file path, or `-` for stdin.
+fn read_text_arg(name: &str, stdin: &mut dyn std::io::Read) -> Result<String> {
+    let mut text = String::new();
+    if name == "-" {
+        stdin
+            .read_to_string(&mut text)
+            .context("reading the text from stdin")?;
+    } else {
+        text = std::fs::read_to_string(name).with_context(|| format!("cannot read {name}"))?;
+    }
+    Ok(text)
+}
+
+/// `gentle-eye frames --video PATH --out DIR [--fps N] [--dedup …]` —
+/// primitive 1. One row per kept frame, each with ffmpeg's own timestamp and
+/// a sharpness score; the rate and the dedup knob are echoed back so a caller
+/// who took a default can see which default it took.
+fn frames_command(args: &[String]) -> Result<serde_json::Value> {
+    use gentle_eye::transcribe::frames::{extract_frames, Dedup};
+
+    let video = flag(args, "--video").ok_or_else(|| anyhow!("--video PATH is required"))?;
+    let out = flag(args, "--out").ok_or_else(|| {
+        anyhow!("--out DIR is required — the frames are files, and where they land is yours to say")
+    })?;
+    let fps: f64 = flag(args, "--fps")
+        .unwrap_or("1")
+        .parse()
+        .context("--fps must be a number of frames per second (fractions such as 0.2 are fine)")?;
+    let dedup = match flag(args, "--dedup") {
+        Some(s) => Dedup::parse(s).map_err(|e| anyhow!(e))?,
+        None => Dedup::default(),
+    };
+    // The primitive's own errors — no ffmpeg, a count mismatch, an unreadable
+    // frame — come through verbatim: they already name what is missing.
+    let rows = extract_frames(Path::new(video), fps, dedup, Path::new(out)).map_err(|e| anyhow!(e))?;
+    Ok(serde_json::json!({
+        "video": video,
+        "fps": fps,
+        "dedup": format!("{dedup:?}").to_lowercase(),
+        "out": out,
+        "count": rows.len(),
+        "frames": rows,
+    }))
+}
+
+/// `gentle-eye quality [FILE | -]` — primitive 2. The three ratios and nothing
+/// else: no length, no verdict. Stdin when no FILE is named.
+fn quality_command(args: &[String], stdin: &mut dyn std::io::Read) -> Result<serde_json::Value> {
+    let text = match positionals(args).as_slice() {
+        [] => read_text_arg("-", stdin)?,
+        [one] => read_text_arg(one, stdin)?,
+        more => {
+            return Err(anyhow!(
+                "quality scores ONE text — a FILE, or - for stdin — but got {}: {more:?}",
+                more.len()
+            ))
+        }
+    };
+    Ok(serde_json::to_value(gentle_eye::transcribe::quality::quality(&text))?)
+}
+
+/// `gentle-eye merge-text --similarity T BLOCK INCOMING` — primitive 3, the
+/// fuzzy merge that until now had no production caller. BLOCK is the document
+/// so far, INCOMING the new reading; the order matters because the merge is
+/// asymmetric (the block's reading of a shared line is the one kept).
+///
+/// `--similarity` is REQUIRED, not defaulted: at 1.0 two readings of one
+/// imperfect line never match and the paragraph is emitted once per frame that
+/// showed it, and the tolerance that fixes that is a property of the reader's
+/// error rate — the caller's to know, not this binary's to guess.
+fn merge_text_command(args: &[String], stdin: &mut dyn std::io::Read) -> Result<serde_json::Value> {
+    use gentle_eye::dayflow::perception::{coverage_with, merge_scroll_with, Similarity};
+
+    let sim = flag(args, "--similarity").ok_or_else(|| {
+        anyhow!(
+            "--similarity T is required: how alike two lines must be to count as the same line, \
+             in (0, 1]. 1.0 is exact equality; 0.9 tolerates one edit per ten characters. \
+             The threshold is the caller's — this tool does not pick one."
+        )
+    })?;
+    let sim = Similarity::parse(sim).map_err(|e| anyhow!(e))?;
+    let pos = positionals(args);
+    let [block, incoming] = pos[..] else {
+        return Err(anyhow!(
+            "usage: merge-text --similarity T BLOCK INCOMING  (two files; either may be - for stdin, \
+             not both) — got {} reading(s): {pos:?}",
+            pos.len()
+        ));
+    };
+    if block == "-" && incoming == "-" {
+        return Err(anyhow!("only one of BLOCK and INCOMING can be - (stdin is one stream)"));
+    }
+    let block = read_text_arg(block, stdin)?;
+    let incoming = read_text_arg(incoming, stdin)?;
+    Ok(serde_json::json!({
+        "similarity": sim.threshold(),
+        "coverage": coverage_with(&block, &incoming, sim),
+        "merged": merge_scroll_with(&block, &incoming, sim),
+    }))
+}
+
+async fn run_frames(args: &[String]) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&frames_command(args)?)?);
+    Ok(())
+}
+
+async fn run_quality(args: &[String]) -> Result<()> {
+    let value = quality_command(args, &mut std::io::stdin().lock())?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+async fn run_merge_text(args: &[String]) -> Result<()> {
+    let value = merge_text_command(args, &mut std::io::stdin().lock())?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
 // ---- MCP server (default) --------------------------------------------------
 
 /// Run the MCP server over stdio with graceful shutdown.
@@ -1888,5 +2046,196 @@ mod dayflow_cli_tests {
         )
         .expect_err("two kinds must be refused on the CLI too");
         assert!(format!("{err}").contains("ONE source"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod transcribe_cli_tests {
+    use super::*;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) -> String {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    /// Two readings of one scrolled screen, with OCR drift in the overlap:
+    /// `two`→`twp`, `three`→`thr3e`. The block holds four lines; the incoming
+    /// reading re-reads three of them and adds one.
+    const BLOCK: &str = "alpha one\nbeta two\ngamma three\ndelta four";
+    const INCOMING: &str = "beta twp\ngamma thr3e\ndelta four\nepsilon five";
+
+    /// The contract's first rule for this primitive: the threshold is the
+    /// caller's. No flag is not "use a sensible default" — it is a refusal
+    /// that says what the flag means, and a value outside (0, 1] is refused
+    /// with the reason rather than clamped.
+    #[test]
+    fn merge_text_refuses_to_pick_a_threshold() {
+        let mut empty: &[u8] = b"";
+        let err = merge_text_command(&argv(&["a", "b"]), &mut empty).unwrap_err();
+        assert!(format!("{err}").contains("--similarity"), "got: {err}");
+        for bad in ["0", "1.5", "abc", "-0.3"] {
+            let err = merge_text_command(&argv(&["--similarity", bad, "a", "b"]), &mut empty)
+                .expect_err(bad);
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("similarity"),
+                "{bad}: the refusal must name the flag, got: {msg}"
+            );
+        }
+    }
+
+    /// The reason the fuzzy merge exists (research R25): under exact equality
+    /// the drifted lines never match, so the overlap is emitted twice; under
+    /// the caller's tolerance the three re-read lines fold into the block and
+    /// only the genuinely new line is appended — the BLOCK's reading kept.
+    #[test]
+    fn merge_text_folds_drifted_overlap_only_under_the_callers_tolerance() {
+        let dir = tempfile::tempdir().unwrap();
+        let block = write(dir.path(), "block.txt", BLOCK);
+        let incoming = write(dir.path(), "incoming.txt", INCOMING);
+        let mut empty: &[u8] = b"";
+
+        let exact =
+            merge_text_command(&argv(&["--similarity", "1.0", &block, &incoming]), &mut empty)
+                .unwrap();
+        let fuzzy =
+            merge_text_command(&argv(&["--similarity", "0.8", &block, &incoming]), &mut empty)
+                .unwrap();
+
+        assert_eq!(fuzzy["similarity"], 0.8, "the threshold used is echoed back");
+        assert_eq!(
+            fuzzy["merged"].as_str().unwrap(),
+            "alpha one\nbeta two\ngamma three\ndelta four\nepsilon five",
+            "the shared run is elided once, the block's reading wins, the new line lands"
+        );
+        assert!(
+            fuzzy["coverage"].as_f64().unwrap() > exact["coverage"].as_f64().unwrap(),
+            "tolerance must see MORE of the incoming as already held: {fuzzy} vs {exact}"
+        );
+        // Exact equality sees only `delta four`, so both drifted lines survive
+        // as near-duplicates — the paragraph-once-per-frame failure, made
+        // visible rather than hidden.
+        let exact_merged = exact["merged"].as_str().unwrap();
+        assert!(exact_merged.contains("beta twp") && exact_merged.contains("beta two"), "{exact_merged}");
+    }
+
+    /// `-` names stdin so a shell can chain the merge; two stdins is nonsense
+    /// and is refused before either is read.
+    #[test]
+    fn merge_text_reads_one_side_from_stdin_and_refuses_two() {
+        let dir = tempfile::tempdir().unwrap();
+        let block = write(dir.path(), "block.txt", BLOCK);
+        let mut stdin: &[u8] = INCOMING.as_bytes();
+        let out = merge_text_command(&argv(&["--similarity", "0.8", &block, "-"]), &mut stdin).unwrap();
+        assert!(out["merged"].as_str().unwrap().ends_with("epsilon five"), "{out}");
+
+        let mut stdin: &[u8] = INCOMING.as_bytes();
+        let err = merge_text_command(&argv(&["--similarity", "0.8", "-", "-"]), &mut stdin).unwrap_err();
+        assert!(format!("{err}").contains("only one"), "got: {err}");
+        // …and a flag's VALUE is never mistaken for a reading (the `dayflow
+        // ask` lesson): three positionals here would be `0.8`, block, `-`.
+        let mut stdin: &[u8] = INCOMING.as_bytes();
+        let err = merge_text_command(&argv(&["--similarity", "0.8", &block]), &mut stdin).unwrap_err();
+        assert!(format!("{err}").contains("got 1 reading"), "got: {err}");
+    }
+
+    /// The scores, and only the scores: three ratios, no length field, no
+    /// verdict. A looped reading scores near zero on unique lines; an empty
+    /// one scores zero on everything and is not an error.
+    #[test]
+    fn quality_emits_exactly_the_three_ratios_from_a_file_or_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let looped = write(dir.path(), "looped.txt", &"the same line\n".repeat(200));
+        let mut empty: &[u8] = b"";
+        let out = quality_command(&argv(&[&looped]), &mut empty).unwrap();
+        let obj = out.as_object().unwrap();
+        assert_eq!(
+            obj.keys().collect::<Vec<_>>(),
+            ["compression_ratio", "unique_line_ratio", "unique_token_ratio"],
+            "no length, no verdict — the contract forbids both: {out}"
+        );
+        assert!(out["unique_line_ratio"].as_f64().unwrap() < 0.01, "{out}");
+
+        let mut stdin: &[u8] = b"fn main() {\n    println!(\"hi\");\n}\n";
+        let out = quality_command(&[], &mut stdin).unwrap();
+        assert!(out["unique_line_ratio"].as_f64().unwrap() > 0.9, "real content from stdin: {out}");
+
+        let mut stdin: &[u8] = b"   \n\n";
+        let out = quality_command(&argv(&["-"]), &mut stdin).unwrap();
+        assert_eq!(out["compression_ratio"], 0.0, "empty scores as empty, never errors: {out}");
+
+        let err = quality_command(&argv(&[&looped, &looped]), &mut empty).unwrap_err();
+        assert!(format!("{err}").contains("ONE text"), "got: {err}");
+    }
+
+    /// Bad arguments are refused BEFORE ffmpeg runs, each naming the flag —
+    /// and `agressive` is a refusal, not a silent `medium`.
+    #[test]
+    fn frames_refuses_bad_arguments_before_touching_ffmpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out").to_string_lossy().into_owned();
+        let cases: [(&[&str], &str); 4] = [
+            (&["--out", &out], "--video"),
+            (&["--video", "x.mp4"], "--out"),
+            (&["--video", "x.mp4", "--out", &out, "--dedup", "agressive"], "unknown dedup"),
+            (&["--video", "x.mp4", "--out", &out, "--fps", "0"], "fps must be positive"),
+        ];
+        for (args, expect) in cases {
+            let err = frames_command(&argv(args)).expect_err(expect);
+            assert!(format!("{err}").contains(expect), "for {args:?} expected {expect:?}, got: {err}");
+        }
+        assert!(!dir.path().join("out").exists(), "a refused call creates nothing");
+    }
+
+    /// The rows a shell reads: one per kept frame, timed by ffmpeg — under
+    /// dedup the times are when the screen CHANGED, not `index / fps` — with
+    /// the rate and the knob echoed so the caller sees what was used. Same
+    /// fixture as the primitive's own live test, driven through argv.
+    #[test]
+    #[ignore = "live: needs ffmpeg"]
+    fn frames_rows_carry_ffmpegs_timestamps_and_echo_the_knobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("steps.mp4");
+        let rendered = std::process::Command::new("ffmpeg")
+            .args([
+                "-v", "error", "-f", "lavfi",
+                "-i", "color=c=black:s=640x360:r=24:d=12",
+                "-vf",
+                "drawtext=text='STEP %{eif\\:gte(t\\,1)+gte(t\\,4)+gte(t\\,5)+gte(t\\,9)\\:d}':\
+                 fontcolor=white:fontsize=48:x=40:y=180:box=1:boxcolor=black",
+                "-pix_fmt", "yuv420p",
+                &video.to_string_lossy(), "-y",
+            ])
+            .output()
+            .expect("run ffmpeg");
+        assert!(rendered.status.success(), "fixture: {}", String::from_utf8_lossy(&rendered.stderr));
+        let out = dir.path().join("out").to_string_lossy().into_owned();
+        let video = video.to_string_lossy().into_owned();
+
+        let v = frames_command(&argv(&["--video", &video, "--out", &out, "--fps", "4", "--dedup", "medium"]))
+            .unwrap();
+        assert_eq!(v["fps"], 4.0);
+        assert_eq!(v["dedup"], "medium");
+        let rows = v["frames"].as_array().unwrap();
+        assert_eq!(v["count"], rows.len());
+        let times: Vec<f64> = rows.iter().map(|r| r["timestamp_s"].as_f64().unwrap()).collect();
+        assert_eq!(times, vec![0.0, 1.0, 4.0, 5.0, 9.0], "the moments the text changed");
+        let by_index: Vec<f64> = rows.iter().map(|r| r["index"].as_f64().unwrap() / 4.0).collect();
+        assert_ne!(times, by_index, "index / fps is the wrong answer this field replaces");
+        for r in rows {
+            assert!(Path::new(r["path"].as_str().unwrap()).exists(), "{r}");
+            assert!(r["sharpness"].as_f64().unwrap() > 0.0, "{r}");
+        }
+
+        // Taking the defaults is allowed; which defaults were taken is not
+        // hidden.
+        let v = frames_command(&argv(&["--video", &video, "--out", &out])).unwrap();
+        assert_eq!(v["fps"], 1.0, "{v}");
+        assert_eq!(v["dedup"], "medium", "{v}");
     }
 }
