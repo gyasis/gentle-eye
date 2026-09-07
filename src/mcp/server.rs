@@ -789,9 +789,11 @@ fn tool_catalog() -> Vec<Tool> {
             "ask_day",
             "Answer a question about a time range, grounded STRICTLY on recorded \
              entries. Says so plainly when the range holds no record rather than \
-             inventing one. NOTE: no model is wired yet — a range WITH records \
-             returns the grounding prompt rather than an answer, so only the \
-             refusal path is fully functional today.",
+             inventing one. A model IS wired: with GE_DAYFLOW_ENDPOINT set to the \
+             governed lane it returns a real answer; without it the reply is the \
+             explicit string '[no model configured for ask — set \
+             GE_DAYFLOW_ENDPOINT to the governed lane]', never a silent stub and \
+             never the prompt echoed back.",
             schema_for::<AskDayInput>(),
         ),
         Tool::new(
