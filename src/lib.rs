@@ -44,6 +44,7 @@ pub mod startup;
 pub mod storage;
 pub mod preview;
 pub mod target;
+pub mod transcribe;
 pub mod regions;
 
 // Convenience re-exports for library consumers — the one-call facade plus the
