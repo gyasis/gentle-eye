@@ -210,7 +210,7 @@ fn default_provider() -> String {
 
 /// Default Gemini model name.
 fn default_gemini_model() -> String {
-    "gemini-2.0-flash".into()
+    crate::contracts::traits::DEFAULT_GEMINI_MODEL.into()
 }
 
 /// Default Ollama host address.
@@ -241,7 +241,7 @@ fn default_timeout() -> u64 {
 /// # Defaults
 ///
 /// * `provider` - "gemini"
-/// * `gemini_model` - "gemini-2.0-flash"
+/// * `gemini_model` - "gemini-flash-latest"
 /// * `ollama_host` - "localhost"
 /// * `ollama_port` - 11434
 /// * `ollama_model` - "llava"
@@ -257,7 +257,7 @@ pub struct VisionConfig {
     pub gemini_api_key: Option<String>,
 
     /// Model name for Gemini API.
-    /// Default: "gemini-2.0-flash"
+    /// Default: "gemini-flash-latest"
     #[serde(default = "default_gemini_model")]
     pub gemini_model: String,
 
@@ -590,7 +590,7 @@ mod tests {
 
         assert_eq!(config.provider, "gemini");
         assert!(config.gemini_api_key.is_none());
-        assert_eq!(config.gemini_model, "gemini-2.0-flash");
+        assert_eq!(config.gemini_model, "gemini-flash-latest");
         assert_eq!(config.ollama_host, "localhost");
         assert_eq!(config.ollama_port, 11434);
         assert_eq!(config.ollama_model, "llava");
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn test_vision_config_current_model() {
         let config = VisionConfig::gemini("test-key".to_string());
-        assert_eq!(config.current_model(), "gemini-2.0-flash");
+        assert_eq!(config.current_model(), "gemini-flash-latest");
 
         let config = VisionConfig::ollama();
         assert_eq!(config.current_model(), "llava");
@@ -727,7 +727,7 @@ mod tests {
         let config: VisionConfig = serde_json::from_str(json).expect("deserialization failed");
 
         assert_eq!(config.provider, "ollama");
-        assert_eq!(config.gemini_model, "gemini-2.0-flash"); // default
+        assert_eq!(config.gemini_model, "gemini-flash-latest"); // default
         assert_eq!(config.ollama_host, "localhost"); // default
         assert_eq!(config.ollama_port, 11434); // default
         assert_eq!(config.timeout_seconds, 60); // default

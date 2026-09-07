@@ -168,8 +168,7 @@ fn default_provider() -> String {
 }
 
 fn default_gemini_model() -> String {
-    // Current alias (the recovered "gemini-2.0-flash" is stale); validated live.
-    "gemini-flash-latest".to_string()
+    crate::contracts::traits::DEFAULT_GEMINI_MODEL.to_string()
 }
 
 fn default_ollama_host() -> String {
