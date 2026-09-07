@@ -1,11 +1,18 @@
-     ```toml
-     edition = "2021"
-     max_width = 100
-     tab_spaces = 4
-     use_small_heuristics = "Default"
-     newline_style = "Unix"
-     imports_granularity = "Crate"
-     group_imports = "StdExternalCrate"
-     reorder_imports = true
-     reorder_modules = true
-   - **`
+# Recovered 2026-09-07. This file had NEVER parsed: it was committed as a pasted
+# markdown code block — a ```toml fence, five-space indentation on every line, and
+# a trailing bullet fragment — so `cargo fmt` died on line 1 with
+# "TOML parse error at line 1, column 13" and NO format check has ever run in this
+# repo. The settings below are exactly the ones that were trapped inside the fence.
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+use_small_heuristics = "Default"
+newline_style = "Unix"
+
+# Nightly-only. On stable rustfmt these emit a warning and are ignored rather than
+# failing the run; they are kept because they record the intended import style.
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+
+reorder_imports = true
+reorder_modules = true

@@ -115,10 +115,20 @@ synthetic video file — back out of the perception ladder.
   trigger (user decision, T005); the X saver `state` field is unusable under GNOME
   regardless. A host with no idle backend records continuously — it never falls into a
   permanent pause.
-- **Content-merge coverage is exact trimmed-line equality**, so OCR that perturbs most
-  lines per sample will fragment a document; and captures of one or two lines are
-  degenerate (coverage is 0.0 or 1.0 with nothing between). Recorded as a known accepted
-  limit (R24) — untestable without real OCR pairs.
+- **Content-merge coverage is now tolerant, but only when the caller asks.** R24 recorded
+  exact trimmed-line equality as an accepted limit — "untestable without real OCR pairs".
+  Feature 015 lifted it: `coverage_with` / `merge_scroll_with` take a caller-supplied
+  `Similarity`, and `TextAggregator::with_similarity` threads it through. **The default is
+  unchanged** — `coverage` and `merge_scroll` are one-line shims at `Similarity::EXACT`, so
+  every existing caller behaves exactly as before and nothing silently became fuzzy. A
+  caller that wants OCR tolerance must pass a threshold; the primitive returns a score and
+  decides nothing.
+  The residual limits are real and narrower than R24's: captures of one or two lines are
+  still degenerate (coverage 0.0 or 1.0 with nothing between), and the similarity measure
+  is trimmed-line based, so OCR noise landing INSIDE tokens is what it tolerates — not
+  wholesale re-wrapping of a document. R24's "untestable" clause no longer holds: the
+  fuzzy path is exercised against simulated OCR flubs (o→0, l→1, e→c, rn→m), which is a
+  fixture, not real OCR pairs — so the tolerance is demonstrated, not calibrated.
 - **The lint gate is clean.** The four clippy errors this file used to list are fixed;
   `cargo clippy --all-targets` passes under `-D warnings`, which is T028's gate.
 - **`security::path_validator` coverage (T047) is still open** as a polish task: retention
