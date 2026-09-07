@@ -1235,6 +1235,26 @@ fn read_text_arg(name: &str, stdin: &mut dyn std::io::Read) -> Result<String> {
 /// primitive 1. One row per kept frame, each with ffmpeg's own timestamp and
 /// a sharpness score; the rate and the dedup knob are echoed back so a caller
 /// who took a default can see which default it took.
+/// Best-effort duration in seconds via ffprobe, so an empty-extraction error can
+/// name the actual numbers rather than only the requested rate. `None` when
+/// ffprobe is absent or the file cannot be read — the caller still errors, just
+/// with less detail.
+fn probe_duration_seconds(video: &str) -> Option<f64> {
+    let out = std::process::Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()?.trim().parse::<f64>().ok()
+}
+
 fn frames_command(args: &[String]) -> Result<serde_json::Value> {
     use gentle_eye::transcribe::frames::{extract_frames, Dedup};
 
@@ -1253,6 +1273,29 @@ fn frames_command(args: &[String]) -> Result<serde_json::Value> {
     // The primitive's own errors — no ffmpeg, a count mismatch, an unreadable
     // frame — come through verbatim: they already name what is missing.
     let rows = extract_frames(Path::new(video), fps, dedup, Path::new(out)).map_err(|e| anyhow!(e))?;
+    // A SILENT ZERO is the one outcome the primitives contract forbids, and this
+    // is exactly where one was hiding: `--fps 0.0033` on a 60 s clip wrote no
+    // files, returned `count: 0`, and exited 0 — indistinguishable from "this
+    // recording genuinely had nothing". mpdecimate always keeps the first frame,
+    // so an empty result means ffmpeg emitted nothing at all, which for a valid
+    // video means the sampling period did not fit inside it. Say so, with the
+    // arithmetic, instead of returning an empty success.
+    if rows.is_empty() {
+        let period = if fps > 0.0 { 1.0 / fps } else { f64::INFINITY };
+        let duration = probe_duration_seconds(video);
+        let measured = match duration {
+            Some(d) => format!(
+                "the recording is {d:.2}s long, so no sample point falls inside it"
+            ),
+            None => "and the recording's duration could not be probed".to_string(),
+        };
+        return Err(anyhow!(
+            "no frames were extracted from {video}. At --fps {fps} the sampling period is \
+             {period:.1}s and {measured}. Raise --fps (a period shorter than the recording), \
+             or check that the file has a video stream. Returning no rows rather than an \
+             empty success, which would be indistinguishable from a recording that had nothing."
+        ));
+    }
     Ok(serde_json::json!({
         "video": video,
         "fps": fps,
