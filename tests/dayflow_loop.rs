@@ -3186,10 +3186,17 @@ fn a_resumed_daemon_summarises_the_dead_processes_samples() {
 
     // ── first process: starts, then dies mid-window ──
     let d1 = Daemon::new(&state_path, svc_for(&db));
-    let t0 = Utc::now() - Duration::minutes(30);
+    // Every instant handed to the daemon is anchored to `at`, ONE fixed day, so
+    // the seeded start and the resume cannot straddle a UTC midnight. Seeded
+    // from `Utc::now() - 30min` they did: between 00:00 and 00:30 UTC the start
+    // fell on the previous day, `decide_resume` correctly answered NewDay, and
+    // this test was red for half an hour every night.
+    let resume_at = at(0);
+    let t0 = resume_at - Duration::minutes(30);
+    assert_eq!(t0.date_naive(), resume_at.date_naive(), "the fixture must stay on one day");
     d1.start_or_resume(DayflowMode::Daemon, spec.clone(), t0).unwrap();
     // The sample its capture loop wrote before the crash.
-    let stamp = (Utc::now() - Duration::minutes(25)).format("%Y%m%dT%H%M%S%3f");
+    let stamp = (resume_at - Duration::minutes(25)).format("%Y%m%dT%H%M%S%3f");
     let orphan = samples.join(format!(
         "{}{stamp}.png",
         gentle_eye::dayflow::sampler::sample_prefix(0, 0)
@@ -3200,7 +3207,7 @@ fn a_resumed_daemon_summarises_the_dead_processes_samples() {
     // ── the restart: a capturing daemon over the same state file ──
     let svc2 = svc_for(&db);
     let d2 = Daemon::new(&state_path, Arc::clone(&svc2)).with_capture(ok_summarizer(), &samples);
-    let (id, dec) = d2.start_or_resume(DayflowMode::Daemon, spec, Utc::now()).unwrap();
+    let (id, dec) = d2.start_or_resume(DayflowMode::Daemon, spec, resume_at).unwrap();
     assert_eq!(dec, ResumeDecision::Resumed);
 
     // The capture thread adopts and settles on its first iteration.
@@ -3208,7 +3215,7 @@ fn a_resumed_daemon_summarises_the_dead_processes_samples() {
     let mut entries = Vec::new();
     while std::time::Instant::now() < deadline {
         entries = svc2
-            .timeline(Utc::now() - Duration::hours(2), Utc::now() + Duration::hours(1))
+            .timeline(resume_at - Duration::hours(2), resume_at + Duration::hours(1))
             .unwrap()
             .entries;
         if !entries.is_empty() {
