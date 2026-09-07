@@ -60,7 +60,7 @@ patch changed — `aggressive` kept 1 of 120, `medium` and `gentle` kept 6.
 ## What proves it worked
 
 - `frames.json` has `count > 0` and its `timestamp_s` values are spaced the
-  way you asked. **`count: 0` is a real answer** — the rate's period was longer
+  way you asked. **An empty extraction is now an ERROR, not `count: 0`** — the rate's period was longer
   than the clip — read it before reading `frames`.
 - Each kept reading's `unique_line_ratio` is high (real content is nearly all
   distinct lines); a reading near `0.0` is a reader that broke down — drop it,
@@ -72,7 +72,7 @@ patch changed — `aggressive` kept 1 of 120, `medium` and `gentle` kept 6.
 | Symptom | Meaning |
 |---|---|
 | `frames` errors naming `ffmpeg` | the binary is missing; nothing was extracted, and it said so |
-| `count: 0`, exit 0 | the `--fps` period is longer than the recording (ffmpeg's rounding); raise the rate |
+| `no frames were extracted ... the sampling period is Ns and the recording is Ms long`, exit 1 | the `--fps` period is longer than the recording; raise the rate. It states the arithmetic rather than returning an empty success |
 | material you saw is missing | dedup too aggressive, or your sharpness floor rejected readable frames |
 | the same paragraph repeats through `doc.txt` | `--similarity` too tight — overlapping readings are not being recognised as overlapping |
 | a reading is enormous and repetitive | the reader looped; its `quality` scores show it — do not merge it |

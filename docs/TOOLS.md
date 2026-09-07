@@ -240,7 +240,7 @@ Measured on one 60 s screen recording unless stated:
 
 | Job | Invocation | Result |
 |---|---|---|
-| dayflow-style, one image every 5 min | `--fps 0.0033 --dedup none` | **`count: 0` on a 60 s clip.** The period (~303 s) is longer than the recording and ffmpeg's `fps` filter rounds the only slot away; the same rate on a 600 s clip gave 2 frames. A fractional rate works, but its period must fit inside the recording — `count: 0` is a real answer, read it before reading `frames` |
+| dayflow-style, one image every 5 min | `--fps 0.0033 --dedup none` | **Errors on a 60 s clip.** The period (~303 s) exceeds the recording, so ffmpeg emits nothing; the same rate on a 600 s clip gave 2 frames. A fractional rate works, but **its period must fit inside the recording**. This used to return `count: 0` and exit 0 — a silent zero — and now exits non-zero naming the period and the duration |
 | one image every 10 s | `--fps 0.1 --dedup none` | 6 frames at exactly 10 s spacing |
 | one image every 30 s | `--fps 0.0333 --dedup none` | 2 frames, `t = 0.0` and `30.03` |
 | transitions in motion | `--fps 2 --dedup gentle` | 120 of 120 kept |
