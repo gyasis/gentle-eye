@@ -43,7 +43,12 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 sysinfo = "0.39"
 
 # Vision Providers
-reqwest = { version = "0.12", features = ["json"] }
+# rustls (pure Rust) instead of native-tls so a fresh box needs no libssl-dev/pkg-config.
+# `rustls-tls-native-roots` — NOT `rustls-tls` — keeps the OS trust store (Linux CA
+# bundle / SSL_CERT_FILE, macOS keychain, Windows store), so a locally-trusted CA still
+# works. `default-features = false` drops more than TLS: charset/http2/system-proxy are
+# reqwest 0.12 defaults and are re-added here on purpose.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "charset", "http2", "system-proxy"] }
 schemars = { version = "0.8", features = ["chrono"] }
 
 # Serialization

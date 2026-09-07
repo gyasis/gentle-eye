@@ -22,6 +22,32 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// Strip anything that looks like a Google API key or a `key=` query parameter
+/// out of text that is about to be logged or returned as an error.
+fn redact_secrets(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("key=") {
+        out.push_str(&rest[..i + 4]);
+        let tail = &rest[i + 4..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(tail.len());
+        out.push_str("<redacted>");
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    // Bare AIza-prefixed tokens, if one ever reaches us outside a query string.
+    while let Some(i) = out.find("AIza") {
+        let tail = &out[i..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(tail.len());
+        out.replace_range(i..i + end, "<redacted>");
+    }
+    out
+}
+
 const DEFAULT_GEMINI_MAX_VIDEO_SIZE: u64 = 20_971_520; // 20 MB
 // Default to the always-newest Flash alias (the recovered spec's
 // `gemini-2.0-flash` is stale). Flash is the routine tier; for deep-understanding
@@ -77,10 +103,18 @@ impl GeminiProvider {
         })
     }
 
+    /// The endpoint, WITHOUT credentials.
+    ///
+    /// The key used to be interpolated here as `?key=...`, which meant reqwest
+    /// stringified it into every network error — `NetworkError("error sending
+    /// request for url (https://...?key=AIza...)")` — so the credential leaked
+    /// into logs, CI output and bug reports on any transport failure. It is now
+    /// sent as the `x-goog-api-key` header, which Google documents as the
+    /// required form (`?key=` is legacy) and which never appears in a URL.
     fn endpoint(&self) -> String {
         format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, self.api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            self.model
         )
     }
 
@@ -90,7 +124,9 @@ impl GeminiProvider {
                 timeout_seconds: self.timeout_seconds,
             }
         } else {
-            VisionError::NetworkError(e.to_string())
+            // Defence in depth: even with the key out of the URL, never let a
+            // key-shaped token reach an error string that gets logged.
+            VisionError::NetworkError(redact_secrets(&e.to_string()))
         }
     }
 
@@ -105,6 +141,7 @@ impl GeminiProvider {
         let resp = self
             .client
             .post(self.endpoint())
+            .header("x-goog-api-key", &self.api_key)
             .json(&body)
             .send()
             .await
