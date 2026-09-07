@@ -52,7 +52,7 @@ const DEFAULT_GEMINI_MAX_VIDEO_SIZE: u64 = 20_971_520; // 20 MB
 // Default to the always-newest Flash alias (the recovered spec's
 // `gemini-2.0-flash` is stale). Flash is the routine tier; for deep-understanding
 // tasks set `VisionConfig.model` to [`DEEP_MODEL`] (`gemini-pro-latest`).
-const DEFAULT_MODEL: &str = "gemini-flash-latest";
+const DEFAULT_MODEL: &str = crate::contracts::traits::DEFAULT_GEMINI_MODEL;
 /// Deep-understanding (Pro) tier — select via config when Flash isn't enough.
 pub const DEEP_MODEL: &str = "gemini-pro-latest";
 

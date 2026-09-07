@@ -143,12 +143,24 @@ pub struct VisionConfig {
     pub max_video_size_bytes: u64,
 }
 
+/// The default Gemini model, in ONE place.
+///
+/// It is the **`-latest` alias deliberately**, not a pinned version. A pinned
+/// default rots: `gemini-2.0-flash` was the default here and the API now answers
+/// `NOT_FOUND — "This model is no longer available"`, so every call that took the
+/// default was failing. An alias cannot 404 that way.
+///
+/// This constant lives in `contracts` because both `analysis::gemini` and the two
+/// config types depend on it; three copies of the literal had already drifted, and
+/// only two of them were ever corrected.
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
+
 impl Default for VisionConfig {
     fn default() -> Self {
         Self {
             provider: "gemini".to_string(),
             api_key: None,
-            model: "gemini-2.0-flash".to_string(),
+            model: DEFAULT_GEMINI_MODEL.to_string(),
             timeout_seconds: 120,
             max_video_size_bytes: 100 * 1024 * 1024, // 100 MB
         }

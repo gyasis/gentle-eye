@@ -567,7 +567,7 @@ mod tests {
     fn test_vision_provider_info_output() {
         let output = GetVisionProviderInfoOutput {
             provider: "gemini".to_string(),
-            model: "gemini-2.0-flash".to_string(),
+            model: "gemini-flash-latest".to_string(),
             max_video_size_bytes: Some(100_000_000),
             supports_native_video: Some(true),
             available: true,
@@ -575,7 +575,7 @@ mod tests {
         };
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("gemini"));
-        assert!(json.contains("gemini-2.0-flash"));
+        assert!(json.contains("gemini-flash-latest"));
     }
 }
 // ---- Dayflow (US6) ---------------------------------------------------------

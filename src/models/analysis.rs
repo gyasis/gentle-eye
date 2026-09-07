@@ -250,7 +250,7 @@ pub struct AnalysisResult {
     pub analysis_text: String,
 
     /// The specific model that performed the analysis.
-    /// For example: "gemini-2.0-flash" or "llava:latest".
+    /// For example: "gemini-flash-latest" or "llava:latest".
     pub model_used: String,
 
     /// Number of tokens used for the analysis.
@@ -290,7 +290,7 @@ impl AnalysisResult {
     /// let result = AnalysisResult::success(
     ///     Uuid::new_v4(),
     ///     "The video shows a user navigating a web application.".to_string(),
-    ///     "gemini-2.0-flash".to_string(),
+    ///     "gemini-flash-latest".to_string(),
     ///     1500,
     /// );
     /// assert!(result.success);
@@ -332,7 +332,7 @@ impl AnalysisResult {
     /// let result = AnalysisResult::failure(
     ///     Uuid::new_v4(),
     ///     "API rate limit exceeded".to_string(),
-    ///     "gemini-2.0-flash".to_string(),
+    ///     "gemini-flash-latest".to_string(),
     ///     100,
     /// );
     /// assert!(!result.success);
@@ -463,13 +463,13 @@ mod tests {
         let result = AnalysisResult::success(
             request_id,
             "Analysis text".to_string(),
-            "gemini-2.0-flash".to_string(),
+            "gemini-flash-latest".to_string(),
             1500,
         );
 
         assert_eq!(result.request_id, request_id);
         assert_eq!(result.analysis_text, "Analysis text");
-        assert_eq!(result.model_used, "gemini-2.0-flash");
+        assert_eq!(result.model_used, "gemini-flash-latest");
         assert_eq!(result.processing_time_ms, 1500);
         assert!(result.success);
         assert!(result.error_message.is_none());
@@ -481,7 +481,7 @@ mod tests {
         let result = AnalysisResult::failure(
             request_id,
             "Rate limit exceeded".to_string(),
-            "gemini-2.0-flash".to_string(),
+            "gemini-flash-latest".to_string(),
             100,
         );
 
@@ -497,7 +497,7 @@ mod tests {
         let result = AnalysisResult::success(
             request_id,
             "Analysis text".to_string(),
-            "gemini-2.0-flash".to_string(),
+            "gemini-flash-latest".to_string(),
             1500,
         )
         .with_token_count(500);
@@ -527,7 +527,7 @@ mod tests {
         let result = AnalysisResult::success(
             Uuid::new_v4(),
             "Analysis text".to_string(),
-            "gemini-2.0-flash".to_string(),
+            "gemini-flash-latest".to_string(),
             1500,
         );
 
