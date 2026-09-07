@@ -1,5 +1,10 @@
 # Quickstart — feature 015
 
+> **Shipped signatures differ from this sketch** (noted 2026-09-07, sketch left
+> as written): it is `frames --fps N` not `--rate`, `quality [FILE | -]` not
+> `text-quality --file`, and `merge-text --similarity T BLOCK INCOMING` not
+> `--a/--b`. `docs/TOOLS.md` is the authoritative reference and is drift-tested.
+
 The primitives, chained by hand. This is what the playbook automates and what
 issue #17 would eventually wrap into one command.
 

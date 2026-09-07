@@ -28,3 +28,8 @@ reply describing the whole window means the marks were not used.
   colour. An arrow has a direction — that is usually the whole message.
 - Never launch the drawing UI yourself. `redpen` is the human's tool; these
   commands only **discover** what they already drew.
+- To answer in kind — show *them* which box you mean — use the agent's half of
+  the loop: `gentle-eye annotate --image <png> --out marked.png --box x,y,w,h
+  --label "this one"`. Pixel coordinates, not normalised. Check `labels_drawn`
+  in its output: boxes always draw, labels need a TrueType font
+  (`GENTLE_EYE_FONT` overrides the search).

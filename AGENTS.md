@@ -39,8 +39,17 @@ or you have created the second path that drifts.
 - **The whole system, for people:** `docs/GENTLE_EYE_GUIDE.md` — what each tool is for, the
   workflows that chain them, and what it is built on.
 - **The whole system, for agents:** `docs/TOOLS.md` — every MCP tool and CLI command, the flags, the
-  JSON shapes. `tests/docs_agree_with_code.rs` FAILS if either doc drifts from the code, so trust
-  them; if one is wrong, that test will say so.
+  JSON shapes. `tests/docs_agree_with_code.rs` FAILS if either doc drifts from the code — every MCP
+  tool and every dispatched CLI verb must appear in `TOOLS.md`, the source flags must agree across
+  both docs and the parser, and the `VisionProvider` seam must still exist — so trust them; if one
+  is wrong, that test will say so. (Flag *values* and JSON shapes are not machine-checked; the
+  verbs are.)
+- **Choosing a vision provider:** `docs/VISION_METHODS.md` — local+free+private (ollama through the
+  Atelier governor, `OLLAMA_HOST` on the governed lane, never raw `:11434`) vs cloud+paid+sharpest
+  (Gemini, `gemini-flash-latest`) vs OCR vs geometry; the models on the lane, by capability.
+- **The transcription primitives** (`frames` / `quality` / `merge-text`): the contract is
+  `specs/015-screen-transcription/contracts/primitives.md` — each answers one question and decides
+  nothing; the caller owns every threshold. Recipe: `docs/playbooks/transcribe-a-recording.md`.
 - **Runnable playbooks (harness-agnostic):** `docs/playbooks/` — task-shaped recipes in plain
   markdown, using only the CLI. No MCP registration, no harness-specific format: any agent that can
   run a shell can follow them.

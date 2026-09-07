@@ -113,7 +113,7 @@ old process until it re-spawns). The CLI picks up changes immediately.
 |---|---|
 | `GENTLE_EYE_PROVIDER` | `gemini` (default) or `ollama` |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Gemini auth |
-| `OLLAMA_HOST` / `OLLAMA_PORT` | Ollama endpoint (default `localhost:11434`) |
+| `OLLAMA_HOST` / `OLLAMA_PORT` | Ollama endpoint (default `localhost:11434`). On a shared box point it at the Atelier **governor**, `http://$ATELIER_HOST:8799/llm/ollama`, never raw `:11434` — see `docs/VISION_METHODS.md` |
 | `GENTLE_EYE_DISPLAY` | display index to capture (default 0) |
 | `GENTLE_EYE_DATA` | storage base dir for recordings |
 
