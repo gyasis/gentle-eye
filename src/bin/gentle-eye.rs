@@ -1013,6 +1013,35 @@ async fn run_regions(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Reject a `GENTLE_EYE_FONT` override that cannot be honoured.
+///
+/// Taken as a PARAMETER rather than read from the environment so it is testable
+/// without `set_var`: env is process-global and tests run as parallel threads, so
+/// an env-reading test races every other one (see `dayflow::answerer`'s
+/// `test_env_lock`, which exists for exactly that reason).
+///
+/// `None` / empty means "no override" and is fine — the caller then falls back to
+/// the platform candidates. A NAMED font that cannot be read or parsed is an
+/// error: chaining it onto the defaults meant `GENTLE_EYE_FONT=/nonexistent.ttf`
+/// silently drew in DejaVu and reported DejaVu as `font`, so the caller named one
+/// font, got another, and was told nothing.
+fn validate_font_override(want: Option<&str>) -> Result<()> {
+    use ab_glyph::FontVec;
+    let Some(want) = want.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let bytes = std::fs::read(want)
+        .with_context(|| format!("GENTLE_EYE_FONT={want} could not be read"))?;
+    if FontVec::try_from_vec(bytes).is_err() {
+        return Err(anyhow!(
+            "GENTLE_EYE_FONT={want} is not a usable TrueType/OpenType face. Refusing \
+             rather than silently drawing in a different font than the one you named \
+             — unset it to use the system default."
+        ));
+    }
+    Ok(())
+}
+
 /// Draw boxes + labels onto an image, headless — the agent-driven annotation
 /// verb that closes the capture→identify→annotate loop without the redpen GUI.
 /// `redpen` remains the HUMAN half of that loop; this is the agent half, and
@@ -1085,8 +1114,17 @@ async fn run_annotate(args: &[String]) -> Result<()> {
     // differs per platform — a single hardcoded Linux path made labels vanish
     // SILENTLY on macOS. Try the common locations, allow an override, and say
     // in the output when none was found rather than dropping labels quietly.
+    // An EXPLICIT override that cannot be honoured is a failure, not a fallback.
+    // Chaining it with the defaults meant `GENTLE_EYE_FONT=/nonexistent.ttf`
+    // silently drew in DejaVu and reported DejaVu as `font` — the caller named a
+    // font, got a different one, and was told nothing. Absence of ANY system font
+    // is a different case: nobody asked for that, so it still degrades to
+    // boxes-without-labels with a note.
+    validate_font_override(std::env::var("GENTLE_EYE_FONT").ok().as_deref())?;
     let font_candidates: Vec<String> = std::env::var("GENTLE_EYE_FONT")
         .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .into_iter()
         .chain(
             [
@@ -2095,6 +2133,44 @@ mod dayflow_cli_tests {
 #[cfg(test)]
 mod transcribe_cli_tests {
     use super::*;
+
+    /// A named font that does not exist is an ERROR, not a silent fallback.
+    ///
+    /// The regression this pins: the override used to be CHAINED onto the
+    /// platform defaults, so a bad path fell through to DejaVu, the image was
+    /// drawn in a font the caller never asked for, and the JSON reported DejaVu
+    /// as `font` with no hint that the override had been ignored.
+    #[test]
+    fn a_font_override_that_cannot_be_read_is_refused() {
+        let e = validate_font_override(Some("/nonexistent-font-xyzzy.ttf"))
+            .expect_err("a missing named font must not fall through to a default");
+        let msg = format!("{e:#}");
+        assert!(msg.contains("GENTLE_EYE_FONT"), "{msg}");
+        assert!(msg.contains("/nonexistent-font-xyzzy.ttf"), "the message must name the path: {msg}");
+    }
+
+    /// A readable file that is not a font is also refused — reading it is not
+    /// enough, it has to parse as a face.
+    #[test]
+    fn a_font_override_that_is_not_a_face_is_refused() {
+        let dir = std::env::temp_dir().join("ge_font_override_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("not-a-font.bin");
+        std::fs::write(&p, b"this is not a truetype face").unwrap();
+        let e = validate_font_override(Some(p.to_str().unwrap()))
+            .expect_err("an unparsable face must not fall through to a default");
+        assert!(format!("{e:#}").contains("not a usable TrueType"), "{e:#}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// No override is not a failure — absence of a system font is a DIFFERENT
+    /// case from a broken explicit request, and still degrades gracefully.
+    #[test]
+    fn no_font_override_is_not_an_error() {
+        validate_font_override(None).expect("absent override is fine");
+        validate_font_override(Some("")).expect("empty override is fine");
+        validate_font_override(Some("   ")).expect("whitespace override is fine");
+    }
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
