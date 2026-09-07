@@ -52,7 +52,7 @@ USAGE:
 
   gentle-eye frames --video PATH --out DIR [--fps N] [--dedup none|gentle|medium|aggressive]   Frames of a recording: ffmpeg's timestamp + a sharpness score per row (primitive 1; default 1 fps, medium)
   gentle-eye quality [FILE | -]                        Information content of text as three ratios, no verdict (primitive 2; stdin when no FILE)
-  gentle-eye merge-text --similarity T BLOCK INCOMING  Fuzzy-merge a new reading into a document under YOUR line similarity T in (0,1]; emits merged text + coverage (primitive 3)
+  gentle-eye merge-text --similarity T BLOCK_FILE INCOMING_FILE  Fuzzy-merge a new reading into a document under YOUR line similarity T in (0,1]; emits merged text + coverage (primitive 3)
 
   gentle-eye dayflow serve [--port N] [--displays 0,1 | --window LABEL | --target NAME | --input URL]   Run the all-day recorder as a daemon (owns the session)
   gentle-eye dayflow start [--displays 0,1 | --window LABEL | --target NAME | --input URL]   Start a session (attaches to a running daemon if there is one)
