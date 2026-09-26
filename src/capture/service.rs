@@ -14,7 +14,7 @@
 
 use crate::capture::encoder::PipeEncoder;
 use crate::capture::frame_rate::FrameRateController;
-use crate::capture::screen::ScreenCapturer;
+use crate::capture::screen::{FrameHold, ScreenCapturer, FIRST_FRAME_TIMEOUT};
 use crate::contracts::errors::{RecordingError, StorageError};
 use crate::contracts::traits::{
     Recording, RecordingConfig, RecordingService, RecordingStatus,
@@ -94,6 +94,9 @@ fn run_capture(
     let fps = u32::from(config.fps);
     let mut encoder = PipeEncoder::start(width, height, fps, output)?;
     let mut frame_rate = FrameRateController::new(fps);
+    // A still screen delivers no new frame on macOS; repeat the last one instead of
+    // failing the whole recording (it used to abort on the first 200 ms gap).
+    let mut hold = FrameHold::default();
     let start = Instant::now();
     let max_duration = config.max_duration_seconds.map(Duration::from_secs);
 
@@ -111,16 +114,17 @@ fn run_capture(
         }
         let now = Instant::now();
         if frame_rate.should_capture(now) {
-            let frame = capturer.capture_frame(Duration::from_millis(200))?;
+            let wait = if hold.is_empty() { FIRST_FRAME_TIMEOUT } else { Duration::from_millis(5) };
+            let frame = hold.next(capturer.try_frame(wait)?)?;
             match crop_rect {
                 Some(rect) => {
                     let stride = frame.len().checked_div(full_h).unwrap_or(full_w * 4);
                     let (cropped, _, _) =
-                        crate::target::crop::crop_bgra(&frame, full_w, full_h, stride, rect)
+                        crate::target::crop::crop_bgra(frame, full_w, full_h, stride, rect)
                             .map_err(|e| RecordingError::EncoderError(e.to_string()))?;
                     encoder.write_frame(&cropped)?;
                 }
-                None => encoder.write_frame(&frame)?,
+                None => encoder.write_frame(frame)?,
             }
         } else {
             std::thread::sleep(frame_rate.time_until_next(now).min(Duration::from_millis(10)));
