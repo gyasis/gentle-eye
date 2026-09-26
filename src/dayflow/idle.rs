@@ -355,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // X11IdleDetector only exists on Linux; ungated, the suite can't compile on macOS
     #[ignore = "live: requires a real X11 DISPLAY"]
     fn x11_backend_reports_a_monotonic_counter() {
         let d = X11IdleDetector::new().expect("an X display must be available for this probe");
