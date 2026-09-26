@@ -103,6 +103,7 @@ pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Default)]
 pub struct FrameHold {
     last: Option<Vec<u8>>,
+    fresh_at: Option<Instant>,
     repeats: u64,
 }
 
@@ -110,7 +111,10 @@ impl FrameHold {
     /// Feed the result of [`ScreenCapturer::try_frame`]; get the frame to encode.
     pub fn next(&mut self, fresh: Option<Vec<u8>>) -> Result<&[u8], RecordingError> {
         match fresh {
-            Some(f) => self.last = Some(f),
+            Some(f) => {
+                self.last = Some(f);
+                self.fresh_at = Some(Instant::now());
+            }
             None if self.last.is_some() => self.repeats += 1,
             None => {
                 return Err(RecordingError::Internal(format!(
@@ -130,6 +134,12 @@ impl FrameHold {
     /// Frames that re-used the previous image because the screen had not changed.
     pub fn repeats(&self) -> u64 {
         self.repeats
+    }
+
+    /// Time since the last FRESH frame (not a repeat); `None` before the first.
+    /// A caller that must tell "unchanged" from "asleep" bounds repeats with it.
+    pub fn since_fresh(&self) -> Option<Duration> {
+        self.fresh_at.map(|t| t.elapsed())
     }
 }
 

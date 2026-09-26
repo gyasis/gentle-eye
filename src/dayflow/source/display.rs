@@ -8,8 +8,23 @@
 //! that a display index already filled).
 
 use super::{Availability, CaptureSource, SourceError, SourceFrame, SourceIdentity};
-use crate::capture::screen::ScreenCapturer;
+use crate::capture::screen::{FrameHold, ScreenCapturer};
 use crate::regions::{Granularity, Region};
+use std::time::Duration;
+
+/// How long a sample waits for a NEW frame once one has been seen.
+const UNCHANGED_WAIT: Duration = Duration::from_millis(200);
+
+/// How long the held frame may stand in for the screen. A live macOS display
+/// changes at least once a minute (the menu-bar clock), so a frame older than
+/// this means asleep/unavailable, not "unchanged".
+const STALE_AFTER: Duration = Duration::from_secs(120);
+
+/// Whether the held frame may be reused: only when there is one and it was fresh
+/// within `stale_after`.
+fn may_repeat(since_fresh: Option<Duration>, stale_after: Duration) -> bool {
+    matches!(since_fresh, Some(age) if age < stale_after)
+}
 
 /// A whole display, sampled through the platform screen capturer.
 pub struct DisplaySource {
@@ -23,7 +38,10 @@ pub struct DisplaySource {
     ended: bool,
     /// Set when the last capture attempt failed but may recover.
     occluded: bool,
+    /// Wait for the FIRST frame.
     timeout: std::time::Duration,
+    /// The last frame, reused while the screen is unchanged (see `next_frame`).
+    hold: FrameHold,
 }
 
 impl DisplaySource {
@@ -38,6 +56,7 @@ impl DisplaySource {
             ended: false,
             occluded: false,
             timeout: std::time::Duration::from_secs(2),
+            hold: FrameHold::default(),
         })
     }
 
@@ -99,20 +118,43 @@ impl CaptureSource for DisplaySource {
             return Err(SourceError::new(format!("display {} has ended", self.index)));
         }
         let (w, h) = (self.capturer.width(), self.capturer.height());
-        match self.capturer.capture_frame(self.timeout) {
+        // The first frame gets the full timeout; after that a short wait, because
+        // "nothing new" is answered by the held frame, not by waiting longer.
+        let wait = if self.hold.is_empty() { self.timeout } else { UNCHANGED_WAIT };
+        // A failed grab is treated as occlusion, not as the end. A display is
+        // only Ended when it is gone from the system, which this call cannot
+        // distinguish — and guessing Ended would stop retrying a screen that was
+        // merely asleep.
+        let fresh = match self.capturer.try_frame(wait) {
+            Ok(f) => f,
+            Err(e) => {
+                self.occluded = true;
+                return Err(SourceError::new(format!("display {}: {e}", self.index)));
+            }
+        };
+        // macOS delivers frames only when the screen CHANGES, so "no new frame"
+        // on a live display means "unchanged" and the held frame is the truth.
+        // It used to be Occluded, and the loop turned every still moment into a
+        // SourceOccluded gap. Bounded: past STALE_AFTER without a fresh frame the
+        // display is taken as asleep/unavailable and reported Occluded again.
+        if fresh.is_none() && !may_repeat(self.hold.since_fresh(), STALE_AFTER) {
+            self.occluded = true;
+            return Err(SourceError::new(format!(
+                "display {}: no new frame for over {}s (asleep or unavailable?)",
+                self.index,
+                STALE_AFTER.as_secs()
+            )));
+        }
+        match self.hold.next(fresh) {
             Ok(raw) => {
                 self.occluded = false;
                 Ok(SourceFrame {
-                    bgra: tightly_packed(&raw, w, h),
+                    bgra: tightly_packed(raw, w, h),
                     width: w as u32,
                     height: h as u32,
                 })
             }
             Err(e) => {
-                // A failed grab is treated as occlusion, not as the end. A
-                // display is only Ended when it is gone from the system, which
-                // this call cannot distinguish — and guessing Ended would stop
-                // retrying a screen that was merely asleep.
                 self.occluded = true;
                 Err(SourceError::new(format!("display {}: {e}", self.index)))
             }
@@ -161,6 +203,14 @@ mod tests {
             1.0,
         )
         .on_display(display)
+    }
+
+    #[test]
+    fn held_frame_stands_in_only_while_recently_fresh() {
+        let stale = Duration::from_secs(120);
+        assert!(!may_repeat(None, stale), "nothing held yet: a real failure");
+        assert!(may_repeat(Some(Duration::from_secs(5)), stale), "still screen: unchanged");
+        assert!(!may_repeat(Some(Duration::from_secs(121)), stale), "stale: asleep/unavailable");
     }
 
     #[test]
