@@ -36,6 +36,177 @@ const TARGET_FRAMES: f64 = 8.0;
 const FRAME_MAX_EDGE: u32 = 1024;
 /// Safety ceiling on collected frames (only guards the ffprobe-failure fallback).
 const FRAME_CEILING: usize = 24;
+/// MULTI-FRAME mode (big models, e.g. Ollama Cloud `*-cloud` vision models): ALL sampled frames go in one call,
+/// each with its timestamp, so the model can judge motion and sequence (a demo video, a UI flow), not just one
+/// still. Default frame count for `*-cloud` models; `GENTLE_EYE_OLLAMA_FRAMES=N` (N >= 2) forces it for any model.
+const MULTI_FRAMES_CLOUD: usize = 48;
+/// At most this many frames per second in multi-frame mode (short clips don't need more).
+const MULTI_MAX_FPS: f64 = 2.0;
+/// Frames are smaller (and JPEG) in multi-frame mode: dozens of them travel in one request.
+const MULTI_FRAME_EDGE: u32 = 768;
+/// CONTACT-SHEET mode (default for multi-frame; user idea 2026-10-02): many frames, time-stamped, tiled into a
+/// few grid images. Denser sampling (fast events like a pop land on a frame) with FEWER, larger images per call.
+/// `GENTLE_EYE_OLLAMA_SHEETS=0` sends separate frames instead.
+const SHEET_COLS: u32 = 4;
+const SHEET_ROWS: u32 = 3;
+const SHEET_TILE_W: u32 = 480;
+const SHEET_MAX_FPS: f64 = 4.0;
+const SHEET_MAX_FRAMES: usize = 96;
+const SHEET_FONTS: &[&str] = &[
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "C:\\Windows\\Fonts\\arial.ttf",
+];
+
+fn sheets_enabled() -> bool {
+    std::env::var("GENTLE_EYE_OLLAMA_SHEETS").map(|v| v.trim() != "0").unwrap_or(true)
+}
+
+/// Tile frames into contact sheets (SHEET_COLS x SHEET_ROWS, read left-to-right, top-to-bottom), each tile stamped
+/// with its time when a font is available. Returns (sheet path, first time, last time) per sheet.
+fn make_sheets(
+    frames: &[PathBuf],
+    times: &[f64],
+    out_dir: &Path,
+) -> Result<Vec<(PathBuf, f64, f64)>, VisionError> {
+    use ab_glyph::{FontVec, PxScale};
+    use image::{imageops, Rgb, RgbImage};
+    use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut, text_size};
+    use imageproc::rect::Rect;
+    let font = SHEET_FONTS
+        .iter()
+        .find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok()));
+    let per = (SHEET_COLS * SHEET_ROWS) as usize;
+    let pad = 4u32;
+    let mut out = Vec::new();
+    for (k, chunk) in frames.chunks(per).enumerate() {
+        let tiles: Vec<RgbImage> = chunk
+            .iter()
+            .map(|f| image::open(f).map(|i| i.to_rgb8()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| VisionError::FrameExtractionFailed(format!("sheet tile: {e}")))?;
+        let (tw, th) = tiles[0].dimensions();
+        let mut sheet = RgbImage::from_pixel(
+            SHEET_COLS * (tw + pad) + pad,
+            SHEET_ROWS * (th + pad) + pad,
+            Rgb([255, 255, 255]),
+        );
+        for (i, tile) in tiles.iter().enumerate() {
+            let (c, r) = (i as u32 % SHEET_COLS, i as u32 / SHEET_COLS);
+            let (x, y) = (pad + c * (tw + pad), pad + r * (th + pad));
+            imageops::overlay(&mut sheet, tile, x as i64, y as i64);
+            if let Some(f) = &font {
+                let label = format!("{:.2}s", times[k * per + i]);
+                let scale = PxScale::from(26.0);
+                let (lw, lh) = text_size(scale, f, &label);
+                // bottom-left: a top-left stamp hid the video's own title bar (kimi-k3 reported every title
+                // "clipped" - it was our stamp, 2026-10-02)
+                let by = (y + th) as i32 - lh as i32 - 14;
+                draw_filled_rect_mut(
+                    &mut sheet,
+                    Rect::at(x as i32 + 4, by).of_size(lw + 12, lh + 10),
+                    Rgb([0, 0, 0]),
+                );
+                draw_text_mut(&mut sheet, Rgb([255, 230, 0]), x as i32 + 10, by + 4, scale, f, &label);
+            }
+        }
+        let path = out_dir.join(format!("sheet_{k:02}.jpg"));
+        let file = std::fs::File::create(&path)
+            .map_err(|e| VisionError::FrameExtractionFailed(format!("sheet write: {e}")))?;
+        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 82)
+            .encode_image(&sheet)
+            .map_err(|e| VisionError::FrameExtractionFailed(format!("sheet encode: {e}")))?;
+        let t0 = times[k * per];
+        let t1 = times[(k * per + chunk.len() - 1).min(times.len() - 1)];
+        out.push((path, t0, t1));
+    }
+    Ok(out)
+}
+
+/// The prompt for a contact-sheet call.
+pub fn build_sheet_prompt(prompt: &str, sheets: &[(f64, f64)], n_frames: usize, step: f64, duration: f64) -> String {
+    let list: Vec<String> = sheets
+        .iter()
+        .enumerate()
+        .map(|(i, (a, b))| format!("image {} = {:.2}s..{:.2}s", i + 1, a, b))
+        .collect();
+    format!(
+        "{prompt}\n\n(The {k} attached images are CONTACT SHEETS of one {duration:.1}-second video: {n_frames} frames \
+         sampled every {step:.2}s, {c} x {r} frames per sheet, read left-to-right then top-to-bottom; each frame is \
+         stamped with its time in seconds. {list}. Treat them as one continuous video: judge motion, transitions, \
+         sudden pops/cuts between neighbouring frames and pacing, and give timestamps in seconds.)",
+        k = sheets.len(),
+        c = SHEET_COLS,
+        r = SHEET_ROWS,
+        list = list.join(", ")
+    )
+}
+
+/// How many frames to send in ONE call, or `None` for the single-frame + OCR path (small local models).
+pub fn multi_frame_count(model: &str) -> Option<usize> {
+    if let Some(n) = std::env::var("GENTLE_EYE_OLLAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        return if n >= 2 { Some(n) } else { None };
+    }
+    if model.ends_with("-cloud") || model.ends_with(":cloud") {
+        Some(MULTI_FRAMES_CLOUD)
+    } else {
+        None
+    }
+}
+
+/// Frame sampling plan for `extract_frames`.
+#[derive(Debug, Clone, Copy)]
+struct FramePlan {
+    target: f64,
+    max_fps: f64,
+    edge: u32,
+    ceiling: usize,
+    jpeg: bool,
+}
+
+const SINGLE_PLAN: FramePlan = FramePlan {
+    target: TARGET_FRAMES,
+    max_fps: 1.0,
+    edge: FRAME_MAX_EDGE,
+    ceiling: FRAME_CEILING,
+    jpeg: false,
+};
+
+fn multi_plan(n: usize) -> FramePlan {
+    FramePlan {
+        target: n as f64,
+        max_fps: MULTI_MAX_FPS,
+        edge: MULTI_FRAME_EDGE,
+        ceiling: n,
+        jpeg: true,
+    }
+}
+
+/// Timestamps (seconds from the clip start) of frames sampled at `fps` from `start`.
+pub fn frame_times(n: usize, fps: f64, start: f64) -> Vec<f64> {
+    (0..n).map(|k| start + k as f64 / fps.max(1e-6)).collect()
+}
+
+/// The prompt for a multi-frame call: the user's question + which image is which moment.
+pub fn build_multiframe_prompt(prompt: &str, times: &[f64], duration: f64) -> String {
+    let list: Vec<String> = times
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("image {} = {:.1}s", i + 1, t))
+        .collect();
+    format!(
+        "{prompt}\n\n(The {n} attached images are frames sampled IN ORDER from a {duration:.1}-second video: {list}. \
+         Treat them as one continuous video: judge motion, transitions and pacing between frames, and give \
+         timestamps in seconds.)",
+        n = times.len(),
+        list = list.join(", ")
+    )
+}
 
 /// Ollama-backed [`VisionProvider`].
 pub struct OllamaProvider {
@@ -156,7 +327,21 @@ impl VisionProvider for OllamaProvider {
         // Extract frames (held in a temp dir for the duration of the analysis).
         let frame_dir = tempfile::tempdir()
             .map_err(|e| VisionError::FrameExtractionFailed(e.to_string()))?;
-        let frames = extract_frames(video_path, frame_dir.path(), timeframe.as_ref())?;
+        let multi = multi_frame_count(&self.model);
+        let sheets_on = multi.is_some() && sheets_enabled();
+        let plan = match multi {
+            Some(_) if sheets_on => FramePlan {
+                target: SHEET_MAX_FRAMES as f64,
+                max_fps: SHEET_MAX_FPS,
+                edge: SHEET_TILE_W,
+                ceiling: SHEET_MAX_FRAMES,
+                jpeg: true,
+            },
+            Some(n) => multi_plan(n),
+            None => SINGLE_PLAN,
+        };
+        let (frames, sample_fps, duration) =
+            extract_frames(video_path, frame_dir.path(), timeframe.as_ref(), plan)?;
         if frames.is_empty() {
             return Err(VisionError::FrameExtractionFailed(
                 "FFmpeg produced no frames".to_string(),
@@ -164,6 +349,48 @@ impl VisionProvider for OllamaProvider {
         }
 
         let started = Instant::now();
+        if sheets_on {
+            // Big model, contact sheets: many time-stamped frames tiled into a few images, ONE call.
+            let start = timeframe.as_ref().map(|t| t.start_seconds).unwrap_or(0.0);
+            let times = frame_times(frames.len(), sample_fps, start);
+            let sheets = make_sheets(&frames, &times, frame_dir.path())?;
+            let images = sheets
+                .iter()
+                .map(|(p, _, _)| read_as_base64(p))
+                .collect::<Result<Vec<_>, _>>()?;
+            let spans: Vec<(f64, f64)> = sheets.iter().map(|(_, a, b)| (*a, *b)).collect();
+            let video_prompt = build_sheet_prompt(prompt, &spans, frames.len(), 1.0 / sample_fps, duration);
+            let (analysis_text, token_count) = self.generate(&video_prompt, &images).await?;
+            return Ok(AnalysisResult {
+                request_id: Uuid::new_v4(),
+                analysis_text,
+                provider: self.name().to_string(),
+                model_used: format!("{} ({} frames on {} sheets)", self.model, frames.len(), sheets.len()),
+                processing_time_ms: started.elapsed().as_millis() as u64,
+                token_count,
+                completed_at: Utc::now(),
+            });
+        }
+        if multi.is_some() {
+            // Big model: every frame, in order, with its timestamp, in ONE call.
+            let start = timeframe.as_ref().map(|t| t.start_seconds).unwrap_or(0.0);
+            let times = frame_times(frames.len(), sample_fps, start);
+            let images = frames
+                .iter()
+                .map(|f| read_as_base64(f))
+                .collect::<Result<Vec<_>, _>>()?;
+            let video_prompt = build_multiframe_prompt(prompt, &times, duration);
+            let (analysis_text, token_count) = self.generate(&video_prompt, &images).await?;
+            return Ok(AnalysisResult {
+                request_id: Uuid::new_v4(),
+                analysis_text,
+                provider: self.name().to_string(),
+                model_used: format!("{} ({} frames)", self.model, frames.len()),
+                processing_time_ms: started.elapsed().as_millis() as u64,
+                token_count,
+                completed_at: Utc::now(),
+            });
+        }
         // OCR all sampled frames (cheap + accurate) so the local model gets the
         // exact on-screen text, then send only ONE representative frame for
         // visual context. A small local VL model is too slow to process many
@@ -404,19 +631,22 @@ fn extract_frames(
     input: &Path,
     out_dir: &Path,
     timeframe: Option<&TimeRange>,
-) -> Result<Vec<PathBuf>, VisionError> {
+    plan: FramePlan,
+) -> Result<(Vec<PathBuf>, f64, f64), VisionError> {
     let duration = match timeframe {
         Some(tf) => (tf.end_seconds - tf.start_seconds).max(0.0),
         None => video_duration_secs(input).unwrap_or(0.0),
     };
-    // Even spacing: fewer fps for longer clips, at most 1 fps for short ones.
+    // Even spacing: fewer fps for longer clips, at most `max_fps` for short ones.
     let sample_fps = if duration > 0.0 {
-        (TARGET_FRAMES / duration).clamp(0.05, 1.0)
+        (plan.target / duration).clamp(0.05, plan.max_fps)
     } else {
         1.0
     };
+    let ext = if plan.jpeg { "jpg" } else { "png" };
+    let edge = plan.edge;
 
-    let pattern = out_dir.join("frame_%04d.png");
+    let pattern = out_dir.join(format!("frame_%04d.{ext}"));
     let mut args: Vec<String> = vec!["-y".to_string()];
     if let Some(tf) = timeframe {
         args.extend([
@@ -431,10 +661,13 @@ fn extract_frames(
         input.to_string_lossy().to_string(),
         "-vf".to_string(),
         format!(
-            "fps={sample_fps:.4},scale={FRAME_MAX_EDGE}:{FRAME_MAX_EDGE}:force_original_aspect_ratio=decrease"
+            "fps={sample_fps:.4},scale={edge}:{edge}:force_original_aspect_ratio=decrease"
         ),
-        pattern.to_string_lossy().to_string(),
     ]);
+    if plan.jpeg {
+        args.extend(["-q:v".to_string(), "4".to_string()]);
+    }
+    args.push(pattern.to_string_lossy().to_string());
 
     let output = Command::new("ffmpeg")
         .args(&args)
@@ -453,11 +686,11 @@ fn extract_frames(
     let mut frames: Vec<PathBuf> = std::fs::read_dir(out_dir)
         .map_err(|e| VisionError::FrameExtractionFailed(e.to_string()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|ext| ext == "png"))
+        .filter(|p| p.extension().is_some_and(|e| e == ext))
         .collect();
     frames.sort();
-    frames.truncate(FRAME_CEILING);
-    Ok(frames)
+    frames.truncate(plan.ceiling);
+    Ok((frames, sample_fps, duration))
 }
 
 #[cfg(test)]
@@ -488,6 +721,51 @@ mod tests {
         assert_eq!(p.keep_alive().as_deref(), Some("1860s"));
         p.set_keep_alive(None);
         assert_eq!(p.keep_alive(), None, "a later None must clear it, not linger");
+    }
+
+    #[test]
+    fn multi_frame_mode_is_for_cloud_models_only() {
+        std::env::remove_var("GENTLE_EYE_OLLAMA_FRAMES");
+        assert_eq!(multi_frame_count("qwen3-vl:235b-cloud"), Some(MULTI_FRAMES_CLOUD));
+        assert_eq!(multi_frame_count("qwen2.5vl:7b"), None, "small local models keep the single-frame + OCR path");
+    }
+
+    #[test]
+    fn sheet_prompt_explains_the_grid_and_spans() {
+        let p = build_sheet_prompt("Review it", &[(0.0, 2.75), (3.0, 5.75)], 24, 0.25, 6.0);
+        assert!(p.starts_with("Review it"));
+        assert!(p.contains("2 attached images are CONTACT SHEETS"));
+        assert!(p.contains("24 frames") && p.contains("every 0.25s") && p.contains("4 x 3"));
+        assert!(p.contains("image 2 = 3.00s..5.75s"));
+    }
+
+    #[test]
+    fn sheets_tile_frames_and_report_their_spans() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut frames = Vec::new();
+        for i in 0..14 {
+            let p = dir.path().join(format!("f{i:02}.jpg"));
+            image::RgbImage::from_pixel(48, 27, image::Rgb([i as u8 * 10, 0, 0])).save(&p).unwrap();
+            frames.push(p);
+        }
+        let times = frame_times(14, 4.0, 0.0);
+        let sheets = make_sheets(&frames, &times, dir.path()).unwrap();
+        assert_eq!(sheets.len(), 2, "12 per sheet: 14 frames -> 2 sheets");
+        assert_eq!((sheets[0].1, sheets[0].2), (0.0, 2.75));
+        assert_eq!((sheets[1].1, sheets[1].2), (3.0, 3.25));
+        let s0 = image::open(&sheets[0].0).unwrap();
+        assert_eq!(s0.width(), 4 * (48 + 4) + 4);
+        assert_eq!(s0.height(), 3 * (27 + 4) + 4);
+    }
+
+    #[test]
+    fn multiframe_prompt_names_every_frame_with_its_time() {
+        let times = frame_times(3, 2.0, 1.0);
+        assert_eq!(times, vec![1.0, 1.5, 2.0]);
+        let p = build_multiframe_prompt("Review it", &times, 3.0);
+        assert!(p.starts_with("Review it"));
+        assert!(p.contains("image 1 = 1.0s") && p.contains("image 3 = 2.0s"));
+        assert!(p.contains("3 attached images") && p.contains("3.0-second video"));
     }
 
     #[test]

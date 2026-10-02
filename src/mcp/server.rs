@@ -402,8 +402,27 @@ impl GentleEyeServer {
             start_seconds: t.start_seconds,
             end_seconds: t.end_seconds,
         });
-        match self
-            .vision
+        // A per-call provider/model builds a one-off provider; otherwise the configured one is used.
+        let vision = if input.provider.is_some() || input.model.is_some() {
+            let mut vc = self.config.vision.clone();
+            if let Some(p) = &input.provider {
+                vc.provider = p.clone();
+            }
+            if let Some(m) = &input.model {
+                if vc.provider == "ollama" {
+                    vc.ollama_model = m.clone();
+                } else {
+                    vc.gemini_model = m.clone();
+                }
+            }
+            match build_vision_provider(&vc) {
+                Ok(v) => v,
+                Err(e) => return err_text(e.to_string()),
+            }
+        } else {
+            self.vision.clone()
+        };
+        match vision
             .analyze_video(Path::new(&input.video_path), &input.prompt, timeframe)
             .await
         {
