@@ -36,6 +36,78 @@ const TARGET_FRAMES: f64 = 8.0;
 const FRAME_MAX_EDGE: u32 = 1024;
 /// Safety ceiling on collected frames (only guards the ffprobe-failure fallback).
 const FRAME_CEILING: usize = 24;
+/// MULTI-FRAME mode (big models, e.g. Ollama Cloud `*-cloud` vision models): ALL sampled frames go in one call,
+/// each with its timestamp, so the model can judge motion and sequence (a demo video, a UI flow), not just one
+/// still. Default frame count for `*-cloud` models; `GENTLE_EYE_OLLAMA_FRAMES=N` (N >= 2) forces it for any model.
+const MULTI_FRAMES_CLOUD: usize = 48;
+/// At most this many frames per second in multi-frame mode (short clips don't need more).
+const MULTI_MAX_FPS: f64 = 2.0;
+/// Frames are smaller (and JPEG) in multi-frame mode: dozens of them travel in one request.
+const MULTI_FRAME_EDGE: u32 = 768;
+
+/// How many frames to send in ONE call, or `None` for the single-frame + OCR path (small local models).
+pub fn multi_frame_count(model: &str) -> Option<usize> {
+    if let Some(n) = std::env::var("GENTLE_EYE_OLLAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        return if n >= 2 { Some(n) } else { None };
+    }
+    if model.ends_with("-cloud") || model.ends_with(":cloud") {
+        Some(MULTI_FRAMES_CLOUD)
+    } else {
+        None
+    }
+}
+
+/// Frame sampling plan for `extract_frames`.
+#[derive(Debug, Clone, Copy)]
+struct FramePlan {
+    target: f64,
+    max_fps: f64,
+    edge: u32,
+    ceiling: usize,
+    jpeg: bool,
+}
+
+const SINGLE_PLAN: FramePlan = FramePlan {
+    target: TARGET_FRAMES,
+    max_fps: 1.0,
+    edge: FRAME_MAX_EDGE,
+    ceiling: FRAME_CEILING,
+    jpeg: false,
+};
+
+fn multi_plan(n: usize) -> FramePlan {
+    FramePlan {
+        target: n as f64,
+        max_fps: MULTI_MAX_FPS,
+        edge: MULTI_FRAME_EDGE,
+        ceiling: n,
+        jpeg: true,
+    }
+}
+
+/// Timestamps (seconds from the clip start) of frames sampled at `fps` from `start`.
+pub fn frame_times(n: usize, fps: f64, start: f64) -> Vec<f64> {
+    (0..n).map(|k| start + k as f64 / fps.max(1e-6)).collect()
+}
+
+/// The prompt for a multi-frame call: the user's question + which image is which moment.
+pub fn build_multiframe_prompt(prompt: &str, times: &[f64], duration: f64) -> String {
+    let list: Vec<String> = times
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("image {} = {:.1}s", i + 1, t))
+        .collect();
+    format!(
+        "{prompt}\n\n(The {n} attached images are frames sampled IN ORDER from a {duration:.1}-second video: {list}. \
+         Treat them as one continuous video: judge motion, transitions and pacing between frames, and give \
+         timestamps in seconds.)",
+        n = times.len(),
+        list = list.join(", ")
+    )
+}
 
 /// Ollama-backed [`VisionProvider`].
 pub struct OllamaProvider {
@@ -156,7 +228,10 @@ impl VisionProvider for OllamaProvider {
         // Extract frames (held in a temp dir for the duration of the analysis).
         let frame_dir = tempfile::tempdir()
             .map_err(|e| VisionError::FrameExtractionFailed(e.to_string()))?;
-        let frames = extract_frames(video_path, frame_dir.path(), timeframe.as_ref())?;
+        let multi = multi_frame_count(&self.model);
+        let plan = multi.map(multi_plan).unwrap_or(SINGLE_PLAN);
+        let (frames, sample_fps, duration) =
+            extract_frames(video_path, frame_dir.path(), timeframe.as_ref(), plan)?;
         if frames.is_empty() {
             return Err(VisionError::FrameExtractionFailed(
                 "FFmpeg produced no frames".to_string(),
@@ -164,6 +239,26 @@ impl VisionProvider for OllamaProvider {
         }
 
         let started = Instant::now();
+        if multi.is_some() {
+            // Big model: every frame, in order, with its timestamp, in ONE call.
+            let start = timeframe.as_ref().map(|t| t.start_seconds).unwrap_or(0.0);
+            let times = frame_times(frames.len(), sample_fps, start);
+            let images = frames
+                .iter()
+                .map(|f| read_as_base64(f))
+                .collect::<Result<Vec<_>, _>>()?;
+            let video_prompt = build_multiframe_prompt(prompt, &times, duration);
+            let (analysis_text, token_count) = self.generate(&video_prompt, &images).await?;
+            return Ok(AnalysisResult {
+                request_id: Uuid::new_v4(),
+                analysis_text,
+                provider: self.name().to_string(),
+                model_used: format!("{} ({} frames)", self.model, frames.len()),
+                processing_time_ms: started.elapsed().as_millis() as u64,
+                token_count,
+                completed_at: Utc::now(),
+            });
+        }
         // OCR all sampled frames (cheap + accurate) so the local model gets the
         // exact on-screen text, then send only ONE representative frame for
         // visual context. A small local VL model is too slow to process many
@@ -404,19 +499,22 @@ fn extract_frames(
     input: &Path,
     out_dir: &Path,
     timeframe: Option<&TimeRange>,
-) -> Result<Vec<PathBuf>, VisionError> {
+    plan: FramePlan,
+) -> Result<(Vec<PathBuf>, f64, f64), VisionError> {
     let duration = match timeframe {
         Some(tf) => (tf.end_seconds - tf.start_seconds).max(0.0),
         None => video_duration_secs(input).unwrap_or(0.0),
     };
-    // Even spacing: fewer fps for longer clips, at most 1 fps for short ones.
+    // Even spacing: fewer fps for longer clips, at most `max_fps` for short ones.
     let sample_fps = if duration > 0.0 {
-        (TARGET_FRAMES / duration).clamp(0.05, 1.0)
+        (plan.target / duration).clamp(0.05, plan.max_fps)
     } else {
         1.0
     };
+    let ext = if plan.jpeg { "jpg" } else { "png" };
+    let edge = plan.edge;
 
-    let pattern = out_dir.join("frame_%04d.png");
+    let pattern = out_dir.join(format!("frame_%04d.{ext}"));
     let mut args: Vec<String> = vec!["-y".to_string()];
     if let Some(tf) = timeframe {
         args.extend([
@@ -431,10 +529,13 @@ fn extract_frames(
         input.to_string_lossy().to_string(),
         "-vf".to_string(),
         format!(
-            "fps={sample_fps:.4},scale={FRAME_MAX_EDGE}:{FRAME_MAX_EDGE}:force_original_aspect_ratio=decrease"
+            "fps={sample_fps:.4},scale={edge}:{edge}:force_original_aspect_ratio=decrease"
         ),
-        pattern.to_string_lossy().to_string(),
     ]);
+    if plan.jpeg {
+        args.extend(["-q:v".to_string(), "4".to_string()]);
+    }
+    args.push(pattern.to_string_lossy().to_string());
 
     let output = Command::new("ffmpeg")
         .args(&args)
@@ -453,11 +554,11 @@ fn extract_frames(
     let mut frames: Vec<PathBuf> = std::fs::read_dir(out_dir)
         .map_err(|e| VisionError::FrameExtractionFailed(e.to_string()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|ext| ext == "png"))
+        .filter(|p| p.extension().is_some_and(|e| e == ext))
         .collect();
     frames.sort();
-    frames.truncate(FRAME_CEILING);
-    Ok(frames)
+    frames.truncate(plan.ceiling);
+    Ok((frames, sample_fps, duration))
 }
 
 #[cfg(test)]
@@ -488,6 +589,23 @@ mod tests {
         assert_eq!(p.keep_alive().as_deref(), Some("1860s"));
         p.set_keep_alive(None);
         assert_eq!(p.keep_alive(), None, "a later None must clear it, not linger");
+    }
+
+    #[test]
+    fn multi_frame_mode_is_for_cloud_models_only() {
+        std::env::remove_var("GENTLE_EYE_OLLAMA_FRAMES");
+        assert_eq!(multi_frame_count("qwen3-vl:235b-cloud"), Some(MULTI_FRAMES_CLOUD));
+        assert_eq!(multi_frame_count("qwen2.5vl:7b"), None, "small local models keep the single-frame + OCR path");
+    }
+
+    #[test]
+    fn multiframe_prompt_names_every_frame_with_its_time() {
+        let times = frame_times(3, 2.0, 1.0);
+        assert_eq!(times, vec![1.0, 1.5, 2.0]);
+        let p = build_multiframe_prompt("Review it", &times, 3.0);
+        assert!(p.starts_with("Review it"));
+        assert!(p.contains("image 1 = 1.0s") && p.contains("image 3 = 2.0s"));
+        assert!(p.contains("3 attached images") && p.contains("3.0-second video"));
     }
 
     #[test]

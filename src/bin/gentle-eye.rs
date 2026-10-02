@@ -152,6 +152,10 @@ async fn run_analyze(args: &[String]) -> Result<()> {
     if let Some(p) = flag(args, "--provider") {
         std::env::set_var("GENTLE_EYE_PROVIDER", p);
     }
+    // --model: the Ollama model (e.g. "qwen3-vl:235b-cloud": multi-frame video review on Ollama Cloud)
+    if let Some(m) = flag(args, "--model") {
+        std::env::set_var("GENTLE_EYE_OLLAMA_MODEL", m);
+    }
     let prompt = flag(args, "--prompt").ok_or_else(|| anyhow!("--prompt is required"))?;
     let server = GentleEyeServer::new().await?;
 

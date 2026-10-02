@@ -56,6 +56,13 @@ fn apply_env_overrides(config: &mut AppConfig) {
         config.vision.provider = provider;
     }
 
+    // GENTLE_EYE_OLLAMA_MODEL -> vision.ollama_model (e.g. an Ollama Cloud vision model, "qwen3-vl:235b-cloud")
+    if let Ok(model) = std::env::var("GENTLE_EYE_OLLAMA_MODEL") {
+        if !model.trim().is_empty() {
+            config.vision.ollama_model = model.trim().to_string();
+        }
+    }
+
     // GENTLE_EYE_MAX_DURATION -> recording.max_duration_seconds
     if let Ok(duration_str) = std::env::var("GENTLE_EYE_MAX_DURATION") {
         if let Ok(duration) = duration_str.parse::<u64>() {

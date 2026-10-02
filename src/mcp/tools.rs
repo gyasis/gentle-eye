@@ -161,6 +161,16 @@ pub struct AnalyzeVideoInput {
     /// Optional time range to focus the analysis on
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeframe: Option<TimeframeInput>,
+
+    /// Optional provider for THIS call ("gemini" or "ollama"), overriding the configured one.
+    /// Lets one session compare reviewers on the same video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Optional model for THIS call, e.g. "qwen3-vl:235b-cloud" (an Ollama Cloud vision model: frames are
+    /// sampled and sent in ONE call with their timestamps) or a Gemini model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Output for the `analyze_video` tool
