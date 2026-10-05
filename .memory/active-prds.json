@@ -17,6 +17,42 @@
       "descriptor": "gentle_eye_preview_pane",
       "branch_at_creation": "main",
       "owner_path": "/home/gyasis/Documents/code/gentle-eye"
+    },
+    {
+      "id": "glasses_capture_source_2026-09-06",
+      "path": "/home/gyasis/dev/prd/scratch/glasses_capture_source_2026-09-06.md",
+      "status": "open",
+      "created": "2026-09-06",
+      "descriptor": "glasses_capture_source",
+      "branch_at_creation": "main",
+      "owner_path": "/home/gyasis/Documents/code/gentle-eye"
+    },
+    {
+      "id": "gentle_eye_redpen_native_annotator_2026-05-31",
+      "path": "/home/gyasis/dev/prd/scratch/gentle_eye_redpen_native_annotator_2026-05-31.md",
+      "status": "open",
+      "created": "2026-05-31",
+      "descriptor": "gentle_eye_redpen_native_annotator",
+      "branch_at_creation": "main",
+      "owner_path": "/home/gyasis/Documents/code/gentle-eye"
+    },
+    {
+      "id": "gentle_eye_region_engine_2026-07-01",
+      "path": "/home/gyasis/dev/prd/scratch/gentle_eye_region_engine_2026-07-01.md",
+      "status": "open",
+      "created": "2026-07-01",
+      "descriptor": "gentle_eye_region_engine",
+      "branch_at_creation": "main",
+      "owner_path": "/home/gyasis/Documents/code/gentle-eye"
+    },
+    {
+      "id": "dayflow_waves_continuance_2026-08-23",
+      "path": "/home/gyasis/dev/prd/scratch/dayflow_waves_continuance_2026-08-23.md",
+      "status": "open",
+      "created": "2026-08-23",
+      "descriptor": "dayflow_waves_continuance",
+      "branch_at_creation": "fix/ollama-governor-base-url",
+      "owner_path": "/home/gyasis/Documents/code/gentle-eye"
     }
   ]
 }
