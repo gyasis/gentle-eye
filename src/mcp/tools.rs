@@ -173,6 +173,21 @@ pub struct AnalyzeVideoInput {
     pub model: Option<String>,
 }
 
+/// Input parameters for the `analyze_image` tool
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct AnalyzeImageInput {
+    /// Absolute path to the image file to analyze (png, jpg, ...)
+    pub image_path: String,
+
+    /// What you want to know about the image
+    ///
+    /// Examples:
+    /// - "Does this layout look right on mobile?"
+    /// - "Read the values off this chart"
+    #[schemars(length(max = 10000))]
+    pub prompt: String,
+}
+
 /// Output for the `analyze_video` tool
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AnalyzeVideoOutput {

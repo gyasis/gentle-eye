@@ -18,7 +18,7 @@ use crate::contracts::traits::{
     RecordingConfig, RecordingService, RecordingStatus, TimeRange, VisionConfig, VisionProvider,
 };
 use crate::mcp::tools::{
-    AnalyzeVideoInput, AnalyzeVideoOutput, AskDayInput, CancelRecordingInput, CancelRecordingOutput,
+    AnalyzeImageInput, AnalyzeVideoInput, AnalyzeVideoOutput, AskDayInput, CancelRecordingInput, CancelRecordingOutput,
     DayflowStatusInput, GetTimelineInput, StartDayflowInput, StopDayflowInput,
     CaptureStreamFrameInput, CaptureStreamFrameOutput, DefineTargetInput, DefineTargetOutput,
     FocusTargetInput, FocusTargetOutput, MeasureTargetInput, MeasureTargetOutput,
@@ -133,6 +133,7 @@ impl GentleEyeServer {
             "stop_recording" => self.tool_stop_recording(parse_args(args)?).await,
             "get_recording_status" => self.tool_get_status(parse_args(args)?).await,
             "analyze_video" => self.tool_analyze_video(parse_args(args)?).await,
+            "analyze_image" => self.tool_analyze_image(parse_args(args)?).await,
             "list_recordings" => self.tool_list_recordings(parse_args(args)?).await,
             "cancel_recording" => self.tool_cancel(parse_args(args)?).await,
             "get_vision_provider_info" => self.tool_provider_info().await,
@@ -436,6 +437,17 @@ impl GentleEyeServer {
         }
     }
 
+    async fn tool_analyze_image(&self, input: AnalyzeImageInput) -> CallToolResult {
+        match self
+            .vision
+            .analyze_image(Path::new(&input.image_path), &input.prompt)
+            .await
+        {
+            Ok(result) => ok_json(result),
+            Err(e) => err_text(e.to_string()),
+        }
+    }
+
     async fn tool_list_recordings(&self, input: ListRecordingsInput) -> CallToolResult {
         let limit = input.limit.unwrap_or(10) as usize;
         let status_filter = input
@@ -711,7 +723,7 @@ impl ServerHandler for GentleEyeServer {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
             instructions: Some(
-                "Screen recording and AI video analysis tools for debugging sessions.".to_string(),
+                "Vision for agents: analyze screenshots and images (analyze_image), read on-screen text, capture screens/streams, record and analyze video, track the day. Use it for ANY visual/image task — UI and layout QA, page screenshots, charts — before reaching for another vision path.".to_string(),
             ),
             ..Default::default()
         }
@@ -829,6 +841,11 @@ fn tool_catalog() -> Vec<Tool> {
             "analyze_video",
             "Analyze a recorded video with the configured vision AI provider.",
             schema_for::<AnalyzeVideoInput>(),
+        ),
+        Tool::new(
+            "analyze_image",
+            "Analyze a still image (screenshot, web page capture, UI, photo, diagram) with the configured vision model and a prompt. The default tool for any visual check: layout QA, 'does this look right', reading a chart.",
+            schema_for::<AnalyzeImageInput>(),
         ),
         Tool::new(
             "list_recordings",
@@ -1098,6 +1115,7 @@ mod tests {
         for expected in [
             "start_recording",
             "analyze_video",
+            "analyze_image",
             "get_vision_provider_info",
             "read_screen_text",
             "capture_stream_frame",
@@ -1115,7 +1133,7 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "{expected} is missing from tools/list");
         }
-        assert_eq!(tools.len(), 17, "and nothing was added without being named here");
+        assert_eq!(tools.len(), 18, "and nothing was added without being named here");
 
         // Every advertised tool must also DISPATCH — a catalog entry with no
         // arm returns "unknown tool" to a client that did exactly what the
