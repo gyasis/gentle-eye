@@ -33,8 +33,8 @@ use crate::target::model::{PixelRect, Target, TargetSource};
 use crate::target::store::TargetStore;
 use chrono::Utc;
 use rmcp::model::{
-    CallToolRequestParam, CallToolResult, Content, ErrorData, Implementation, JsonObject,
-    ListToolsResult, PaginatedRequestParam, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResult, Content, ErrorData, Implementation, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, ServiceExt};
@@ -126,7 +126,7 @@ impl GentleEyeServer {
         Ok(())
     }
 
-    async fn dispatch(&self, request: CallToolRequestParam) -> Result<CallToolResult, ErrorData> {
+    async fn dispatch(&self, request: CallToolRequestParams) -> Result<CallToolResult, ErrorData> {
         let args = Value::Object(request.arguments.unwrap_or_default());
         let result = match request.name.as_ref() {
             "start_recording" => self.tool_start_recording(parse_args(args)?).await,
@@ -716,33 +716,23 @@ impl GentleEyeServer {
 
 impl ServerHandler for GentleEyeServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "gentle-eye".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            },
-            instructions: Some(
-                "Vision for agents: analyze screenshots and images (analyze_image), read on-screen text, capture screens/streams, record and analyze video, track the day. Use it for ANY visual/image task — UI and layout QA, page screenshots, charts — before reaching for another vision path.".to_string(),
-            ),
-            ..Default::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("gentle-eye", env!("CARGO_PKG_VERSION")))
+            .with_instructions(
+                "Vision for agents: analyze screenshots and images (analyze_image), read on-screen text, capture screens/streams, record and analyze video, track the day. Use it for ANY visual/image task — UI and layout QA, page screenshots, charts — before reaching for another vision path.")
     }
 
     async fn list_tools(
         &self,
-        _request: PaginatedRequestParam,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult {
-            tools: tool_catalog(),
-            ..Default::default()
-        })
+        Ok(ListToolsResult::with_all_items(tool_catalog()))
     }
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.dispatch(request).await
@@ -782,6 +772,11 @@ fn build_vision_provider(
         Arc::new(GeminiProvider::new(&vision_config)?)
     };
     Ok(provider)
+}
+
+/// Number of tools this server advertises (used by the HTTP `/healthz`).
+pub fn tool_count() -> usize {
+    tool_catalog().len()
 }
 
 fn tool_catalog() -> Vec<Tool> {

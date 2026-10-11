@@ -1,0 +1,15 @@
+[Unit]
+Description=Gentle Eye shared MCP server (streamable HTTP)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/gyasis/.local/bin/gentle-eye mcp-http --bind 127.0.0.1:7418
+Restart=on-failure
+RestartSec=3
+Environment=GENTLE_EYE_PROVIDER=ollama
+Environment=OLLAMA_HOST=http://192.168.0.159:8799/llm/ollama
+Environment=GENTLE_EYE_OLLAMA_MODEL=minimax-m3:cloud
+
+[Install]
+WantedBy=default.target

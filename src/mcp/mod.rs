@@ -43,7 +43,7 @@ pub mod tools;
 
 // Re-export main types for convenience
 pub use errors::McpError;
-pub use server::GentleEyeServer;
+pub use server::{tool_count, GentleEyeServer};
 pub use tools::{
     AnalyzeVideoInput, AnalyzeVideoOutput, CancelRecordingInput, CancelRecordingOutput,
     GetRecordingStatusInput, GetRecordingStatusOutput, GetVisionProviderInfoOutput,
