@@ -491,7 +491,11 @@ fn build_ollama_request(
         "model": model,
         "prompt": prompt,
         "images": images,
-        "stream": false
+        "stream": false,
+        // Classification and description need no reasoning trace; thinking
+        // models otherwise spend tokens and time on it. `strip_reasoning`
+        // stays as the fallback for servers that ignore the flag.
+        "think": false
     });
     // Sent ONLY when the caller asked. An unsolicited `keep_alive` overrides
     // the server's own default for every caller, including those that never
@@ -794,6 +798,7 @@ mod tests {
         assert_eq!(body["model"], "llava");
         assert_eq!(body["prompt"], "describe");
         assert_eq!(body["stream"], false);
+        assert_eq!(body["think"], false, "thinking is disabled for classification/description");
         assert_eq!(body["images"][0], "QUJD");
     }
 

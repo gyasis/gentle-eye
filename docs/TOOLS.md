@@ -30,7 +30,7 @@ the lookup table.
 | **Read the day's timeline / standup** | `get_timeline` (`standup:true`) | `dayflow timeline`, `dayflow standup` |
 | Record the screen | `start_recording` / `stop_recording` / `get_recording_status` / `cancel_recording` | `record` |
 | List recordings | `list_recordings` | `list` |
-| Analyze a video/image with a VLM | `analyze_video` | `analyze` |
+| Analyze a video/image with a VLM | `analyze_video` (video), `analyze_image` (still) | `analyze` |
 | OCR on-screen text | `read_screen_text` | `read-text` |
 | Grab a frame from a live stream (ATEM/RTSP/HTTP/SRT) | `capture_stream_frame` | `capture-stream` |
 | Focus capture on a sub-region (crop) | `define_target` / `focus_target` | `target add` / `target use` / `target list` |
@@ -60,6 +60,7 @@ The server (`gentle-eye serve`) exposes these over stdio; an agent sees them via
 | `stop_recording` | Stop an active recording and finalize the video file. |
 | `get_recording_status` | Get the current status of a recording. |
 | `analyze_video` | Analyze a recorded video with the configured vision AI provider. |
+| `analyze_image` | Analyze a still image (screenshot, page capture, UI, diagram) with the configured vision model and a prompt. |
 | `list_recordings` | List recent recordings with metadata. |
 | `cancel_recording` | Cancel a recording without saving the video. |
 | `get_vision_provider_info` | Get information about the configured vision AI provider. |
