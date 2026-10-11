@@ -62,6 +62,7 @@ USAGE:
   gentle-eye dayflow ask <QUESTION> [--from T] [--to T]   Answer from the day's own records (needs GE_DAYFLOW_ENDPOINT)
 
   gentle-eye serve [--port N]                         Preview/gallery HTTP server
+  gentle-eye mcp-http [--bind 127.0.0.1:7418]         ONE shared MCP server over streamable HTTP (/mcp, /healthz)
   gentle-eye help
 
 Env: GENTLE_EYE_PROVIDER, GEMINI_API_KEY/GOOGLE_API_KEY, OLLAMA_HOST, OLLAMA_PORT,
@@ -73,7 +74,7 @@ async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("serve");
     // CLI subcommands stay quiet (clean JSON on stdout); the server is chatty.
-    let level = if cmd == "serve" { "info" } else { "warn" };
+    let level = if cmd == "serve" || cmd == "mcp-http" { "info" } else { "warn" };
     if let Err(e) = setup_logging(level) {
         eprintln!("Warning: failed to set up logging: {e}");
     }
@@ -81,6 +82,7 @@ async fn main() -> ExitCode {
 
     let result = match cmd {
         "serve" => run_serve().await,
+        "mcp-http" => run_mcp_http(rest).await,
         "analyze" => run_analyze(rest).await,
         "record" => run_record(rest).await,
         "capture-stream" => run_capture_stream(rest).await,
@@ -1425,6 +1427,103 @@ async fn run_merge_text(args: &[String]) -> Result<()> {
 
 /// Run the MCP server over stdio with graceful shutdown.
 async fn run_serve() -> Result<()> {
+    let server = build_mcp_server().await?;
+    let server_handle = tokio::spawn(async move { server.serve_stdio().await });
+    tokio::select! {
+        _ = signal::ctrl_c() => {
+            info!("Shutdown signal received, stopping server...");
+        }
+        result = server_handle => {
+            match result {
+                Ok(Ok(())) => info!("Server stopped normally"),
+                Ok(Err(e)) => error!("Server error: {}", e),
+                Err(e) => error!("Server task failed: {}", e),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `gentle-eye mcp-http [--bind ADDR]` — ONE shared MCP server over streamable
+/// HTTP (`/mcp`), plus `GET /healthz`. Every MCP session gets a clone of the same
+/// `GentleEyeServer`, so the vision provider, recordings and dayflow engine are
+/// shared across all clients instead of one process per client.
+async fn run_mcp_http(args: &[String]) -> Result<()> {
+    use axum::{extract::Request, middleware, middleware::Next, routing::get, Json, Router};
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let mut bind = "127.0.0.1:7418".to_string();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--bind" => bind = it.next().ok_or_else(|| anyhow!("--bind needs ADDR:PORT"))?.clone(),
+            other => return Err(anyhow!("unknown mcp-http option '{other}'")),
+        }
+    }
+
+    let server = build_mcp_server().await?;
+    let tools = gentle_eye::mcp::tool_count();
+    let ct = tokio_util::sync::CancellationToken::new();
+    let service = StreamableHttpService::new(
+        {
+            let server = server.clone();
+            move || Ok(server.clone())
+        },
+        std::sync::Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
+    );
+
+    let app = Router::new()
+        .route(
+            "/healthz",
+            get(move || async move {
+                Json(serde_json::json!({
+                    "ok": true,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "tools": tools,
+                }))
+            }),
+        )
+        .nest_service("/mcp", service)
+        .layer(middleware::from_fn(|req: Request, next: Next| async move {
+            let method = req.method().clone();
+            let path = req.uri().path().to_string();
+            let session = req
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_string();
+            let start = std::time::Instant::now();
+            let resp = next.run(req).await;
+            let status = resp.status();
+            if status.is_client_error() || status.is_server_error() {
+                error!("{method} {path} session={session} -> {status} in {:?}", start.elapsed());
+            } else {
+                info!("{method} {path} session={session} -> {status} in {:?}", start.elapsed());
+            }
+            resp
+        }));
+
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .with_context(|| format!("cannot bind {bind}"))?;
+    info!("Gentle-Eye MCP (streamable HTTP) listening on http://{bind}/mcp ({tools} tools); health: /healthz");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = signal::ctrl_c().await;
+            info!("Shutdown signal received, stopping mcp-http...");
+            ct.cancel();
+        })
+        .await
+        .context("mcp-http server failed")?;
+    Ok(())
+}
+
+/// Load config, run startup validation, build the one `GentleEyeServer`.
+async fn build_mcp_server() -> Result<GentleEyeServer> {
     info!(
         "Starting Gentle-Eye MCP server v{}",
         env!("CARGO_PKG_VERSION")
@@ -1482,20 +1581,7 @@ async fn run_serve() -> Result<()> {
         server.config().recording.fps
     );
 
-    let server_handle = tokio::spawn(async move { server.serve_stdio().await });
-    tokio::select! {
-        _ = signal::ctrl_c() => {
-            info!("Shutdown signal received, stopping server...");
-        }
-        result = server_handle => {
-            match result {
-                Ok(Ok(())) => info!("Server stopped normally"),
-                Ok(Err(e)) => error!("Server error: {}", e),
-                Err(e) => error!("Server task failed: {}", e),
-            }
-        }
-    }
-    Ok(())
+    Ok(server)
 }
 
 /// `gentle-eye dayflow <start|stop|status|timeline|ask>`.

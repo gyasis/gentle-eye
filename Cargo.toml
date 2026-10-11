@@ -8,7 +8,10 @@ description = "MCP server for screen recording and AI video analysis"
 # MCP Server. `transport-io` adds the stdio transport (JSON-RPC over stdio) the
 # binary serves on — required for an MCP server; the recovered spec's
 # ["server","macros"] list omitted it.
-rmcp = { version = "0.1", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.4", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+# HTTP host for the streamable-HTTP MCP transport (`gentle-eye mcp-http`).
+axum = "0.8"
+tokio-util = "0.7"
 
 # Async Runtime
 tokio = { version = "1", features = ["full"] }

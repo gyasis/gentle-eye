@@ -49,7 +49,7 @@ the lookup table.
 
 ---
 
-## MCP tools (17)
+## MCP tools (18)
 
 The server (`gentle-eye serve`) exposes these over stdio; an agent sees them via
 `tools/list`.
@@ -144,6 +144,7 @@ trusting a labelled image.
 
 ```
 gentle-eye [serve]                        Run as an MCP server over stdio (default)
+gentle-eye mcp-http [--bind 127.0.0.1:7418]   ONE shared MCP server over streamable HTTP (/mcp, /healthz)
 gentle-eye analyze --image PATH --prompt TEXT [--provider gemini|ollama]
 gentle-eye analyze --video PATH --prompt TEXT [--start S --end E] [--provider …]
 gentle-eye record  [--duration SECS] [--fps N] [--out FILE.mp4] [--display IDX|LABEL]
@@ -338,6 +339,30 @@ counted into `samples_read_whole`, which `status` shows.
 - `timeline` returns `entries` **and** `gaps`. A gap is a recorded pause with a
   cause; absence of entries is not the same fact.
 
+## Shared HTTP server
+
+`gentle-eye serve` is one stdio process per MCP client (and `gentle-eye serve --port` is the
+unrelated preview/gallery server). To share ONE server across many sessions, run:
+
+```
+gentle-eye mcp-http [--bind 127.0.0.1:7418]
+```
+
+- MCP over streamable HTTP at `/mcp`; bound to loopback only by default (rmcp also rejects
+  non-loopback `Host` headers). All sessions share one `GentleEyeServer`: one vision provider,
+  one recordings service, one dayflow engine. The tool set is identical to stdio.
+- `GET /healthz` returns `{"ok":true,"version":"…","tools":18}`.
+- Each request and error is logged to stderr with method, path, session id, status, latency.
+- A user unit is in `deploy/gentle-eye-mcp.service` (provider settings come from its
+  `Environment=` lines; install and enable it yourself).
+- Claude Code client config (`~/.claude.json`, under `mcpServers`):
+
+```json
+"gentle-eye": { "type": "http", "url": "http://127.0.0.1:7418/mcp" }
+```
+
+---
+
 ## How the pieces compose
 
 None of these tools is meant to be used alone. The chains that matter:
@@ -361,7 +386,7 @@ watch). They are mirrors, not alternatives.
 | `scrap` 0.5 | display capture | handles are **thread-affine** — a capture source cannot be `Send` |
 | `x11rb` | window geometry, idle detection | **X11 only**; `--window` misreports on macOS/Wayland (a known gap) |
 | `atspi` | accessibility tree regions | needs the a11y bus; absent under some sandboxes |
-| `rmcp` 0.1 | the MCP server | — |
+| `rmcp` 1.4 | the MCP server | — |
 | `reqwest` | vision providers, daemon client | split connect/read timeouts matter (cold loads reach ~95 s) |
 | `rusqlite` | the timeline store | one store, shared by every surface |
 | `image` | PNG encode/decode | — |
