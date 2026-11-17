@@ -229,10 +229,15 @@ impl OllamaProvider {
         self.keep_alive.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    /// Build from a [`VisionConfig`]. The base URL is read from `OLLAMA_HOST`
-    /// (or `OLLAMA_URL`), defaulting to `http://localhost:11434`.
+    /// Build from a [`VisionConfig`]. The base URL is read from
+    /// `GENTLE_EYE_OLLAMA_HOST`, then `OLLAMA_HOST` (or `OLLAMA_URL`),
+    /// defaulting to `http://localhost:11434`.
     pub fn new(config: &VisionConfig) -> Result<Self, VisionError> {
-        let base_url = std::env::var("OLLAMA_HOST")
+        let base_url = std::env::var("GENTLE_EYE_OLLAMA_HOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or(())
+            .or_else(|_| std::env::var("OLLAMA_HOST"))
             .or_else(|_| std::env::var("OLLAMA_URL"))
             .unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
         Self::with_url(config, base_url)
