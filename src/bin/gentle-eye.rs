@@ -28,8 +28,9 @@ gentle-eye — screen recording + AI video analysis
 
 USAGE:
   gentle-eye [serve]                                  Run as an MCP server over stdio (default)
-  gentle-eye analyze --image PATH  --prompt TEXT [--provider gemini|ollama]
-  gentle-eye analyze --video PATH  --prompt TEXT [--start S --end E] [--provider …]
+  gentle-eye analyze --image PATH  --prompt TEXT [--provider ollama|gemini] [--model NAME]
+  gentle-eye analyze --video PATH  --prompt TEXT [--start S --end E] [--provider ollama|gemini] [--model NAME]
+  gentle-eye models  [--provider ollama|gemini]       List the LIVE vision models of a provider (read-only, no generation call)
   gentle-eye record  [--duration SECS] [--fps N] [--out FILE.mp4] [--display IDX|LABEL]
   gentle-eye capture-stream --url URL [--out DIR] [--region x,y,w,h]   Grab one frame from a stream (ATEM/RTSP/HTTP); --region crops (normalized 0-1)
   gentle-eye list    [--status all|recording|completed|cancelled|failed] [--limit N]
@@ -47,7 +48,7 @@ USAGE:
   gentle-eye annotate --image IN.png --out OUT.png --box x,y,w,h [--label TEXT] [--box ... --label ...] [--color r,g,b]   Draw boxes+labels on an image (headless; agent-driven)
   gentle-eye redpen-list [--limit N]                  List redpen annotation captures (newest first) for the agent to ingest
   gentle-eye redpen-analyze [--image PATH] [--prompt TEXT] [--provider gemini|ollama]   Send a redpen capture (default: latest) + its boxes to vision AI
-  gentle-eye provider-info [--provider gemini|ollama]
+  gentle-eye provider-info [--provider ollama|gemini] [--model NAME]
   gentle-eye regions [--depth window|pane|element|text] [--display IDX]   Structure the screen into boxes, in reading order
 
   gentle-eye frames --video PATH --out DIR [--fps N] [--dedup none|gentle|medium|aggressive]   Frames of a recording: ffmpeg's timestamp + a sharpness score per row (primitive 1; default 1 fps, medium)
@@ -65,7 +66,10 @@ USAGE:
   gentle-eye mcp-http [--bind 127.0.0.1:7418]         ONE shared MCP server over streamable HTTP (/mcp, /healthz)
   gentle-eye help
 
-Env: GENTLE_EYE_PROVIDER, GEMINI_API_KEY/GOOGLE_API_KEY, OLLAMA_HOST, OLLAMA_PORT,
+Provider: ollama unless the config file, GENTLE_EYE_PROVIDER or --provider names gemini (billed per call).
+          --model sets the model of the provider in use.
+Env: GENTLE_EYE_PROVIDER, GENTLE_EYE_OLLAMA_MODEL, GENTLE_EYE_GEMINI_MODEL, GEMINI_API_KEY/GOOGLE_API_KEY,
+     OLLAMA_HOST, OLLAMA_PORT, GEMINI_BURST_ID (Gemini spend cap),
      GENTLE_EYE_DATA, GENTLE_EYE_FPS, GE_DAYFLOW_ENDPOINT (dayflow ask).
      CLI subcommands print JSON to stdout. Guide: docs/GENTLE_EYE_GUIDE.md";
 
@@ -84,6 +88,7 @@ async fn main() -> ExitCode {
         "serve" => run_serve().await,
         "mcp-http" => run_mcp_http(rest).await,
         "analyze" => run_analyze(rest).await,
+        "models" => run_models(rest).await,
         "record" => run_record(rest).await,
         "capture-stream" => run_capture_stream(rest).await,
         "list" => run_list(rest).await,
@@ -150,14 +155,45 @@ fn parse_status(s: &str) -> Option<RecordingStatus> {
 
 // ---- CLI subcommands -------------------------------------------------------
 
-async fn run_analyze(args: &[String]) -> Result<()> {
+const ANALYZE_HELP: &str = "\
+gentle-eye analyze — ask a vision model about an image or a video
+
+USAGE:
+  gentle-eye analyze --image PATH --prompt TEXT [--provider ollama|gemini] [--model NAME]
+  gentle-eye analyze --video PATH --prompt TEXT [--start S --end E] [--provider ollama|gemini] [--model NAME]
+
+OPTIONS:
+  --provider ollama|gemini   Provider for this call. Without it: GENTLE_EYE_PROVIDER, then the config
+                             file, then ollama. gemini is billed per call.
+  --model NAME               Model for this call, on the provider in use (e.g. minimax-m3:cloud on
+                             ollama, gemini-3.8-flash on gemini). Without it: GENTLE_EYE_OLLAMA_MODEL /
+                             GENTLE_EYE_GEMINI_MODEL, then the config file. `gentle-eye models` lists
+                             what is live.
+  --start S --end E          Seconds; analyze only that part of a video.
+
+Prints JSON: analysis_text, provider, model_used (the bare model name), frames_analyzed and sheets
+(video frames shown to the model), token_count, processing_time_ms.";
+
+/// Apply `--provider` and `--model` to the environment the config loader reads.
+/// `--model` lands on the provider that is active once `--provider`, the
+/// environment and the config file are all taken into account.
+fn apply_provider_flags(args: &[String]) -> Result<()> {
     if let Some(p) = flag(args, "--provider") {
         std::env::set_var("GENTLE_EYE_PROVIDER", p);
     }
-    // --model: the Ollama model (e.g. "qwen3-vl:235b-cloud": multi-frame video review on Ollama Cloud)
     if let Some(m) = flag(args, "--model") {
-        std::env::set_var("GENTLE_EYE_OLLAMA_MODEL", m);
+        let provider = gentle_eye::config::load_config()?.vision.provider;
+        std::env::set_var(gentle_eye::config::model_env_var(&provider), m);
     }
+    Ok(())
+}
+
+async fn run_analyze(args: &[String]) -> Result<()> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{ANALYZE_HELP}");
+        return Ok(());
+    }
+    apply_provider_flags(args)?;
     let prompt = flag(args, "--prompt").ok_or_else(|| anyhow!("--prompt is required"))?;
     let server = GentleEyeServer::new().await?;
 
@@ -546,9 +582,7 @@ async fn run_segment(args: &[String]) -> Result<()> {
     use gentle_eye::target::crop::crop_bgra;
     use gentle_eye::target::model::PixelRect;
 
-    if let Some(p) = flag(args, "--provider") {
-        std::env::set_var("GENTLE_EYE_PROVIDER", p);
-    }
+    apply_provider_flags(args)?;
     let display: usize = match flag(args, "--display") {
         Some(s) => s.parse().context("--display must be an integer index")?,
         None => 0,
@@ -725,9 +759,7 @@ async fn run_redpen_list(args: &[String]) -> Result<()> {
 /// each box's label + normalized/pixel region as text, so the model reasons
 /// spatially instead of hunting for the red rectangles.
 async fn run_redpen_analyze(args: &[String]) -> Result<()> {
-    // Provider: default to gemini for this command (the loop-close target).
-    let provider = flag(args, "--provider").unwrap_or("gemini");
-    std::env::set_var("GENTLE_EYE_PROVIDER", provider);
+    apply_provider_flags(args)?;
 
     // Resolve the image: --image PATH, else the newest *.png in the inbox.
     let dir = Path::new(&std::env::var("HOME").unwrap_or_default()).join(".gentle-eye/redpen");
@@ -930,10 +962,43 @@ async fn run_list(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// List the live vision models of a provider. Metadata routes only: this
+/// never sends a generation request.
+async fn run_models(args: &[String]) -> Result<()> {
+    use gentle_eye::analysis::catalog;
+    let vision = gentle_eye::config::load_config()?.vision;
+    let provider = flag(args, "--provider").unwrap_or(&vision.provider);
+    let listing = match provider {
+        "ollama" => {
+            let host = vision.ollama_base_url();
+            let found = catalog::list_ollama_vision_models(&host, vision.timeout_seconds).await?;
+            serde_json::json!({
+                "provider": "ollama",
+                "host": host,
+                "configured_model": vision.ollama_model,
+                "count": found.models.len(),
+                "models": found.models,
+                "unreadable": found.unreadable,
+            })
+        }
+        "gemini" => {
+            let key = gentle_eye::analysis::gemini::resolve_api_key(vision.gemini_api_key.as_deref())?;
+            let models = catalog::list_gemini_models(&key, vision.timeout_seconds).await?;
+            serde_json::json!({
+                "provider": "gemini",
+                "configured_model": vision.gemini_model,
+                "count": models.len(),
+                "models": models,
+            })
+        }
+        other => return Err(anyhow!("unknown provider '{other}' (ollama | gemini)")),
+    };
+    println!("{}", serde_json::to_string_pretty(&listing)?);
+    Ok(())
+}
+
 async fn run_provider_info(args: &[String]) -> Result<()> {
-    if let Some(p) = flag(args, "--provider") {
-        std::env::set_var("GENTLE_EYE_PROVIDER", p);
-    }
+    apply_provider_flags(args)?;
     let server = GentleEyeServer::new().await?;
     let vision = server.vision();
     let health = vision.health_check().await;

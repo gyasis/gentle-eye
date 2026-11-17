@@ -652,6 +652,8 @@ impl VisionProvider for Counting {
             analysis_text: text,
             provider: "counting".into(),
             model_used: "counting".into(),
+            frames_analyzed: None,
+            sheets: None,
             processing_time_ms: 1,
             token_count: None,
             completed_at: Utc::now(),

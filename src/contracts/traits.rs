@@ -158,9 +158,10 @@ pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
 impl Default for VisionConfig {
     fn default() -> Self {
         Self {
-            provider: "gemini".to_string(),
+            provider: "ollama".to_string(),
             api_key: None,
-            model: DEFAULT_GEMINI_MODEL.to_string(),
+            // Empty selects the provider's own default model.
+            model: String::new(),
             timeout_seconds: 120,
             max_video_size_bytes: 100 * 1024 * 1024, // 100 MB
         }
@@ -191,8 +192,14 @@ pub struct AnalysisResult {
     pub analysis_text: String,
     /// Vision provider used
     pub provider: String,
-    /// Model used for analysis
+    /// Model used for analysis: the bare model name, nothing appended
     pub model_used: String,
+    /// Video frames shown to the model, when the provider sampled frames
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames_analyzed: Option<u32>,
+    /// Contact sheets those frames were tiled onto (contact-sheet mode only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheets: Option<u32>,
     /// Processing time in milliseconds
     pub processing_time_ms: u64,
     /// Token count (if available)

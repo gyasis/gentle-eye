@@ -398,30 +398,28 @@ impl GentleEyeServer {
         }
     }
 
+    /// The provider for one call: the configured one, or a one-off built from
+    /// the per-call `provider` / `model`. A `model` applies to whichever
+    /// provider the call ends up on.
+    fn vision_for(
+        &self,
+        provider: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<Arc<dyn VisionProvider>, GentleEyeError> {
+        if provider.is_none() && model.is_none() {
+            return Ok(self.vision.clone());
+        }
+        build_vision_provider(&per_call_vision_config(&self.config.vision, provider, model))
+    }
+
     async fn tool_analyze_video(&self, input: AnalyzeVideoInput) -> CallToolResult {
         let timeframe = input.timeframe.map(|t| TimeRange {
             start_seconds: t.start_seconds,
             end_seconds: t.end_seconds,
         });
-        // A per-call provider/model builds a one-off provider; otherwise the configured one is used.
-        let vision = if input.provider.is_some() || input.model.is_some() {
-            let mut vc = self.config.vision.clone();
-            if let Some(p) = &input.provider {
-                vc.provider = p.clone();
-            }
-            if let Some(m) = &input.model {
-                if vc.provider == "ollama" {
-                    vc.ollama_model = m.clone();
-                } else {
-                    vc.gemini_model = m.clone();
-                }
-            }
-            match build_vision_provider(&vc) {
-                Ok(v) => v,
-                Err(e) => return err_text(e.to_string()),
-            }
-        } else {
-            self.vision.clone()
+        let vision = match self.vision_for(input.provider.as_deref(), input.model.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return err_text(e.to_string()),
         };
         match vision
             .analyze_video(Path::new(&input.video_path), &input.prompt, timeframe)
@@ -430,6 +428,8 @@ impl GentleEyeServer {
             Ok(result) => ok_json(AnalyzeVideoOutput {
                 analysis_text: result.analysis_text,
                 model_used: result.model_used,
+                frames_analyzed: result.frames_analyzed,
+                sheets: result.sheets,
                 token_count: result.token_count.map(u64::from),
                 processing_time_ms: result.processing_time_ms,
             }),
@@ -438,8 +438,11 @@ impl GentleEyeServer {
     }
 
     async fn tool_analyze_image(&self, input: AnalyzeImageInput) -> CallToolResult {
-        match self
-            .vision
+        let vision = match self.vision_for(input.provider.as_deref(), input.model.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return err_text(e.to_string()),
+        };
+        match vision
             .analyze_image(Path::new(&input.image_path), &input.prompt)
             .await
         {
@@ -741,14 +744,27 @@ impl ServerHandler for GentleEyeServer {
 
 // ---- helpers ---------------------------------------------------------------
 
+/// The configured vision settings with a per-call `provider` and `model`
+/// applied. The model lands on the provider the call uses.
+fn per_call_vision_config(
+    base: &AppVisionConfig,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> AppVisionConfig {
+    let mut vc = base.clone();
+    if let Some(p) = provider {
+        vc.provider = p.to_string();
+    }
+    if let Some(m) = model {
+        vc.set_active_model(m);
+    }
+    vc
+}
+
 fn build_vision_provider(
     cfg: &AppVisionConfig,
 ) -> Result<Arc<dyn VisionProvider>, GentleEyeError> {
-    let model = if cfg.provider == "ollama" {
-        cfg.ollama_model.clone()
-    } else {
-        cfg.gemini_model.clone()
-    };
+    let model = cfg.active_model().to_string();
     let vision_config = VisionConfig {
         provider: cfg.provider.clone(),
         api_key: cfg.gemini_api_key.clone(),
@@ -757,16 +773,7 @@ fn build_vision_provider(
         max_video_size_bytes: 0, // 0 => provider default
     };
     let provider: Arc<dyn VisionProvider> = if cfg.provider == "ollama" {
-        // A full URL in `ollama_host` (scheme, and possibly a path such as the
-        // Atelier governor's /llm/ollama lane) is used verbatim; a bare host still
-        // gets the host:port treatment.
-        let url = if cfg.ollama_host.starts_with("http://")
-            || cfg.ollama_host.starts_with("https://")
-        {
-            cfg.ollama_host.clone()
-        } else {
-            format!("http://{}:{}", cfg.ollama_host, cfg.ollama_port)
-        };
+        let url = cfg.ollama_base_url();
         Arc::new(OllamaProvider::with_url(&vision_config, url)?)
     } else {
         Arc::new(GeminiProvider::new(&vision_config)?)
@@ -982,6 +989,74 @@ mod tests {
             .unwrap()),
             dayflow,
         }
+    }
+
+    #[test]
+    fn a_per_call_model_lands_on_the_provider_the_call_uses() {
+        let base = AppConfig::default().vision;
+        assert_eq!(base.provider, "ollama");
+
+        let on_default = per_call_vision_config(&base, None, Some("minimax-m3:cloud"));
+        assert_eq!(on_default.provider, "ollama");
+        assert_eq!(on_default.ollama_model, "minimax-m3:cloud");
+        assert_eq!(on_default.gemini_model, base.gemini_model);
+
+        let on_gemini = per_call_vision_config(&base, Some("gemini"), Some("gemini-3.8-flash"));
+        assert_eq!(on_gemini.provider, "gemini");
+        assert_eq!(on_gemini.gemini_model, "gemini-3.8-flash");
+        assert_eq!(on_gemini.ollama_model, base.ollama_model);
+
+        let provider_only = per_call_vision_config(&base, Some("gemini"), None);
+        assert_eq!(provider_only.gemini_model, base.gemini_model);
+    }
+
+    #[test]
+    fn a_built_provider_carries_the_routed_model() {
+        let base = AppConfig::default().vision;
+        let ollama =
+            build_vision_provider(&per_call_vision_config(&base, Some("ollama"), Some("m:cloud")))
+                .unwrap();
+        assert_eq!((ollama.name(), ollama.model()), ("ollama", "m:cloud"));
+
+        let mut keyed = base.clone();
+        keyed.gemini_api_key = Some("test-key".into());
+        let gemini = build_vision_provider(&per_call_vision_config(
+            &keyed,
+            Some("gemini"),
+            Some("gemini-3.8-flash"),
+        ))
+        .unwrap();
+        assert_eq!((gemini.name(), gemini.model()), ("gemini", "gemini-3.8-flash"));
+    }
+
+    #[test]
+    fn a_call_with_no_overrides_uses_the_configured_provider() {
+        let s = test_server();
+        let vision = s.vision_for(None, None).unwrap();
+        assert_eq!(vision.model(), "stub");
+        let routed = s.vision_for(None, Some("other:cloud")).unwrap();
+        assert_eq!((routed.name(), routed.model()), ("ollama", "other:cloud"));
+    }
+
+    #[test]
+    fn analyze_image_accepts_a_per_call_provider_and_model() {
+        let input: AnalyzeImageInput = serde_json::from_value(serde_json::json!({
+            "image_path": "/tmp/x.png",
+            "prompt": "p",
+            "provider": "gemini",
+            "model": "gemini-3.8-flash"
+        }))
+        .unwrap();
+        assert_eq!(input.provider.as_deref(), Some("gemini"));
+        assert_eq!(input.model.as_deref(), Some("gemini-3.8-flash"));
+
+        let bare: AnalyzeImageInput =
+            serde_json::from_value(serde_json::json!({"image_path": "/tmp/x.png", "prompt": "p"}))
+                .unwrap();
+        assert!(bare.provider.is_none() && bare.model.is_none());
+
+        let schema = serde_json::to_string(&*schema_for::<AnalyzeImageInput>()).unwrap();
+        assert!(schema.contains("\"provider\"") && schema.contains("\"model\""), "{schema}");
     }
 
     fn body_of(result: &CallToolResult) -> String {

@@ -1023,6 +1023,8 @@ mod tests {
                 analysis_text: format!("served by {} #{n}", self.name),
                 provider: self.name.to_string(),
                 model_used: self.name.to_string(),
+                frames_analyzed: None,
+                sheets: None,
                 processing_time_ms: 1,
                 token_count: None,
                 completed_at: Utc::now(),

@@ -11,13 +11,14 @@
 //! current one — the recovered spec's `gemini-2.0-flash` is stale; the model is
 //! always overridable via `VisionConfig.model` / `gentle-eye.toml`.
 
+use crate::analysis::gemini_usage;
 use crate::contracts::errors::VisionError;
 use crate::contracts::traits::{AnalysisResult, TimeRange, VisionConfig, VisionProvider};
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::Utc;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -63,24 +64,32 @@ pub struct GeminiProvider {
     model: String,
     max_video_size: u64,
     timeout_seconds: u64,
+    /// Where calls are logged and burst caps are read. `None` when the home
+    /// directory cannot be resolved.
+    usage_dir: Option<PathBuf>,
+}
+
+/// The Gemini API key: the configured one, then `GEMINI_API_KEY`, then
+/// `GOOGLE_API_KEY`.
+pub fn resolve_api_key(configured: Option<&str>) -> Result<String, VisionError> {
+    configured
+        .map(str::to_string)
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+        .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+        .ok_or_else(|| {
+            VisionError::Unavailable(
+                "Gemini API key not set (config.api_key / GEMINI_API_KEY / GOOGLE_API_KEY)"
+                    .to_string(),
+            )
+        })
 }
 
 impl GeminiProvider {
     /// Build from a [`VisionConfig`]. The API key is taken from the config, then
     /// `GEMINI_API_KEY`, then `GOOGLE_API_KEY`.
     pub fn new(config: &VisionConfig) -> Result<Self, VisionError> {
-        let api_key = config
-            .api_key
-            .clone()
-            .filter(|k| !k.is_empty())
-            .or_else(|| std::env::var("GEMINI_API_KEY").ok())
-            .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
-            .ok_or_else(|| {
-                VisionError::Unavailable(
-                    "Gemini API key not set (config.api_key / GEMINI_API_KEY / GOOGLE_API_KEY)"
-                        .to_string(),
-                )
-            })?;
+        let api_key = resolve_api_key(config.api_key.as_deref())?;
         let timeout_seconds = config.timeout_seconds.max(1);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_seconds))
@@ -100,6 +109,7 @@ impl GeminiProvider {
                 DEFAULT_GEMINI_MAX_VIDEO_SIZE
             },
             timeout_seconds,
+            usage_dir: gemini_usage::default_dir(),
         })
     }
 
@@ -131,12 +141,28 @@ impl GeminiProvider {
     }
 
     /// POST one inline part to `generateContent` and return (text, token_count).
+    ///
+    /// The call is refused when the active burst is at its cap, and every
+    /// answered call is appended to the shared Gemini usage log under `cmd`.
     async fn generate(
         &self,
+        cmd: &str,
         mime: &str,
         b64: String,
         prompt: &str,
     ) -> Result<(String, Option<u32>), VisionError> {
+        let burst = gemini_usage::burst_id_from_env();
+        match &self.usage_dir {
+            Some(dir) => gemini_usage::burst_guard(dir, burst.as_deref())?,
+            None if burst.is_some() => {
+                return Err(VisionError::SpendCapReached(
+                    "GEMINI_BURST_ID is set but the home directory holding the burst caps \
+                     cannot be resolved"
+                        .to_string(),
+                ))
+            }
+            None => {}
+        }
         let body = build_gemini_request(mime, &b64, prompt);
         let resp = self
             .client
@@ -150,6 +176,12 @@ impl GeminiProvider {
         let text = resp.text().await.map_err(|e| self.map_http_err(e))?;
         if !(200..300).contains(&status) {
             return Err(classify_http_error(status, &text));
+        }
+        match &self.usage_dir {
+            Some(dir) => gemini_usage::log_call(dir, cmd, &self.model, &text, burst.as_deref()),
+            None => eprintln!(
+                "[gentle-eye] gemini usage not logged: the home directory cannot be resolved"
+            ),
         }
         parse_gemini_response(&text)
     }
@@ -190,12 +222,14 @@ impl VisionProvider for GeminiProvider {
         let mime = guess_mime(&send_path);
         let b64 = read_as_base64(&send_path)?;
         let started = Instant::now();
-        let (analysis_text, token_count) = self.generate(&mime, b64, prompt).await?;
+        let (analysis_text, token_count) = self.generate("analyze video", &mime, b64, prompt).await?;
         Ok(AnalysisResult {
             request_id: Uuid::new_v4(),
             analysis_text,
             provider: self.name().to_string(),
             model_used: self.model.clone(),
+            frames_analyzed: None,
+            sheets: None,
             processing_time_ms: started.elapsed().as_millis() as u64,
             token_count,
             completed_at: Utc::now(),
@@ -212,12 +246,14 @@ impl VisionProvider for GeminiProvider {
         let mime = guess_mime(image_path);
         let b64 = read_as_base64(image_path)?;
         let started = Instant::now();
-        let (analysis_text, token_count) = self.generate(&mime, b64, prompt).await?;
+        let (analysis_text, token_count) = self.generate("analyze image", &mime, b64, prompt).await?;
         Ok(AnalysisResult {
             request_id: Uuid::new_v4(),
             analysis_text,
             provider: self.name().to_string(),
             model_used: self.model.clone(),
+            frames_analyzed: None,
+            sheets: None,
             processing_time_ms: started.elapsed().as_millis() as u64,
             token_count,
             completed_at: Utc::now(),

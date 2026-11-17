@@ -186,6 +186,15 @@ pub struct AnalyzeImageInput {
     /// - "Read the values off this chart"
     #[schemars(length(max = 10000))]
     pub prompt: String,
+
+    /// Optional provider for THIS call ("ollama" or "gemini"), overriding the configured one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Optional model for THIS call, e.g. "minimax-m3:cloud" (Ollama) or "gemini-3.8-flash" (Gemini).
+    /// It applies to the provider this call uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Output for the `analyze_video` tool
@@ -194,8 +203,16 @@ pub struct AnalyzeVideoOutput {
     /// The vision AI's analysis of the video content
     pub analysis_text: String,
 
-    /// The AI model that performed the analysis
+    /// The AI model that performed the analysis (the bare model name)
     pub model_used: String,
+
+    /// Number of video frames shown to the model (when the provider samples frames)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frames_analyzed: Option<u32>,
+
+    /// Number of contact sheets those frames were tiled onto (contact-sheet mode only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sheets: Option<u32>,
 
     /// Number of tokens used (if available from provider)
     #[serde(skip_serializing_if = "Option::is_none")]
