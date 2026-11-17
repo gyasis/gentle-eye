@@ -12,24 +12,65 @@ use std::fs;
 /// 1. Environment variables (highest)
 /// 2. Configuration file (~/.config/gentle-eye/config.toml)
 /// 3. Default values (lowest)
+///
+/// The Ollama endpoint is the exception: see [`apply_ollama_host`].
 pub fn load_config() -> Result<AppConfig, ConfigError> {
     let config_path = AppConfig::config_file_path();
 
     // Start with defaults
-    let mut config = if config_path.exists() {
+    let (mut config, file_pins_host) = if config_path.exists() {
         let content = fs::read_to_string(&config_path)?;
-        toml::from_str(&content)?
+        let pins = file_sets_ollama_host(&content);
+        (toml::from_str(&content)?, pins)
     } else {
-        AppConfig::default()
+        (AppConfig::default(), false)
     };
 
     // Apply environment variable overrides
     apply_env_overrides(&mut config);
+    apply_ollama_host(&mut config, file_pins_host);
 
     // Validate the final configuration
     config.validate()?;
 
     Ok(config)
+}
+
+/// True when the config file names `vision.ollama_host` itself.
+fn file_sets_ollama_host(content: &str) -> bool {
+    toml::from_str::<toml::Value>(content)
+        .ok()
+        .and_then(|v| v.get("vision")?.get("ollama_host").map(|_| ()))
+        .is_some()
+}
+
+/// Resolve the Ollama endpoint. First match wins:
+/// 1. `GENTLE_EYE_OLLAMA_HOST`, the gentle-eye-only override.
+/// 2. `vision.ollama_host` in the config file. A shell-wide `OLLAMA_HOST`
+///    serves other tools and must not move gentle-eye off the endpoint its
+///    config pins (for example a governor URL), so it is ignored here.
+/// 3. `OLLAMA_HOST` and `OLLAMA_PORT`.
+/// 4. The built-in default.
+fn apply_ollama_host(config: &mut AppConfig, file_pins_host: bool) {
+    if let Some(raw) = non_empty_env("GENTLE_EYE_OLLAMA_HOST") {
+        set_ollama_host(config, &raw);
+        return;
+    }
+    if file_pins_host {
+        return;
+    }
+    if let Some(raw) = non_empty_env("OLLAMA_HOST") {
+        set_ollama_host(config, &raw);
+    }
+    if let Ok(port_str) = std::env::var("OLLAMA_PORT") {
+        if let Ok(port) = port_str.parse::<u16>() {
+            config.vision.ollama_port = port;
+        }
+    }
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 /// The environment variable that carries the model of `provider`.
@@ -85,45 +126,36 @@ fn apply_env_overrides(config: &mut AppConfig) {
             config.recording.max_duration_seconds = duration;
         }
     }
+}
 
-    // OLLAMA_HOST -> vision.ollama_host (+ port). Accepts a bare host, "host:port", or a full
-    // URL ("http://host:port[/]") and normalizes it so the downstream `http://{host}:{port}`
-    // formatter never doubles the scheme/port. (fix 2026-06-27: env held a full URL -> doubled.)
-    if let Ok(raw) = std::env::var("OLLAMA_HOST") {
-        let s = raw.trim().trim_end_matches('/');
-        let has_scheme = s.starts_with("http://") || s.starts_with("https://");
-        let body = s
-            .strip_prefix("http://")
-            .or_else(|| s.strip_prefix("https://"))
-            .unwrap_or(s);
-        if body.contains('/') {
-            // PATH-PREFIXED endpoint (e.g. the Atelier governor's memory-governed
-            // lane, http://<mac>:8799/llm/ollama). Keep it VERBATIM — splitting it
-            // into host+port drops the prefix and every call 404s. Downstream
-            // (mcp/server.rs) passes a full URL through untouched.
-            config.vision.ollama_host = if has_scheme {
-                s.to_string()
-            } else {
-                format!("http://{s}")
-            };
+/// Store an endpoint in `vision.ollama_host` (+ port). Accepts a bare host,
+/// "host:port", or a full URL ("http://host:port[/]"), normalized so the
+/// downstream `http://{host}:{port}` formatter never doubles the scheme or port.
+fn set_ollama_host(config: &mut AppConfig, raw: &str) {
+    let s = raw.trim().trim_end_matches('/');
+    let has_scheme = s.starts_with("http://") || s.starts_with("https://");
+    let body = s
+        .strip_prefix("http://")
+        .or_else(|| s.strip_prefix("https://"))
+        .unwrap_or(s);
+    if body.contains('/') {
+        // A path-prefixed endpoint (such as a governor lane, http://<mac>:8799/llm/ollama)
+        // stays verbatim: splitting it into host+port drops the prefix and every call 404s.
+        config.vision.ollama_host = if has_scheme {
+            s.to_string()
         } else {
-            match body.rsplit_once(':') {
-                Some((h, p)) if !h.is_empty() => {
-                    config.vision.ollama_host = h.to_string();
-                    if let Ok(port) = p.parse::<u16>() {
-                        config.vision.ollama_port = port;
-                    }
+            format!("http://{s}")
+        };
+    } else {
+        match body.rsplit_once(':') {
+            Some((h, p)) if !h.is_empty() => {
+                config.vision.ollama_host = h.to_string();
+                if let Ok(port) = p.parse::<u16>() {
+                    config.vision.ollama_port = port;
                 }
-                _ if !body.is_empty() => config.vision.ollama_host = body.to_string(),
-                _ => {}
             }
-        }
-    }
-
-    // OLLAMA_PORT -> vision.ollama_port
-    if let Ok(port_str) = std::env::var("OLLAMA_PORT") {
-        if let Ok(port) = port_str.parse::<u16>() {
-            config.vision.ollama_port = port;
+            _ if !body.is_empty() => config.vision.ollama_host = body.to_string(),
+            _ => {}
         }
     }
 }
@@ -182,5 +214,42 @@ mod tests {
         assert_eq!(config.vision.ollama_model, "minimax-m3:cloud");
         assert_eq!(config.vision.gemini_model, defaults.gemini_model);
         env::remove_var("GENTLE_EYE_OLLAMA_MODEL");
+    }
+
+    #[test]
+    fn file_host_detection_reads_the_vision_table() {
+        assert!(file_sets_ollama_host("[vision]\nollama_host = \"http://gov:8799/llm/ollama\"\n"));
+        assert!(!file_sets_ollama_host("[vision]\nollama_model = \"m\"\n"));
+        assert!(!file_sets_ollama_host("ollama_host = \"x\"\n"));
+    }
+
+    #[test]
+    fn ollama_host_order_gentle_eye_env_then_file_then_shell_env() {
+        let gov = "http://gov:8799/llm/ollama";
+        env::remove_var("GENTLE_EYE_OLLAMA_HOST");
+        env::remove_var("OLLAMA_PORT");
+        env::set_var("OLLAMA_HOST", "http://raw:11434");
+
+        // A host pinned in the file beats the shell-wide OLLAMA_HOST.
+        let mut config = AppConfig::default();
+        config.vision.ollama_host = gov.into();
+        apply_ollama_host(&mut config, true);
+        assert_eq!(config.vision.ollama_host, gov);
+
+        // Without a pinned host, OLLAMA_HOST applies.
+        let mut config = AppConfig::default();
+        apply_ollama_host(&mut config, false);
+        assert_eq!(config.vision.ollama_host, "raw");
+        assert_eq!(config.vision.ollama_port, 11434);
+
+        // GENTLE_EYE_OLLAMA_HOST beats the file.
+        env::set_var("GENTLE_EYE_OLLAMA_HOST", "http://other:8799/llm/ollama");
+        let mut config = AppConfig::default();
+        config.vision.ollama_host = gov.into();
+        apply_ollama_host(&mut config, true);
+        assert_eq!(config.vision.ollama_host, "http://other:8799/llm/ollama");
+
+        env::remove_var("GENTLE_EYE_OLLAMA_HOST");
+        env::remove_var("OLLAMA_HOST");
     }
 }

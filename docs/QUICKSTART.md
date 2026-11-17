@@ -117,7 +117,8 @@ old process until it re-spawns). The CLI picks up changes immediately.
 | `GENTLE_EYE_GEMINI_MODEL` | model used when the provider is gemini |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Gemini auth |
 | `GEMINI_BURST_ID` | Gemini spend cap: calls are refused once the burst's logged spend reaches its `cap_usd` — see `docs/VISION_METHODS.md` |
-| `OLLAMA_HOST` / `OLLAMA_PORT` | Ollama endpoint (default `localhost:11434`). On a shared box point it at the Atelier **governor**, `http://$ATELIER_HOST:8799/llm/ollama`, never raw `:11434` — see `docs/VISION_METHODS.md` |
+| `GENTLE_EYE_OLLAMA_HOST` | Ollama endpoint for gentle-eye only. Wins over the config file and over `OLLAMA_HOST`. |
+| `OLLAMA_HOST` / `OLLAMA_PORT` | Ollama endpoint (default `localhost:11434`), used only when the config file sets no `vision.ollama_host`. A shell-wide `OLLAMA_HOST` meant for other tools therefore cannot move gentle-eye off the endpoint its config pins. On a shared box point it at the Atelier **governor**, `http://$ATELIER_HOST:8799/llm/ollama`, never raw `:11434` — see `docs/VISION_METHODS.md` |
 | `GENTLE_EYE_DISPLAY` | display index to capture (default 0) |
 | `GENTLE_EYE_DATA` | storage base dir for recordings |
 

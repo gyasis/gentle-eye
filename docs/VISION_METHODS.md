@@ -128,8 +128,12 @@ Check it: `gentle-eye provider-info --provider gemini` returns
 
 ### Ollama — local, free, private — through the Atelier governor
 
-`OllamaProvider` reads **`OLLAMA_HOST`** (or `OLLAMA_URL`), default
-`http://localhost:11434`; model default **`qwen2.5vl:7b`**, overridable via
+The endpoint resolves in this order, first match wins:
+**`GENTLE_EYE_OLLAMA_HOST`** → `vision.ollama_host` in the config file →
+`OLLAMA_HOST` / `OLLAMA_PORT` (or `OLLAMA_URL` in the library API) →
+`http://localhost:11434`. The config file beats the generic `OLLAMA_HOST`, so a
+shell that exports `OLLAMA_HOST` for other tools cannot pull gentle-eye off the
+governor its config names. Check the result with `gentle-eye models` (`host`); model default **`qwen2.5vl:7b`**, overridable via
 `--model` / `GENTLE_EYE_OLLAMA_MODEL` / `ollama_model` in the config file.
 
 **Point it at the governor, not at raw ollama.** The Atelier governor admits,

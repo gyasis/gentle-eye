@@ -69,7 +69,7 @@ USAGE:
 Provider: ollama unless the config file, GENTLE_EYE_PROVIDER or --provider names gemini (billed per call).
           --model sets the model of the provider in use.
 Env: GENTLE_EYE_PROVIDER, GENTLE_EYE_OLLAMA_MODEL, GENTLE_EYE_GEMINI_MODEL, GEMINI_API_KEY/GOOGLE_API_KEY,
-     OLLAMA_HOST, OLLAMA_PORT, GEMINI_BURST_ID (Gemini spend cap),
+     GENTLE_EYE_OLLAMA_HOST (wins), config ollama_host, then OLLAMA_HOST, OLLAMA_PORT, GEMINI_BURST_ID (Gemini spend cap),
      GENTLE_EYE_DATA, GENTLE_EYE_FPS, GE_DAYFLOW_ENDPOINT (dayflow ask).
      CLI subcommands print JSON to stdout. Guide: docs/GENTLE_EYE_GUIDE.md";
 
