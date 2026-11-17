@@ -365,7 +365,9 @@ impl VisionProvider for OllamaProvider {
                 request_id: Uuid::new_v4(),
                 analysis_text,
                 provider: self.name().to_string(),
-                model_used: format!("{} ({} frames on {} sheets)", self.model, frames.len(), sheets.len()),
+                model_used: self.model.clone(),
+                frames_analyzed: Some(frames.len() as u32),
+                sheets: Some(sheets.len() as u32),
                 processing_time_ms: started.elapsed().as_millis() as u64,
                 token_count,
                 completed_at: Utc::now(),
@@ -385,7 +387,9 @@ impl VisionProvider for OllamaProvider {
                 request_id: Uuid::new_v4(),
                 analysis_text,
                 provider: self.name().to_string(),
-                model_used: format!("{} ({} frames)", self.model, frames.len()),
+                model_used: self.model.clone(),
+                frames_analyzed: Some(frames.len() as u32),
+                sheets: None,
                 processing_time_ms: started.elapsed().as_millis() as u64,
                 token_count,
                 completed_at: Utc::now(),
@@ -411,6 +415,8 @@ impl VisionProvider for OllamaProvider {
             analysis_text,
             provider: self.name().to_string(),
             model_used: self.model.clone(),
+            frames_analyzed: Some(1),
+            sheets: None,
             processing_time_ms: started.elapsed().as_millis() as u64,
             token_count,
             completed_at: Utc::now(),
@@ -434,6 +440,8 @@ impl VisionProvider for OllamaProvider {
             analysis_text,
             provider: self.name().to_string(),
             model_used: self.model.clone(),
+            frames_analyzed: None,
+            sheets: None,
             processing_time_ms: started.elapsed().as_millis() as u64,
             token_count,
             completed_at: Utc::now(),
@@ -922,5 +930,123 @@ mod residency_tests {
         // Does not panic, does not change behaviour.
         p.set_keep_alive(Some("1860s".into()));
         assert_eq!(p.name(), "ignorer");
+    }
+}
+
+#[cfg(test)]
+mod result_shape_tests {
+    use super::*;
+
+    /// A loopback stand-in for Ollama: answers every request with `reply`.
+    async fn stub_ollama(reply: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    let mut buf = [0u8; 65536];
+                    loop {
+                        let Ok(n) = sock.read(&mut buf).await else { return };
+                        if n == 0 {
+                            return;
+                        }
+                        seen.extend_from_slice(&buf[..n]);
+                        let Some(head_end) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&seen[..head_end]).to_ascii_lowercase();
+                        let length: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        if seen.len() >= head_end + 4 + length {
+                            break;
+                        }
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        reply.len(),
+                        reply
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        url
+    }
+
+    fn stub_provider(model: &str, url: String) -> OllamaProvider {
+        OllamaProvider::with_url(
+            &VisionConfig {
+                provider: "ollama".to_string(),
+                api_key: None,
+                model: model.to_string(),
+                timeout_seconds: 30,
+                max_video_size_bytes: 0,
+            },
+            url,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_image_result_names_the_bare_model_and_no_frames() {
+        let url = stub_ollama(r#"{"response":"a window","eval_count":7}"#).await;
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        image::RgbImage::from_pixel(8, 8, image::Rgb([200, 30, 30])).save(&png).unwrap();
+
+        let result = stub_provider("minimax-m3:cloud", url)
+            .analyze_image(&png, "what is this?")
+            .await
+            .unwrap();
+        assert_eq!(result.model_used, "minimax-m3:cloud");
+        assert_eq!(result.frames_analyzed, None);
+        assert_eq!(result.sheets, None);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["model_used"], "minimax-m3:cloud");
+        assert!(json.get("frames_analyzed").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_video_result_keeps_frame_counts_out_of_the_model_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        let made = Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10"])
+            .arg(&clip)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("skipped: ffmpeg is not available to make a test clip");
+            return;
+        }
+        let url = stub_ollama(r#"{"response":"a test card","eval_count":7}"#).await;
+
+        // A `:cloud` model takes the contact-sheet path.
+        let result = stub_provider("minimax-m3:cloud", url.clone())
+            .analyze_video(&clip, "what happens?", None)
+            .await
+            .unwrap();
+        assert_eq!(result.model_used, "minimax-m3:cloud");
+        let frames = result.frames_analyzed.expect("the sheet path reports its frame count");
+        assert!(frames >= 2, "{frames}");
+        assert!(result.sheets.expect("the sheet path reports its sheet count") >= 1);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["model_used"], "minimax-m3:cloud");
+        assert_eq!(json["frames_analyzed"], frames);
+
+        // A local model takes the single-frame path.
+        let result = stub_provider("qwen2.5vl:7b", url)
+            .analyze_video(&clip, "what happens?", None)
+            .await
+            .unwrap();
+        assert_eq!(result.model_used, "qwen2.5vl:7b");
+        assert_eq!(result.frames_analyzed, Some(1));
+        assert_eq!(result.sheets, None);
     }
 }

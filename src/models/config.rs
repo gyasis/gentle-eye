@@ -21,7 +21,7 @@
 //!
 //! // Use default vision configuration
 //! let vision_config = VisionConfig::default();
-//! assert_eq!(vision_config.provider, "gemini");
+//! assert_eq!(vision_config.provider, "ollama");
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -205,7 +205,7 @@ impl RecordingConfig {
 
 /// Default vision provider name.
 fn default_provider() -> String {
-    "gemini".into()
+    "ollama".into()
 }
 
 /// Default Gemini model name.
@@ -240,7 +240,7 @@ fn default_timeout() -> u64 {
 ///
 /// # Defaults
 ///
-/// * `provider` - "gemini"
+/// * `provider` - "ollama"
 /// * `gemini_model` - "gemini-flash-latest"
 /// * `ollama_host` - "localhost"
 /// * `ollama_port` - 11434
@@ -305,7 +305,7 @@ impl VisionConfig {
     /// use gentle_eye::models::config::VisionConfig;
     ///
     /// let config = VisionConfig::new();
-    /// assert_eq!(config.provider, "gemini");
+    /// assert_eq!(config.provider, "ollama");
     /// ```
     pub fn new() -> Self {
         Self::default()
@@ -588,7 +588,7 @@ mod tests {
     fn test_vision_config_default() {
         let config = VisionConfig::default();
 
-        assert_eq!(config.provider, "gemini");
+        assert_eq!(config.provider, "ollama");
         assert!(config.gemini_api_key.is_none());
         assert_eq!(config.gemini_model, "gemini-flash-latest");
         assert_eq!(config.ollama_host, "localhost");
@@ -683,7 +683,8 @@ mod tests {
 
     #[test]
     fn test_vision_config_validate_gemini_no_key() {
-        let config = VisionConfig::default(); // gemini without key
+        let mut config = VisionConfig::default();
+        config.provider = "gemini".to_string(); // gemini without key
         assert!(config.validate().is_err());
     }
 

@@ -32,6 +32,15 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
     Ok(config)
 }
 
+/// The environment variable that carries the model of `provider`.
+pub fn model_env_var(provider: &str) -> &'static str {
+    if provider == "ollama" {
+        "GENTLE_EYE_OLLAMA_MODEL"
+    } else {
+        "GENTLE_EYE_GEMINI_MODEL"
+    }
+}
+
 /// Apply environment variable overrides to configuration
 fn apply_env_overrides(config: &mut AppConfig) {
     // GEMINI_API_KEY -> vision.gemini_api_key
@@ -60,6 +69,13 @@ fn apply_env_overrides(config: &mut AppConfig) {
     if let Ok(model) = std::env::var("GENTLE_EYE_OLLAMA_MODEL") {
         if !model.trim().is_empty() {
             config.vision.ollama_model = model.trim().to_string();
+        }
+    }
+
+    // GENTLE_EYE_GEMINI_MODEL -> vision.gemini_model (e.g. "gemini-3.8-flash")
+    if let Ok(model) = std::env::var("GENTLE_EYE_GEMINI_MODEL") {
+        if !model.trim().is_empty() {
+            config.vision.gemini_model = model.trim().to_string();
         }
     }
 
@@ -141,5 +157,30 @@ mod tests {
         // Clean up
         env::remove_var("GENTLE_EYE_FPS");
         env::remove_var("GENTLE_EYE_PROVIDER");
+    }
+
+    #[test]
+    fn model_env_var_follows_the_provider() {
+        assert_eq!(model_env_var("ollama"), "GENTLE_EYE_OLLAMA_MODEL");
+        assert_eq!(model_env_var("gemini"), "GENTLE_EYE_GEMINI_MODEL");
+    }
+
+    #[test]
+    fn each_model_env_var_sets_only_its_own_provider_model() {
+        let mut config = AppConfig::default();
+        let defaults = config.vision.clone();
+
+        env::set_var("GENTLE_EYE_GEMINI_MODEL", "gemini-3.8-flash");
+        apply_env_overrides(&mut config);
+        assert_eq!(config.vision.gemini_model, "gemini-3.8-flash");
+        assert_eq!(config.vision.ollama_model, defaults.ollama_model);
+        env::remove_var("GENTLE_EYE_GEMINI_MODEL");
+
+        let mut config = AppConfig::default();
+        env::set_var("GENTLE_EYE_OLLAMA_MODEL", "minimax-m3:cloud");
+        apply_env_overrides(&mut config);
+        assert_eq!(config.vision.ollama_model, "minimax-m3:cloud");
+        assert_eq!(config.vision.gemini_model, defaults.gemini_model);
+        env::remove_var("GENTLE_EYE_OLLAMA_MODEL");
     }
 }

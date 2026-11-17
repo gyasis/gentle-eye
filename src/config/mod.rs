@@ -18,6 +18,8 @@
 //! - `GENTLE_EYE_DATA` -> `storage.base_dir`
 //! - `GENTLE_EYE_FPS` -> `recording.fps`
 //! - `GENTLE_EYE_PROVIDER` -> `vision.provider`
+//! - `GENTLE_EYE_OLLAMA_MODEL` -> `vision.ollama_model`
+//! - `GENTLE_EYE_GEMINI_MODEL` -> `vision.gemini_model`
 //!
 //! # Example
 //!
@@ -35,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
-pub use loader::load_config;
+pub use loader::{load_config, model_env_var};
 
 // ============================================================================
 // Configuration Types
@@ -126,6 +128,37 @@ impl Default for VisionConfig {
     }
 }
 
+impl VisionConfig {
+    /// Set the model of the provider that is active in this config.
+    pub fn set_active_model(&mut self, model: &str) {
+        if self.provider == "ollama" {
+            self.ollama_model = model.to_string();
+        } else {
+            self.gemini_model = model.to_string();
+        }
+    }
+
+    /// The model the active provider will be asked for.
+    pub fn active_model(&self) -> &str {
+        if self.provider == "ollama" {
+            &self.ollama_model
+        } else {
+            &self.gemini_model
+        }
+    }
+
+    /// Base URL of the Ollama endpoint. A full URL in `ollama_host` (scheme,
+    /// and possibly a path such as a governor's `/llm/ollama` lane) is used
+    /// verbatim; a bare host gets the `host:port` treatment.
+    pub fn ollama_base_url(&self) -> String {
+        if self.ollama_host.starts_with("http://") || self.ollama_host.starts_with("https://") {
+            self.ollama_host.clone()
+        } else {
+            format!("http://{}:{}", self.ollama_host, self.ollama_port)
+        }
+    }
+}
+
 /// Storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
@@ -164,7 +197,7 @@ fn default_encoder_mode() -> EncoderMode {
 }
 
 fn default_provider() -> String {
-    "gemini".to_string()
+    "ollama".to_string()
 }
 
 fn default_gemini_model() -> String {
@@ -1323,7 +1356,7 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.recording.fps, 1);
         assert_eq!(config.recording.max_duration_seconds, 1800);
-        assert_eq!(config.vision.provider, "gemini");
+        assert_eq!(config.vision.provider, "ollama");
         assert_eq!(config.vision.timeout_seconds, 300);
     }
 
@@ -1334,7 +1367,46 @@ mod tests {
 
     #[test]
     fn test_default_provider() {
-        assert_eq!(default_provider(), "gemini");
+        assert_eq!(default_provider(), "ollama");
+    }
+
+    #[test]
+    fn a_config_file_that_names_no_provider_resolves_to_ollama() {
+        let parsed: AppConfig = toml::from_str("[vision]\ntimeout_seconds = 60\n").unwrap();
+        assert_eq!(parsed.vision.provider, "ollama");
+        let empty: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(empty.vision.provider, "ollama");
+    }
+
+    #[test]
+    fn a_config_file_provider_overrides_the_default() {
+        let parsed: AppConfig = toml::from_str("[vision]\nprovider = \"gemini\"\n").unwrap();
+        assert_eq!(parsed.vision.provider, "gemini");
+    }
+
+    #[test]
+    fn set_active_model_routes_to_the_active_provider() {
+        let mut ollama = VisionConfig { provider: "ollama".into(), ..VisionConfig::default() };
+        let gemini_before = ollama.gemini_model.clone();
+        ollama.set_active_model("minimax-m3:cloud");
+        assert_eq!(ollama.ollama_model, "minimax-m3:cloud");
+        assert_eq!(ollama.gemini_model, gemini_before);
+        assert_eq!(ollama.active_model(), "minimax-m3:cloud");
+
+        let mut gemini = VisionConfig { provider: "gemini".into(), ..VisionConfig::default() };
+        let ollama_before = gemini.ollama_model.clone();
+        gemini.set_active_model("gemini-3.8-flash");
+        assert_eq!(gemini.gemini_model, "gemini-3.8-flash");
+        assert_eq!(gemini.ollama_model, ollama_before);
+        assert_eq!(gemini.active_model(), "gemini-3.8-flash");
+    }
+
+    #[test]
+    fn ollama_base_url_keeps_a_full_url_and_builds_one_from_a_bare_host() {
+        let mut v = VisionConfig::default();
+        assert_eq!(v.ollama_base_url(), "http://localhost:11434");
+        v.ollama_host = "http://10.0.0.5:8799/llm/ollama".into();
+        assert_eq!(v.ollama_base_url(), "http://10.0.0.5:8799/llm/ollama");
     }
 
     #[test]

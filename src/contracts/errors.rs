@@ -161,6 +161,9 @@ pub enum VisionError {
     /// Prompt was invalid or too long
     #[error("Invalid prompt: {0}")]
     InvalidPrompt(String),
+    /// A paid call refused before sending: the spend cap is reached
+    #[error("Spend cap: {0}")]
+    SpendCapReached(String),
     /// Timeframe specified is invalid
     #[error("Invalid timeframe: start ({start_seconds}s) must be less than end ({end_seconds}s)")]
     InvalidTimeframe {

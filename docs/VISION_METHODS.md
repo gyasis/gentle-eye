@@ -45,9 +45,73 @@ IPs, tokens on screen, account pages).
 
 ## Configuring the providers (verified live 2026-09-07)
 
-Both providers implement one trait, `VisionProvider` (`src/contracts/traits.rs`);
-`GENTLE_EYE_PROVIDER=gemini|ollama` (or `--provider` on the CLI) picks between
-them. Nothing else in the codebase has a private path to a model.
+Both providers implement one trait, `VisionProvider` (`src/contracts/traits.rs`).
+Nothing else in the codebase has a private path to a model.
+
+### Which provider and model a call uses
+
+**The default provider is `ollama`.** Gemini is billed per call, so it is used
+only when something names it. Each setting is resolved in this order, first
+match wins:
+
+| Setting | 1. per call | 2. environment | 3. config file (`[vision]`) | 4. built-in |
+|---|---|---|---|---|
+| provider | CLI `--provider`, MCP `provider` | `GENTLE_EYE_PROVIDER` | `provider` | `ollama` |
+| Ollama model | CLI `--model`, MCP `model` | `GENTLE_EYE_OLLAMA_MODEL` | `ollama_model` | `qwen2.5vl:7b` |
+| Gemini model | CLI `--model`, MCP `model` | `GENTLE_EYE_GEMINI_MODEL` | `gemini_model` | `gemini-flash-latest` |
+
+`--model` (and the MCP `model` parameter) sets the model **of the provider the
+call uses**: with `--provider gemini --model gemini-3.8-flash` it is the Gemini
+model, with provider ollama it is the Ollama model. `--provider` and `--model`
+work on `analyze`, `provider-info`, `segment --read` and `redpen-analyze`; the
+MCP tools `analyze_image` and `analyze_video` both take `provider` and `model`.
+
+```bash
+gentle-eye analyze --image shot.png --prompt "what is on screen?"                       # ollama, configured model
+gentle-eye analyze --image shot.png --prompt "..." --model minimax-m3:cloud             # ollama, that model
+gentle-eye analyze --image shot.png --prompt "..." --provider gemini --model gemini-3.8-flash
+gentle-eye analyze --help
+```
+
+**List what is live** before naming a model:
+
+```bash
+gentle-eye models                      # the active provider
+gentle-eye models --provider ollama    # /api/tags, then /api/show per model; keeps capability `vision`, reports `thinking`
+gentle-eye models --provider gemini    # models.list; keeps `generateContent` models, newest first
+```
+
+`models` uses metadata routes only and never sends a generation request.
+`models.list` reports no release date, so "newest first" is the highest version
+number in the model name, with the unversioned `-latest` aliases ahead.
+
+**Result fields.** `model_used` is the bare model name (`minimax-m3:cloud`), so
+it can be compared with `==`. For video on Ollama, `frames_analyzed` is the
+number of frames the model was shown and `sheets` the number of contact sheets
+they were tiled onto; both are absent where they do not apply.
+
+### Gemini spend: usage log and burst cap
+
+Every Gemini generation call appends one JSON line to
+`~/.local/share/gemini-cli/usage.jsonl`, the log the `gemini` CLI writes, so
+`gemini usage` counts gentle-eye calls too:
+
+```json
+{"ts":"…","cmd":"analyze image","cwd":"…","model":"gemini-3.8-flash","in":1684,"out":896,"thinking":1369,"usd":0.009757,"burst":"b…","tool":"gentle-eye"}
+```
+
+- Token counts come from the response's `usageMetadata` (prompt, candidates,
+  thoughts). Thinking tokens bill at the output rate.
+- `usd` comes from the price table in `src/analysis/gemini_usage.rs` (the
+  `gemini` CLI's `PRICES`). A model with no listed price logs `"usd": null` and
+  a warning on stderr; a price is never guessed. For an alias such as
+  `gemini-flash-latest` the price is looked up under the `modelVersion` the API
+  reports, which is then logged as `model_version`.
+- With **`GEMINI_BURST_ID`** set, the line carries `"burst"`, and before each
+  call the spend logged under that burst is summed and compared with `cap_usd`
+  in `~/.local/share/gemini-cli/bursts/<id>.json`. At or over the cap, or with
+  no readable cap file, the call is refused before it is sent. Calls with
+  `"usd": null` count as 0 toward the cap, so name a priced model inside a burst.
 
 ### Gemini — cloud, paid, sharpest
 
@@ -55,7 +119,7 @@ them. Nothing else in the codebase has a private path to a model.
 |---|---|
 | Auth | `GEMINI_API_KEY` or `GOOGLE_API_KEY`, sent as the **`x-goog-api-key` header** — never a `?key=` query parameter. The old query form put the key into every transport-error URL, and reqwest stringifies URLs into its error type; it was fixed 2026-09-06 (`281e36e`) and `map_http_err` now redacts `key=` / `AIza…` from any error text as a second line of defence. |
 | Default model | **`gemini-flash-latest`** — `DEFAULT_GEMINI_MODEL`, defined **once** in `src/contracts/traits.rs` and referenced by `analysis/gemini.rs`, `config/mod.rs` and `models/config.rs`. |
-| Why an alias, not a pin | The previous pinned default `gemini-2.0-flash` has been **deleted** by Google (`NOT_FOUND: "This model is no longer available"`), so every call taking the default was failing at runtime. An alias cannot 404; it can shift behaviour, which is the accepted trade. Override per call with `VisionConfig.model` / `gentle-eye.toml`. |
+| Why an alias, not a pin | The previous pinned default `gemini-2.0-flash` has been **deleted** by Google (`NOT_FOUND: "This model is no longer available"`), so every call taking the default was failing at runtime. An alias cannot 404; it can shift behaviour, which is the accepted trade. Override with `--model` / `GENTLE_EYE_GEMINI_MODEL` / `gemini_model` in the config file. |
 | Deep tier | `DEEP_MODEL = gemini-pro-latest` (`src/analysis/gemini.rs`) — select via config when Flash is not enough. |
 | Historical note | `docs/GENTLE_EYE_PRD.md`, `docs/REBUILD_OVERVIEW.md` and `specs/001-*` still name `gemini-2.0-flash`. They are the **recovered historical spec** and are left as written; the runtime is what is described here. |
 
@@ -66,7 +130,7 @@ Check it: `gentle-eye provider-info --provider gemini` returns
 
 `OllamaProvider` reads **`OLLAMA_HOST`** (or `OLLAMA_URL`), default
 `http://localhost:11434`; model default **`qwen2.5vl:7b`**, overridable via
-`VisionConfig.model`.
+`--model` / `GENTLE_EYE_OLLAMA_MODEL` / `ollama_model` in the config file.
 
 **Point it at the governor, not at raw ollama.** The Atelier governor admits,
 loads and auto-unloads models under a memory budget; raw ollama on that shared
@@ -76,8 +140,8 @@ through the environment — it is never written into this repository:
 
 ```bash
 export OLLAMA_HOST="http://$ATELIER_HOST:8799/llm/ollama"     # the governed lane
-export GENTLE_EYE_PROVIDER=ollama
-gentle-eye analyze --image shot.png --prompt "what is on screen?" --provider ollama
+gentle-eye models --provider ollama                           # the vision models live on that lane
+gentle-eye analyze --image shot.png --prompt "what is on screen?"
 ```
 
 Verified end to end 2026-09-07:

@@ -34,8 +34,12 @@ gitignored — kept on disk for reference, not committed).
 ## What this is
 
 A Rust-language MCP server that gives LLM agents (Claude, others) access to
-**screen capture** and **video understanding** primitives. The video-analysis
-backend is Gemini-flavoured; the recording layer is split as a sub-project
+**screen capture** and **video understanding** primitives. Vision analysis runs
+on one of two providers: `ollama` (the default) or `gemini` (billed per call,
+used only when named). Provider and model selection, the env vars
+(`GENTLE_EYE_PROVIDER`, `GENTLE_EYE_OLLAMA_MODEL`, `GENTLE_EYE_GEMINI_MODEL`,
+`GEMINI_BURST_ID`), `gentle-eye models` and the Gemini usage log are described
+in `docs/VISION_METHODS.md`. The recording layer is split as a sub-project
 under `modules/rust-record/` (not yet rebuilt).
 
 Architecture sketch (from session record):

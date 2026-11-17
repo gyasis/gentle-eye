@@ -417,9 +417,12 @@ gentle-eye is a library, a CLI, and an MCP server, in that order of generality.
 ## Notes
 
 - **fps** is duration-aware — see [`FPS_AND_DAYFLOW.md`](FPS_AND_DAYFLOW.md).
-- **Vision providers:** Gemini (cloud, default model `gemini-flash-latest` —
-  an alias, on purpose) or Ollama (local — point `OLLAMA_HOST` at the Atelier
-  **governor**, `http://$ATELIER_HOST:8799/llm/ollama`, never raw `:11434`).
+- **Vision providers:** Ollama (the default — point `OLLAMA_HOST` at the Atelier
+  **governor**, `http://$ATELIER_HOST:8799/llm/ollama`, never raw `:11434`) or
+  Gemini (cloud, billed per call, used only when named; default model
+  `gemini-flash-latest` — an alias, on purpose). `analyze_image` and
+  `analyze_video` take a per-call `provider` and `model`; `gentle-eye models`
+  lists the live vision models.
   Which to choose, the models on the governed lane by *capability*, and the
   thinking-model caveat: [`VISION_METHODS.md`](VISION_METHODS.md). Env keys:
   [`QUICKSTART.md`](QUICKSTART.md).

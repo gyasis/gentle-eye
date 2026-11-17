@@ -5,7 +5,9 @@
 //! re-exports are added there to avoid unused-import errors under `-D warnings`.
 
 pub mod config;
+pub mod catalog;
 pub mod gemini;
+pub mod gemini_usage;
 pub mod ocr;
 pub mod ollama;
 pub mod traits;

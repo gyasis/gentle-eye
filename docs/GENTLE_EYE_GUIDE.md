@@ -35,7 +35,8 @@ Two cheaper tiers sit beside the models, on purpose: **tesseract** for plain OCR
 (`read-text`), and **geometry** for reading order — which is never a model, because
 the order boxes should be read in is a spatial fact, not an opinion.
 
-**Which provider:** ollama through the Atelier governor is *local, free and
+**Which provider:** ollama is the default, and Gemini runs only when the config
+file, `GENTLE_EYE_PROVIDER` or `--provider` names it. Ollama through the Atelier governor is *local, free and
 private* (default model `qwen2.5vl:7b`; point `OLLAMA_HOST` at the governed
 lane, never at raw ollama); Gemini is *cloud, paid and the sharpest on dense
 text* (default `gemini-flash-latest`, an alias on purpose — the pinned model it
