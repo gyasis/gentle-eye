@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod gemini;
+pub mod gemini_usage;
 pub mod ocr;
 pub mod ollama;
 pub mod traits;
